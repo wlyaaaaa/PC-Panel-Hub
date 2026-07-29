@@ -227,7 +227,7 @@ namespace TURZX.SideScreen
         {
             const float x = 24;
             const float y = 1006;
-            DrawCard(g, x, y, 432, 150, NetGreen);
+            DrawCard(g, x, y, 432, 180, NetGreen);
             DrawText(g, "网络实时速率", fonts.Title, Green, x + 24, y + 17);
 
             DrawFittedText(g, "↓" + FormatRateCompact(First(network == null ? null : network.DownloadBytesPerSecond, network == null ? null : network.RxBytesPerSecond)), new Font[] { fonts.Sans30Bold, fonts.Sans28Bold, fonts.Sans24Bold, fonts.Sans20Bold }, NetGreen, x + 24, y + 39, 176);
@@ -236,17 +236,17 @@ namespace TURZX.SideScreen
             DrawFittedText(g, "↑" + FormatRateCompact(First(network == null ? null : network.UploadBytesPerSecond, network == null ? null : network.TxBytesPerSecond)), new Font[] { fonts.Sans30Bold, fonts.Sans28Bold, fonts.Sans24Bold, fonts.Sans20Bold }, CpuBlue, x + 216, y + 39, 192);
             DrawText(g, "上传速度", fonts.Sans12Bold, Muted, x + 216, y + 72);
 
-            DrawMetricPill(g, fonts, x + 24, y + 105, 90, "延迟 " + FormatMsCompact(network == null ? null : network.PingMs), Hex("#ecfdf5"), Dark);
-            DrawMetricPill(g, fonts, x + 122, y + 105, 90, "抖动 " + FormatMsCompact(network == null ? null : network.JitterMs), Hex("#ecfdf5"), Muted);
-            DrawMetricPill(g, fonts, x + 220, y + 105, 90, "丢包 " + FormatPercent(network == null ? null : network.PacketLossPercent), Hex("#e0f2fe"), CpuBlue);
-            DrawMetricPill(g, fonts, x + 318, y + 105, 90, "DPC " + FormatPercentOneDecimal(network == null ? null : network.DpcPercent), Hex("#fce7f3"), GpuPink);
+            DrawMetricPill(g, fonts, x + 24, y + 105, 188, "延迟 " + FormatMsCompact(network == null ? null : network.PingMs), Hex("#ecfdf5"), Dark);
+            DrawMetricPill(g, fonts, x + 220, y + 105, 188, "抖动 " + FormatMsCompact(network == null ? null : network.JitterMs), Hex("#ecfdf5"), Muted);
+            DrawMetricPill(g, fonts, x + 24, y + 137, 188, "丢包 " + FormatPercent(network == null ? null : network.PacketLossPercent), Hex("#e0f2fe"), CpuBlue);
+            DrawMetricPill(g, fonts, x + 220, y + 137, 188, "DPC " + FormatPercentOneDecimal(network == null ? null : network.DpcPercent), Hex("#fce7f3"), GpuPink);
         }
 
         private static void DrawDisks(Graphics g, FontSet fonts, PhysicalDiskSnapshot[] physicalDisks, DiskSnapshot[] legacyDisks)
         {
             const float x = 24;
-            const float y = 1170;
-            DrawCard(g, x, y, 432, 390, DiskGreen);
+            const float y = 1200;
+            DrawCard(g, x, y, 432, 474, DiskGreen);
             DrawText(g, "物理磁盘 / 实时 I/O", fonts.Title, Green, x + 24, y + 17);
             DrawRightText(g, "最多显示 4 块", fonts.Sans10Bold, Muted, x + 280, y + 18, 128, 14);
 
@@ -260,11 +260,11 @@ namespace TURZX.SideScreen
             {
                 for (int i = 0; i < count; i++)
                 {
-                    float rowY = y + 48 + i * 78;
+                    float rowY = y + 49 + i * 100;
                     DrawPhysicalDiskRow(g, fonts, disks[i], i, x + 24, rowY);
                     if (i < count - 1)
                     {
-                        DrawLine(g, x + 24, rowY + 68, x + 408, rowY + 68, GreenLine, 1.1f);
+                        DrawLine(g, x + 24, rowY + 90, x + 408, rowY + 90, GreenLine, 1.1f);
                     }
                 }
             }
@@ -278,32 +278,32 @@ namespace TURZX.SideScreen
             }
 
             Color accent = index % 3 == 0 ? CpuBlue : index % 3 == 1 ? DiskGreen : GpuPink;
-            DrawText(g, FitText(g, PhysicalDiskDisplayName(disk), fonts.Sans13Bold, 216), fonts.Sans13Bold, Dark, x, y + 1);
-            DrawRightText(g, FitText(g, PhysicalDiskIdentity(disk), fonts.Sans11Bold, 160), fonts.Sans11Bold, Muted, x + 224, y + 3, 160, 16);
+            DrawText(g, FitText(g, PhysicalDiskDisplayName(disk), fonts.Sans14Bold, 236), fonts.Sans14Bold, Dark, x, y + 1);
+            DrawRightText(g, FitText(g, PhysicalDiskIdentity(disk), fonts.Sans12Bold, 140), fonts.Sans12Bold, Muted, x + 244, y + 3, 140, 18);
 
             string capacity = FormatPhysicalDiskCapacity(disk);
-            DrawDiskMetricPill(g, fonts, x, y + 26, 80, PhysicalDiskVolumes(disk), Hex("#f2faf6"), Muted);
-            DrawDiskMetricPill(g, fonts, x + 84, y + 26, 112, capacity, Hex("#ecfdf5"), accent);
-            DrawDiskMetricPill(g, fonts, x + 200, y + 26, 60, "读" + FormatDiskRateCompact(disk.ReadBytesPerSecond), Hex("#e0f2fe"), CpuBlue);
-            DrawDiskMetricPill(g, fonts, x + 264, y + 26, 60, "写" + FormatDiskRateCompact(disk.WriteBytesPerSecond), Hex("#fce7f3"), GpuPink);
-            DrawDiskMetricPill(g, fonts, x + 328, y + 26, 56, "活动" + FormatPercent(disk.ActivityPercent), Hex("#dcfce7"), Green);
+            DrawDiskMetricPill(g, fonts, x, y + 27, 88, PhysicalDiskVolumes(disk), Hex("#f2faf6"), Muted);
+            DrawDiskMetricPill(g, fonts, x + 92, y + 27, 184, capacity, Hex("#ecfdf5"), accent);
+            DrawDiskMetricPill(g, fonts, x + 280, y + 27, 104, "活动 " + FormatPercent(disk.ActivityPercent), Hex("#dcfce7"), Green);
+            DrawDiskMetricPill(g, fonts, x, y + 61, 190, "读取 " + FormatDiskRateCompact(disk.ReadBytesPerSecond), Hex("#e0f2fe"), CpuBlue);
+            DrawDiskMetricPill(g, fonts, x + 194, y + 61, 190, "写入 " + FormatDiskRateCompact(disk.WriteBytesPerSecond), Hex("#fce7f3"), GpuPink);
         }
 
         private static void DrawApps(Graphics g, FontSet fonts, ProcessSnapshot[] processes)
         {
             const float x = 24;
-            const float y = 1574;
-            DrawCard(g, x, y, 432, 330, Indigo);
+            const float y = 1688;
+            DrawCard(g, x, y, 432, 216, Indigo);
             DrawText(g, "应用资源排行", fonts.Title, Green, x + 24, y + 18);
 
             for (int i = 0; i < 3; i++)
             {
-                float rowY = y + 48 + i * 88;
+                float rowY = y + 43 + i * 54;
                 ProcessSnapshot process = processes != null && i < processes.Length ? processes[i] : null;
                 DrawProcessRow(g, fonts, process, i, x + 24, rowY);
                 if (i < 2)
                 {
-                    DrawLine(g, x + 24, rowY + 78, x + 408, rowY + 78, GreenLine, 1.2f);
+                    DrawLine(g, x + 24, rowY + 50, x + 408, rowY + 50, GreenLine, 1.2f);
                 }
             }
         }
@@ -355,8 +355,8 @@ namespace TURZX.SideScreen
 
         private static void DrawDiskMetricPill(Graphics g, FontSet fonts, float x, float y, float width, string text, Color fill, Color color)
         {
-            FillRoundRect(g, x, y, width, 22, 5, fill);
-            DrawCenteredText(g, FitText(g, text, fonts.Mono10Bold, width - 8), fonts.Mono10Bold, color, x, y + 5, width, 13);
+            FillRoundRect(g, x, y, width, 28, 6, fill);
+            DrawCenteredText(g, FitText(g, text, fonts.Mono12Bold, width - 12), fonts.Mono12Bold, color, x, y + 7, width, 15);
         }
 
         private static void DrawMetricBox(Graphics g, FontSet fonts, float x, float y, float width, string label, string value, Color fill, Color color)

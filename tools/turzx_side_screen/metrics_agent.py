@@ -1127,7 +1127,7 @@ def _lhm_sensor_snapshot_from_payload(payload: dict[str, Any]) -> dict[str, Any]
     cpu_temp = None
     cpu_power = None
     cpu_vcore = None
-    cpu_clock_effective = None
+    cpu_clock_average = None
     gpu_voltage = None
     gpu_temp = None
     gpu_power = None
@@ -1149,8 +1149,12 @@ def _lhm_sensor_snapshot_from_payload(payload: dict[str, Any]) -> dict[str, Any]
             cpu_vcore = round(value, 3)
         if lower.endswith("/powers/package") and "gpu" not in lower:
             cpu_power = round(value, 1)
-        if "/clocks/" in lower and lower.endswith("/cores (average effective)"):
-            cpu_clock_effective = round(value, 1)
+        if (
+            value > 0
+            and "/clocks/" in lower
+            and lower.endswith("/cores (average)")
+        ):
+            cpu_clock_average = round(value, 1)
         if "/temperatures/" in lower and "core (tctl/tdie)" in lower:
             cpu_temp = round(value, 1)
         if lower.endswith("/temperatures/system #1") and _valid_temperature(value):
@@ -1201,7 +1205,7 @@ def _lhm_sensor_snapshot_from_payload(payload: dict[str, Any]) -> dict[str, Any]
         "cpu_temperature_celsius": cpu_temp,
         "cpu_power_watts": cpu_power,
         "cpu_core_voltage": cpu_vcore,
-        "cpu_clock_mhz": cpu_clock_effective,
+        "cpu_clock_mhz": cpu_clock_average,
         "gpu_core_voltage": gpu_voltage,
         "gpu_temperature_celsius": gpu_temp,
         "gpu_power_watts": gpu_power,

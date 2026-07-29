@@ -835,7 +835,7 @@ class MetricsAgentTests(unittest.TestCase):
         self.assertEqual(66.4, sensors["cpu_temperature_celsius"])
         self.assertEqual(144.8, sensors["cpu_power_watts"])
         self.assertEqual(1.308, sensors["cpu_core_voltage"])
-        self.assertEqual(1734.0, sensors["cpu_clock_mhz"])
+        self.assertEqual(5557.0, sensors["cpu_clock_mhz"])
         self.assertEqual(0.985, sensors["gpu_core_voltage"])
         self.assertEqual(154.4, sensors["gpu_power_watts"])
         self.assertEqual(54.0, sensors["gpu_temperature_celsius"])
@@ -879,7 +879,7 @@ class MetricsAgentTests(unittest.TestCase):
         self.assertEqual(first_url, second_url)
         self.assertEqual(["http://127.0.0.1:18085/data.json"], attempts)
 
-    def test_lhm_average_clock_without_average_effective_is_not_reported(self):
+    def test_lhm_average_clock_is_reported_without_effective_clock(self):
         payload = {
             "Text": "Sensor",
             "Children": [
@@ -890,6 +890,76 @@ class MetricsAgentTests(unittest.TestCase):
                             "Text": "Clocks",
                             "Children": [
                                 {"Text": "Cores (Average)", "Value": "5557.0 MHz"},
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+
+        sensors = metrics_agent._lhm_sensor_snapshot_from_payload(payload)
+
+        self.assertEqual(5557.0, sensors["cpu_clock_mhz"])
+
+    def test_lhm_effective_clock_without_average_is_not_reported(self):
+        payload = {
+            "Text": "Sensor",
+            "Children": [
+                {
+                    "Text": "CPU",
+                    "Children": [
+                        {
+                            "Text": "Clocks",
+                            "Children": [
+                                {"Text": "Cores (Average Effective)", "Value": "1734.0 MHz"},
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+
+        sensors = metrics_agent._lhm_sensor_snapshot_from_payload(payload)
+
+        self.assertIsNone(sensors["cpu_clock_mhz"])
+
+    def test_lhm_average_clock_wins_regardless_of_sensor_order(self):
+        for clocks in (
+            [
+                {"Text": "Cores (Average)", "Value": "5557.0 MHz"},
+                {"Text": "Cores (Average Effective)", "Value": "1734.0 MHz"},
+            ],
+            [
+                {"Text": "Cores (Average Effective)", "Value": "1734.0 MHz"},
+                {"Text": "Cores (Average)", "Value": "5557.0 MHz"},
+            ],
+        ):
+            with self.subTest(clocks=clocks):
+                payload = {
+                    "Text": "Sensor",
+                    "Children": [
+                        {
+                            "Text": "CPU",
+                            "Children": [{"Text": "Clocks", "Children": clocks}],
+                        }
+                    ],
+                }
+
+                sensors = metrics_agent._lhm_sensor_snapshot_from_payload(payload)
+
+                self.assertEqual(5557.0, sensors["cpu_clock_mhz"])
+
+    def test_lhm_zero_average_clock_is_not_reported(self):
+        payload = {
+            "Text": "Sensor",
+            "Children": [
+                {
+                    "Text": "CPU",
+                    "Children": [
+                        {
+                            "Text": "Clocks",
+                            "Children": [
+                                {"Text": "Cores (Average)", "Value": "0.0 MHz"},
                             ],
                         }
                     ],

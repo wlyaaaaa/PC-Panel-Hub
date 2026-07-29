@@ -4,7 +4,7 @@ Self-hosted realtime dashboard for 480x1920 TURZX USB side screens.
 
 This project replaces the stock TURZX monitoring page with a custom local stack:
 
-- Python metrics agents for CPU/GPU thermals, effective clocks and voltages, FPS, weather, physical-disk I/O, network quality, foreground app, and process ranking.
+- Python metrics agents for CPU/GPU thermals, live average core clocks and voltages, FPS, weather, physical-disk I/O, network quality, foreground app, and process ranking.
 - C# / GDI+ renderer for a dense 480x1920 dashboard.
 - COM7 differential frame streaming for low-interference 1s updates, with stale-data fallback so slow metrics reads do not stall the clock.
 - Bounded JSONL diagnostics and explicit source/error states.

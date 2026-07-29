@@ -531,8 +531,8 @@ try {
             @{ Name = "FPS"; X = 25; Y = 708; R = 5; G = 150; B = 105 },
             @{ Name = "Memory"; X = 25; Y = 852; R = 14; G = 165; B = 233 },
             @{ Name = "Network"; X = 25; Y = 1026; R = 5; G = 150; B = 105 },
-            @{ Name = "PhysicalDisks"; X = 25; Y = 1190; R = 21; G = 128; B = 61 },
-            @{ Name = "Apps"; X = 25; Y = 1594; R = 129; G = 140; B = 248 },
+            @{ Name = "PhysicalDisks"; X = 25; Y = 1220; R = 21; G = 128; B = 61 },
+            @{ Name = "Apps"; X = 25; Y = 1708; R = 129; G = 140; B = 248 },
             @{ Name = "AppsBottom"; X = 25; Y = 1880; R = 129; G = 140; B = 248 }
         )
         foreach ($expected in $expectedAccents) {
@@ -544,8 +544,8 @@ try {
             }
         }
 
-        $cpuBox = $bitmap.GetPixel(322, 1640)
-        $ramBox = $bitmap.GetPixel(398, 1640)
+        $cpuBox = $bitmap.GetPixel(322, 1750)
+        $ramBox = $bitmap.GetPixel(398, 1750)
         if (!($cpuBox.B -gt 220 -and $cpuBox.R -lt 235)) {
             throw "Expected app CPU metric box on the right side, got RGB($($cpuBox.R),$($cpuBox.G),$($cpuBox.B))"
         }
