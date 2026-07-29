@@ -87,7 +87,7 @@ At the measured average:
 A 0.5-second full-frame animation target would require:
 
 ```text
-3,686,400 bytes / 0.5s = about 7.37 MB/s payload
+3,686,400 bytes / 1s = about 3.69 MB/s payload
 ```
 
 That is roughly 4.7x the observed payload rate, before accounting for 250-byte packet overhead, 1 ms periodic sleeps, serial open/close overhead, and device-side consume time. Therefore the current full-screen refresh path cannot support smooth 0.5-second animation.

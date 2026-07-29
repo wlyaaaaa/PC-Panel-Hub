@@ -43,4 +43,12 @@ foreach ($relative in $explicitEntries) {
     }
 }
 
+$config = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $Root "tools\turzx_side_screen\config.json") | ConvertFrom-Json
+if ([int]$config.screen.dataRefreshMs -ne 1000 -or [int]$config.metrics.pollMs -ne 1000) {
+    throw "Runtime config must match the actual 1000ms stream refresh."
+}
+if ([int]$config.ui.maxDiskRows -ne 4) {
+    throw "Runtime config must cap the physical-disk UI at four rows."
+}
+
 Write-Host "Refresh default checks completed."

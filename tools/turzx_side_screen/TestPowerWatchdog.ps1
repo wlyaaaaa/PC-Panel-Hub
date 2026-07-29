@@ -44,6 +44,8 @@ foreach ($pattern in @(
     "duplicate watchdog",
     "HeartbeatStaleSeconds",
     "stream-heartbeat.json",
+    "stream-heartbeat-a.json",
+    "stream-heartbeat-b.json",
     "heartbeat unhealthy",
     "restart-on-start.flag",
     "restart request detected"

@@ -10,6 +10,7 @@ import datetime as dt
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import importlib
 import json
+import math
 import os
 import platform
 import re
@@ -35,11 +36,22 @@ GPU_LAST_GOOD_MAX_AGE_SECONDS = 30.0
 NVIDIA_SMI_TIMEOUT_SECONDS = 0.8
 WEATHER_CACHE_TTL_SECONDS = 600.0
 WEATHER_FAILURE_CACHE_TTL_SECONDS = 30.0
-LHM_SENSOR_URL = "http://127.0.0.1:8085/data.json"
+DEFAULT_LHM_SENSOR_URLS = (
+    "http://127.0.0.1:18085/data.json",
+    "http://127.0.0.1:8085/data.json",
+)
 LHM_SENSOR_CACHE_TTL_SECONDS = 1.0
+LHM_SENSOR_FAILURE_CACHE_TTL_SECONDS = 2.0
+LHM_LAST_GOOD_MAX_AGE_SECONDS = 20.0
+PHYSICAL_DISK_TOPOLOGY_TTL_SECONDS = 60.0
+PHYSICAL_DISK_TOPOLOGY_FAILURE_TTL_SECONDS = 10.0
+SMALL_REMOVABLE_DISK_BYTES = 32_000_000_000
 NETWORK_LATENCY_TTL_SECONDS = 2.0
 NETWORK_PING_TARGET = "223.5.5.5"
-TIMEAUDIT_CACHE_TTL_SECONDS = 1.0
+TIMEAUDIT_CACHE_TTL_SECONDS = 2.0
+TIMEAUDIT_CONNECT_TIMEOUT_SECONDS = 1.0
+TIMEAUDIT_QUERY_TIMEOUT_SECONDS = 1.0
+FPS_SAMPLE_FRESH_SECONDS = 10.0
 TOP_PROCESSES_CACHE_TTL_SECONDS = 5.0
 TOP_PROCESSES_HELPER_MAX_AGE_SECONDS = 10.0
 DEFAULT_DISPLAY_TIMEZONE = "Asia/Shanghai"
@@ -55,6 +67,8 @@ DATA_TRUST_LOG_PATH = os.environ.get(
     os.path.join(os.path.dirname(__file__), "out", "data-trust.jsonl"),
 )
 DATA_TRUST_LOG_INTERVAL_SECONDS = 5.0
+DATA_TRUST_LOG_MAX_BYTES = 2 * 1024 * 1024
+DATA_TRUST_LOG_BACKUP_COUNT = 2
 _sequence = 0
 _gpu_cache_value: dict[str, Any] | None = None
 _gpu_cache_expires_at = 0.0
@@ -64,6 +78,13 @@ _lhm_cache_value: dict[str, Any] | None = None
 _lhm_cache_expires_at = 0.0
 _lhm_cache_lock = threading.Lock()
 _lhm_refreshing = False
+_lhm_last_good_url: str | None = None
+_lhm_last_success_at = 0.0
+_lhm_last_refresh_failed = False
+_physical_disk_topology_cache_value: list[dict[str, Any]] | None = None
+_physical_disk_topology_cache_expires_at = 0.0
+_physical_disk_topology_cache_lock = threading.Lock()
+_physical_disk_topology_refreshing = False
 _timeaudit_cache_value: dict[str, Any] | None = None
 _timeaudit_cache_expires_at = 0.0
 _timeaudit_cache_lock = threading.Lock()
@@ -71,6 +92,9 @@ _timeaudit_refreshing = False
 _weather_cache_value: dict[str, Any] | None = None
 _weather_cache_expires_at = 0.0
 _weather_cache_key: str | None = None
+_weather_cache_lock = threading.Lock()
+_weather_refreshing = False
+_weather_refresh_thread: threading.Thread | None = None
 _config_cache: dict[str, Any] | None = None
 _config_cache_mtime: float | None = None
 _top_processes_cache_value: list[dict[str, Any]] | None = None
@@ -164,6 +188,7 @@ def empty_snapshot() -> dict[str, Any]:
             "humidity_percent": None,
             "wind_text": None,
             "source": "fallback",
+            "status": "unavailable",
             "updated_at": None,
         },
         "alert": {
@@ -217,6 +242,8 @@ def empty_snapshot() -> dict[str, Any]:
             "frame_time_ms": None,
             "status": "idle",
             "source": "fallback",
+            "sample_age_seconds": None,
+            "detail": None,
         },
         "memory": {
             "used_percent": None,
@@ -226,12 +253,22 @@ def empty_snapshot() -> dict[str, Any]:
             "vram_usage_percent": None,
             "vram_used_gb": None,
             "vram_total_gb": None,
+            "motherboard_temperature_celsius": None,
+            "module_temperatures_celsius": [],
             "source": "fallback",
         },
         "disks": [],
+        "physical_disks": [],
         "network": {
             "rx_bytes_per_sec": None,
             "tx_bytes_per_sec": None,
+            "download_bytes_per_second": None,
+            "upload_bytes_per_second": None,
+            "ping_ms": None,
+            "jitter_ms": None,
+            "packet_loss_percent": None,
+            "dpc_percent": None,
+            "latency_status": "connecting",
             "addresses": [],
             "source": "stdlib",
         },
@@ -281,6 +318,7 @@ def build_snapshot() -> dict[str, Any]:
         ("fps", read_fps_snapshot),
         ("memory", read_memory_snapshot),
         ("disks", enumerate_disks),
+        ("physical_disks", read_physical_disks),
         ("network", read_network_snapshot),
         ("top_processes", read_top_processes),
     ]
@@ -298,11 +336,31 @@ def build_snapshot() -> dict[str, Any]:
 
     _merge_gpu_vram_into_memory(snapshot)
     _merge_lhm_sensors(snapshot)
+    snapshot["health"]["refresh_interval_seconds"] = _configured_refresh_interval_seconds()
+    snapshot["health"]["dpc_latency_us"] = None
+    network = snapshot.get("network")
+    dpc_percent = _DPC_TIME_SAMPLER.sample()
+    if isinstance(network, dict) and dpc_percent is not None:
+        network["dpc_percent"] = dpc_percent
+        network["source"] = _append_source(network.get("source"), "pdh")
+
+    fps = snapshot.get("fps")
+    fps_status = fps.get("status") if isinstance(fps, dict) else None
+    if fps_status in {"stale", "error"}:
+        errors.append(
+            {
+                "component": "fps",
+                "error": str(fps.get("detail") or fps_status),
+            }
+        )
     snapshot["health"]["errors"] = errors
     snapshot["health"]["status"] = "ok" if not errors else "degraded"
     snapshot["health"]["detail"] = "模块正常运转中" if not errors else f"采集异常 {len(errors)} 项"
-    snapshot["health"]["refresh_interval_seconds"] = _configured_refresh_interval_seconds()
-    snapshot["health"]["dpc_latency_us"] = _SCHEDULER_LATENCY_SAMPLER.sample()
+    snapshot["alert"] = {
+        "level": "ok" if not errors else "warn",
+        "message": "系统正常" if not errors else f"采集异常 {len(errors)} 项",
+        "items": [str(item.get("component")) for item in errors],
+    }
     snapshot["trust"] = build_trust_snapshot(snapshot)
     _maybe_write_data_trust_log(snapshot)
     return snapshot
@@ -315,7 +373,7 @@ def build_trust_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
         _trust_fps(snapshot.get("fps")),
         _trust_weather(snapshot.get("weather")),
         _trust_memory(snapshot.get("memory")),
-        _trust_disks(snapshot.get("disks")),
+        _trust_disks(snapshot.get("physical_disks")),
         _trust_network(snapshot.get("network")),
         _trust_apps(snapshot.get("top_processes")),
         _trust_health(snapshot.get("health")),
@@ -371,10 +429,17 @@ def _trust_cpu(cpu: Any) -> dict[str, Any]:
             missing.append(key)
             score -= 5
     source = _empty_to_none(data.get("source")) or "fallback"
+    stale = _is_stale_source(source) or data.get("status") == "stale"
     fallback = _is_fallback_source(source)
     if fallback:
         score = min(score, 75)
-    return _trust_item("cpu", "CPU", score, source, missing, fallback, _detail_from_missing("CPU", missing))
+    if stale:
+        score = min(score, 85)
+    item = _trust_item("cpu", "CPU", score, source, missing, fallback, _detail_from_missing("CPU", missing))
+    if stale:
+        item["status"] = "stale"
+        item["detail"] = "CPU 探针短暂失败，使用最近可信值"
+    return item
 
 
 def _trust_gpu(gpu: Any) -> dict[str, Any]:
@@ -389,7 +454,7 @@ def _trust_gpu(gpu: Any) -> dict[str, Any]:
             missing.append(key)
             score -= 4
     source = _empty_to_none(data.get("source")) or "fallback"
-    stale = source.endswith("+stale") or data.get("status") == "stale"
+    stale = _is_stale_source(source) or data.get("status") == "stale"
     fallback = _is_fallback_source(source)
     if fallback:
         score = min(score, 75)
@@ -405,19 +470,40 @@ def _trust_gpu(gpu: Any) -> dict[str, Any]:
 def _trust_fps(fps: Any) -> dict[str, Any]:
     data = fps if isinstance(fps, dict) else {}
     source = _empty_to_none(data.get("source")) or "fallback"
+    status = (_empty_to_none(data.get("status")) or "error").lower()
     missing: list[str] = []
-    score = 100
-    if _parse_float(data.get("current")) is None:
-        missing.append("current")
-        score = 70
-    if _parse_float(data.get("frame_time_ms")) is None:
-        missing.append("frame_time")
-        score = min(score, 75)
-    fallback = _is_fallback_source(source)
-    if fallback:
-        score = min(score, 75)
-    detail = "游戏帧捕获正常" if not missing else "无游戏帧或等待 PresentMon/RTSS"
-    return _trust_item("fps", "FPS", score, source, missing, fallback, detail)
+    fallback = False
+
+    if status == "active":
+        score = 100
+        if _parse_float(data.get("current")) is None:
+            missing.append("current")
+            score = 45
+        if _parse_float(data.get("frame_time_ms")) is None:
+            missing.append("frame_time")
+            score = min(score, 80)
+        detail = "游戏帧捕获正常"
+    elif status == "idle":
+        score = 100
+        detail = "PresentMon 正常，当前没有游戏帧"
+    elif status == "disabled":
+        score = 100
+        detail = "FPS 采集未启用"
+    elif status == "connecting":
+        score = 90
+        detail = "正在连接 PresentMon 数据源"
+    elif status == "stale":
+        score = 55
+        detail = str(data.get("detail") or "帧数据已过期")
+    else:
+        score = 25
+        missing.append("collector")
+        detail = str(data.get("detail") or "帧采集异常")
+
+    item = _trust_item("fps", "FPS", score, source, missing, fallback, detail)
+    if status in {"connecting", "stale", "error", "disabled"}:
+        item["status"] = status
+    return item
 
 
 def _trust_weather(weather: Any) -> dict[str, Any]:
@@ -466,12 +552,37 @@ def _trust_disks(disks: Any) -> dict[str, Any]:
     else:
         bad_rows = 0
         for disk in disk_list:
-            if not isinstance(disk, dict) or _empty_to_none(disk.get("drive")) is None or _parse_float(disk.get("used_percent") if disk.get("used_percent") is not None else disk.get("usage_percent")) is None:
+            if (
+                not isinstance(disk, dict)
+                or (
+                    _empty_to_none(disk.get("device_id")) is None
+                    and _empty_to_none(disk.get("drive")) is None
+                )
+                or _parse_float(
+                    disk.get("used_percent")
+                    if disk.get("used_percent") is not None
+                    else disk.get("usage_percent")
+                )
+                is None
+            ):
                 bad_rows += 1
         if bad_rows:
             missing.append(f"{bad_rows}rows")
             score = max(60, 100 - bad_rows * 10)
-    return _trust_item("disks", "磁盘", score, "stdlib", missing, False, _detail_from_missing("磁盘", missing))
+    sources = {
+        _empty_to_none(disk.get("source"))
+        for disk in disk_list
+        if isinstance(disk, dict) and _empty_to_none(disk.get("source")) is not None
+    }
+    source = "+".join(sorted(sources)) if sources else "win32_cim"
+    stale = any(_is_stale_source(disk_source) for disk_source in sources)
+    if stale:
+        score = min(score, 85)
+    item = _trust_item("disks", "磁盘", score, source, missing, False, _detail_from_missing("磁盘", missing))
+    if stale:
+        item["status"] = "stale"
+        item["detail"] = "磁盘温度探针短暂失败，使用最近可信值"
+    return item
 
 
 def _trust_network(network: Any) -> dict[str, Any]:
@@ -557,6 +668,14 @@ def _is_fallback_source(source: Any) -> bool:
     return not text or text == "fallback" or text.endswith("+fallback")
 
 
+def _is_stale_source(source: Any) -> bool:
+    text = (_empty_to_none(source) or "").lower()
+    return any(
+        token == "stale" or token.endswith("_stale")
+        for token in text.split("+")
+    )
+
+
 def _detail_from_missing(label: str, missing: list[str]) -> str:
     if not missing:
         return f"{label} 数据完整"
@@ -567,9 +686,14 @@ def write_data_trust_log(
     log_path: str | os.PathLike[str],
     trust: dict[str, Any],
     timestamp_unix_ms: int | None = None,
+    *,
+    max_bytes: int = DATA_TRUST_LOG_MAX_BYTES,
+    backup_count: int = DATA_TRUST_LOG_BACKUP_COUNT,
 ) -> None:
     target = os.fspath(log_path)
-    os.makedirs(os.path.dirname(target), exist_ok=True)
+    parent = os.path.dirname(target)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
     payload = {
         "timestamp_unix_ms": int(timestamp_unix_ms if timestamp_unix_ms is not None else time.time() * 1000),
         "score": trust.get("score"),
@@ -582,8 +706,66 @@ def write_data_trust_log(
         "stale_count": trust.get("stale_count"),
         "items": trust.get("items", []),
     }
-    with open(target, "a", encoding="utf-8") as handle:
-        handle.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n")
+    encoded = (
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n"
+    ).encode("utf-8")
+    if max_bytes > 0:
+        _prune_oversized_log_backups(target, backup_count, max_bytes)
+        try:
+            current_size = os.path.getsize(target)
+        except OSError:
+            current_size = 0
+        if current_size and current_size + len(encoded) > max_bytes:
+            _rotate_bounded_log(target, backup_count, max_bytes)
+    with open(target, "ab") as handle:
+        handle.write(encoded)
+
+
+def _prune_oversized_log_backups(
+    target: str,
+    backup_count: int,
+    max_bytes: int,
+) -> None:
+    for index in range(1, max(0, int(backup_count)) + 1):
+        backup = f"{target}.{index}"
+        try:
+            if os.path.getsize(backup) > max_bytes:
+                os.remove(backup)
+        except FileNotFoundError:
+            continue
+
+
+def _rotate_bounded_log(target: str, backup_count: int, max_bytes: int) -> None:
+    count = max(0, int(backup_count))
+    if count == 0:
+        try:
+            os.remove(target)
+        except FileNotFoundError:
+            pass
+        return
+
+    oldest = f"{target}.{count}"
+    try:
+        os.remove(oldest)
+    except FileNotFoundError:
+        pass
+    for index in range(count - 1, 0, -1):
+        source = f"{target}.{index}"
+        destination = f"{target}.{index + 1}"
+        try:
+            if max_bytes > 0 and os.path.getsize(source) > max_bytes:
+                os.remove(source)
+            else:
+                os.replace(source, destination)
+        except FileNotFoundError:
+            continue
+    try:
+        if max_bytes > 0 and os.path.getsize(target) > max_bytes:
+            os.remove(target)
+        else:
+            os.replace(target, f"{target}.1")
+    except FileNotFoundError:
+        pass
 
 
 def _maybe_write_data_trust_log(snapshot: dict[str, Any]) -> None:
@@ -610,38 +792,96 @@ def _maybe_write_data_trust_log(snapshot: dict[str, Any]) -> None:
 
 
 def read_weather_snapshot() -> dict[str, Any]:
-    global _weather_cache_expires_at, _weather_cache_key, _weather_cache_value
-
     config = _load_config()
     weather_config = config.get("weather") if isinstance(config.get("weather"), dict) else {}
     city = _empty_to_none(weather_config.get("city")) or "北京"
     location = _weather_location_for_city(city)
     cache_key = f"{city}|{location}"
     now = time.monotonic()
-    if (
-        _weather_cache_value is not None
-        and _weather_cache_key == cache_key
-        and now < _weather_cache_expires_at
-    ):
-        return dict(_weather_cache_value)
+    with _weather_cache_lock:
+        cache_matches = (
+            _weather_cache_value is not None
+            and _weather_cache_key == cache_key
+        )
+        if cache_matches and now < _weather_cache_expires_at:
+            return dict(_weather_cache_value)
+
+        _start_weather_refresh_locked(city, location, cache_key)
+        if cache_matches:
+            stale = dict(_weather_cache_value or {})
+            if stale.get("source") == "weather_shim":
+                stale["source"] = "weather_shim_stale"
+            stale["status"] = "stale"
+            return stale
+        return _fallback_weather_snapshot(city, status="connecting")
+
+
+def _start_weather_refresh_locked(
+    city: str,
+    location: str,
+    cache_key: str,
+) -> None:
+    global _weather_refresh_thread, _weather_refreshing
+
+    if _weather_refreshing:
+        return
+    _weather_refreshing = True
+    _weather_refresh_thread = threading.Thread(
+        target=_refresh_weather_cache,
+        args=(city, location, cache_key),
+        daemon=True,
+    )
+    _weather_refresh_thread.start()
+
+
+def _refresh_weather_cache(city: str, location: str, cache_key: str) -> None:
+    global _weather_cache_expires_at, _weather_cache_key, _weather_cache_value
+    global _weather_refreshing
 
     query = urlencode({"location": location, "lang": "zh"})
     url = f"{WEATHER_SHIM_BASE_URL}/v7/weather/now?{query}"
-
     try:
         payload = _fetch_json(url, timeout=4.0)
         snapshot = _weather_from_qweather_payload(city, payload)
-        ttl = WEATHER_CACHE_TTL_SECONDS if snapshot.get("source") == "weather_shim" else WEATHER_FAILURE_CACHE_TTL_SECONDS
+        succeeded = snapshot.get("source") == "weather_shim"
     except Exception:
-        if _weather_cache_value is not None and _weather_cache_key == cache_key:
-            return dict(_weather_cache_value)
-        snapshot = _fallback_weather_snapshot(city)
-        ttl = WEATHER_FAILURE_CACHE_TTL_SECONDS
+        snapshot = _fallback_weather_snapshot(city, status="unavailable")
+        succeeded = False
 
-    _weather_cache_value = dict(snapshot)
-    _weather_cache_key = cache_key
-    _weather_cache_expires_at = time.monotonic() + ttl
-    return snapshot
+    completed_at = time.monotonic()
+    with _weather_cache_lock:
+        if succeeded or _weather_cache_value is None or _weather_cache_key != cache_key:
+            _weather_cache_value = dict(snapshot)
+            _weather_cache_key = cache_key
+        else:
+            stale = dict(_weather_cache_value)
+            if stale.get("source") == "weather_shim":
+                stale["source"] = "weather_shim_stale"
+            stale["status"] = "stale"
+            _weather_cache_value = stale
+        _weather_cache_expires_at = completed_at + (
+            WEATHER_CACHE_TTL_SECONDS
+            if succeeded
+            else WEATHER_FAILURE_CACHE_TTL_SECONDS
+        )
+        _weather_refreshing = False
+
+
+def _reset_weather_cache_for_tests() -> None:
+    global _weather_cache_expires_at, _weather_cache_key, _weather_cache_value
+    global _weather_refresh_thread, _weather_refreshing
+
+    thread = None
+    with _weather_cache_lock:
+        thread = _weather_refresh_thread
+    if thread is not None and thread.is_alive():
+        thread.join(timeout=1.0)
+    with _weather_cache_lock:
+        _weather_cache_value = None
+        _weather_cache_key = None
+        _weather_cache_expires_at = 0.0
+        _weather_refreshing = False
+        _weather_refresh_thread = None
 
 
 def _weather_from_qweather_payload(city: str | None, payload: dict[str, Any]) -> dict[str, Any]:
@@ -672,13 +912,19 @@ def _weather_from_qweather_payload(city: str | None, payload: dict[str, Any]) ->
         "humidity_percent": humidity,
         "wind_text": wind_text,
         "source": "weather_shim",
+        "status": "live",
         "updated_at": _empty_to_none(payload.get("updateTime")) or _empty_to_none(now.get("obsTime")),
     }
 
 
-def _fallback_weather_snapshot(city: str | None = None) -> dict[str, Any]:
+def _fallback_weather_snapshot(
+    city: str | None = None,
+    *,
+    status: str = "unavailable",
+) -> dict[str, Any]:
     snapshot = empty_snapshot()["weather"]
     snapshot["city"] = _empty_to_none(city)
+    snapshot["status"] = status
     return snapshot
 
 
@@ -730,12 +976,30 @@ def _load_config() -> dict[str, Any]:
 def read_lhm_sensor_snapshot() -> dict[str, Any]:
     now = time.monotonic()
     with _lhm_cache_lock:
-        if _lhm_cache_value is not None and now < _lhm_cache_expires_at:
-            return dict(_lhm_cache_value)
+        if (
+            _lhm_cache_value is not None
+            and now < _lhm_cache_expires_at
+            and not _lhm_last_refresh_failed
+        ):
+            live = dict(_lhm_cache_value)
+            live["source"] = "lhm"
+            live["status"] = "live"
+            return live
 
-        stale = dict(_lhm_cache_value) if _lhm_cache_value is not None else {}
-        _start_lhm_sensor_refresh_locked()
-        return stale
+        if now >= _lhm_cache_expires_at:
+            _start_lhm_sensor_refresh_locked()
+
+        if _lhm_cache_value is not None:
+            age = now - _lhm_last_success_at if _lhm_last_success_at > 0 else float("inf")
+            if age <= LHM_LAST_GOOD_MAX_AGE_SECONDS:
+                stale = dict(_lhm_cache_value)
+                stale["source"] = "lhm_stale"
+                stale["status"] = "stale"
+                return stale
+            return {"source": "lhm", "status": "unavailable"}
+
+        status = "unavailable" if _lhm_last_refresh_failed else "connecting"
+        return {"source": "lhm", "status": status}
 
 
 def _start_lhm_sensor_refresh_locked() -> None:
@@ -749,28 +1013,111 @@ def _start_lhm_sensor_refresh_locked() -> None:
 
 
 def _refresh_lhm_sensor_cache() -> None:
-    global _lhm_cache_expires_at, _lhm_cache_value, _lhm_refreshing
+    global _lhm_cache_expires_at, _lhm_cache_value, _lhm_last_refresh_failed
+    global _lhm_last_success_at, _lhm_refreshing
 
     try:
-        payload = _fetch_json(LHM_SENSOR_URL, timeout=0.8)
+        payload, endpoint_url = _fetch_lhm_sensor_payload()
         snapshot = _lhm_sensor_snapshot_from_payload(payload)
+        snapshot["endpoint_url"] = endpoint_url
     except Exception:
-        snapshot = {}
+        snapshot = None
 
     with _lhm_cache_lock:
-        if snapshot or _lhm_cache_value is None:
+        completed_at = time.monotonic()
+        if snapshot is not None:
             _lhm_cache_value = dict(snapshot)
-        _lhm_cache_expires_at = time.monotonic() + LHM_SENSOR_CACHE_TTL_SECONDS
+            _lhm_last_success_at = completed_at
+            _lhm_last_refresh_failed = False
+            ttl = LHM_SENSOR_CACHE_TTL_SECONDS
+        else:
+            _lhm_last_refresh_failed = True
+            ttl = LHM_SENSOR_FAILURE_CACHE_TTL_SECONDS
+        _lhm_cache_expires_at = completed_at + ttl
         _lhm_refreshing = False
 
 
 def _reset_lhm_cache_for_tests() -> None:
-    global _lhm_cache_expires_at, _lhm_cache_value, _lhm_refreshing
+    global _lhm_cache_expires_at, _lhm_cache_value, _lhm_last_good_url
+    global _lhm_last_refresh_failed, _lhm_last_success_at, _lhm_refreshing
 
     with _lhm_cache_lock:
         _lhm_cache_value = None
         _lhm_cache_expires_at = 0.0
+        _lhm_last_good_url = None
+        _lhm_last_success_at = 0.0
+        _lhm_last_refresh_failed = False
         _lhm_refreshing = False
+
+
+def _fetch_lhm_sensor_payload() -> tuple[dict[str, Any], str]:
+    global _lhm_last_good_url
+
+    errors: list[Exception] = []
+    for url in _lhm_sensor_url_candidates():
+        try:
+            payload = _fetch_json(url, timeout=0.8)
+        except Exception as exc:
+            errors.append(exc)
+            continue
+        _lhm_last_good_url = url
+        return payload, url
+    if errors:
+        raise errors[-1]
+    raise OSError("no LibreHardwareMonitor endpoint configured")
+
+
+def _lhm_sensor_url_candidates() -> list[str]:
+    values: list[Any] = []
+    for env_name in (
+        "TURZX_LHM_SENSOR_URLS",
+        "TURZX_LHM_SENSOR_URL",
+        "LHM_SENSOR_URL",
+    ):
+        raw = os.environ.get(env_name)
+        if raw:
+            values.extend(part for part in re.split(r"[;,]", raw) if part.strip())
+
+    config = _load_config()
+    metrics = config.get("metrics") if isinstance(config.get("metrics"), dict) else {}
+    lhm = config.get("lhm") if isinstance(config.get("lhm"), dict) else {}
+    for value in (
+        metrics.get("lhmUrls"),
+        metrics.get("lhmUrl"),
+        lhm.get("urls"),
+        lhm.get("url"),
+    ):
+        if isinstance(value, list):
+            values.extend(value)
+        elif value is not None:
+            values.append(value)
+    values.extend(DEFAULT_LHM_SENSOR_URLS)
+
+    normalized: list[str] = []
+    if _lhm_last_good_url:
+        normalized.append(_lhm_last_good_url)
+    for value in values:
+        url = _normalize_lhm_sensor_url(value)
+        if url and url not in normalized:
+            normalized.append(url)
+    return normalized
+
+
+def _normalize_lhm_sensor_url(value: Any) -> str | None:
+    text = _empty_to_none(value)
+    if text is None:
+        return None
+    if "://" not in text:
+        text = f"http://{text}"
+    parts = urlsplit(text)
+    if not parts.netloc:
+        return None
+    path = parts.path.rstrip("/")
+    if not path:
+        path = "/data.json"
+    elif not path.lower().endswith(".json"):
+        path = f"{path}/data.json"
+    return parts._replace(path=path, query="", fragment="").geturl()
 
 
 def _lhm_sensor_snapshot_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -780,9 +1127,17 @@ def _lhm_sensor_snapshot_from_payload(payload: dict[str, Any]) -> dict[str, Any]
     cpu_temp = None
     cpu_power = None
     cpu_vcore = None
-    cpu_clock = None
+    cpu_clock_effective = None
     gpu_voltage = None
+    gpu_temp = None
+    gpu_power = None
+    gpu_core_clock = None
+    gpu_memory_clock = None
     gpu_hotspot = None
+    motherboard_temp = None
+    module_temperatures: dict[int, float] = {}
+    disk_values: dict[str, dict[str, Any]] = {}
+    disk_temperature_candidates: dict[str, tuple[int, float]] = {}
 
     for key, raw in flat.items():
         lower = key.lower()
@@ -792,27 +1147,116 @@ def _lhm_sensor_snapshot_from_payload(payload: dict[str, Any]) -> dict[str, Any]
 
         if lower.endswith("/voltages/vcore"):
             cpu_vcore = round(value, 3)
-        elif lower.endswith("/powers/package") and "gpu" not in lower:
+        if lower.endswith("/powers/package") and "gpu" not in lower:
             cpu_power = round(value, 1)
-        elif "/clocks/" in lower and lower.endswith("/cores (average)"):
-            cpu_clock = round(value, 1)
-        elif "/temperatures/" in lower and "core (tctl/tdie)" in lower:
+        if "/clocks/" in lower and lower.endswith("/cores (average effective)"):
+            cpu_clock_effective = round(value, 1)
+        if "/temperatures/" in lower and "core (tctl/tdie)" in lower:
             cpu_temp = round(value, 1)
-        elif "nvidia" in lower and lower.endswith("gpu core voltage"):
+        if lower.endswith("/temperatures/system #1") and _valid_temperature(value):
+            motherboard_temp = round(value, 1)
+        dimm_match = re.search(r"/temperatures/dimm #(\d+)$", lower)
+        if dimm_match and _valid_temperature(value):
+            module_temperatures[int(dimm_match.group(1))] = round(value, 1)
+
+        if "nvidia" in lower and lower.endswith("/voltages/gpu core voltage"):
             gpu_voltage = round(value, 3)
-        elif "nvidia" in lower and "/temperatures/" in lower and ("hot spot" in lower or "junction" in lower):
+        elif "nvidia" in lower and lower.endswith("/powers/gpu package"):
+            gpu_power = round(value, 1)
+        elif "nvidia" in lower and lower.endswith("/clocks/gpu core"):
+            gpu_core_clock = round(value, 1)
+        elif "nvidia" in lower and lower.endswith("/clocks/gpu memory"):
+            gpu_memory_clock = round(value, 1)
+        elif "nvidia" in lower and lower.endswith("/temperatures/gpu core") and _valid_temperature(value):
+            gpu_temp = round(value, 1)
+        elif (
+            "nvidia" in lower
+            and "/temperatures/" in lower
+            and ("hot spot" in lower or "junction" in lower)
+            and _valid_temperature(value)
+        ):
             if gpu_hotspot is None or "hot spot" in lower:
                 gpu_hotspot = round(value, 1)
+
+        disk_field = _lhm_disk_field(key)
+        if disk_field is None:
+            continue
+        model, field, priority = disk_field
+        values = disk_values.setdefault(model, {"model": model})
+        if field == "temperature_celsius":
+            if not _valid_temperature(value):
+                continue
+            candidate = disk_temperature_candidates.get(model)
+            if candidate is None or priority < candidate[0]:
+                disk_temperature_candidates[model] = (priority, round(value, 1))
+        elif field in {"used_percent", "activity_percent"} and 0 <= value <= 100:
+            values[field] = round(value, 1)
+        elif field == "total_space_gb" and value > 0:
+            values[field] = round(value, 1)
+
+    for model, (_, temperature) in disk_temperature_candidates.items():
+        disk_values.setdefault(model, {"model": model})["temperature_celsius"] = temperature
 
     return {
         "cpu_temperature_celsius": cpu_temp,
         "cpu_power_watts": cpu_power,
         "cpu_core_voltage": cpu_vcore,
-        "cpu_clock_mhz": cpu_clock,
+        "cpu_clock_mhz": cpu_clock_effective,
         "gpu_core_voltage": gpu_voltage,
+        "gpu_temperature_celsius": gpu_temp,
+        "gpu_power_watts": gpu_power,
+        "gpu_core_clock_mhz": gpu_core_clock,
+        "gpu_memory_clock_mhz": gpu_memory_clock,
         "gpu_hotspot_temperature_celsius": gpu_hotspot,
+        "motherboard_temperature_celsius": motherboard_temp,
+        "module_temperatures_celsius": [
+            module_temperatures[index] for index in sorted(module_temperatures)
+        ],
+        "disk_sensors": [
+            disk_values[model] for model in sorted(disk_values, key=str.casefold)
+        ],
         "source": "lhm",
+        "status": "live",
     }
+
+
+def _valid_temperature(value: float) -> bool:
+    return 0.0 <= value <= 125.0
+
+
+def _lhm_disk_field(path: str) -> tuple[str, str, int] | None:
+    parts = [part.strip() for part in path.split("/") if part.strip()]
+    if len(parts) < 3:
+        return None
+    category_index = next(
+        (
+            index
+            for index, part in enumerate(parts)
+            if part.casefold() in {"temperatures", "load", "data"}
+        ),
+        None,
+    )
+    if category_index is None or category_index < 1 or category_index >= len(parts) - 1:
+        return None
+    model = parts[category_index - 1]
+    category = parts[category_index].casefold()
+    leaf = parts[-1].casefold()
+
+    if category == "temperatures":
+        if leaf in {"composite", "composite temperature"}:
+            return model, "temperature_celsius", 0
+        if leaf == "temperature":
+            return model, "temperature_celsius", 1
+        if re.fullmatch(r"temperature #\d+", leaf):
+            return model, "temperature_celsius", 2
+    elif category == "load":
+        if leaf == "used space":
+            return model, "used_percent", 0
+        if leaf == "total activity":
+            return model, "activity_percent", 0
+    elif category == "data" and leaf == "total space":
+        return model, "total_space_gb", 0
+    return None
 
 
 def _flatten_lhm_payload(node: Any, path: str, out: dict[str, Any]) -> None:
@@ -829,8 +1273,9 @@ def _flatten_lhm_payload(node: Any, path: str, out: dict[str, Any]) -> None:
 
 def _merge_lhm_sensors(snapshot: dict[str, Any]) -> None:
     sensors = read_lhm_sensor_snapshot()
-    if not sensors:
+    if not sensors or sensors.get("status") in {"connecting", "unavailable"}:
         return
+    source_suffix = "lhm_stale" if sensors.get("status") == "stale" else "lhm"
 
     cpu = snapshot.get("cpu")
     if isinstance(cpu, dict):
@@ -842,13 +1287,54 @@ def _merge_lhm_sensors(snapshot: dict[str, Any]) -> None:
         if cpu_clock_mhz is not None:
             cpu["clock_ghz"] = _mhz_to_ghz(cpu_clock_mhz)
         if any(cpu.get(key) is not None for key in ("temperature_celsius", "power_watts", "core_voltage", "clock_mhz")):
-            cpu["source"] = _append_source(cpu.get("source"), "lhm")
+            cpu["source"] = _append_source(cpu.get("source"), source_suffix)
 
     gpu = snapshot.get("gpu")
     if isinstance(gpu, dict):
         _set_if_not_none(gpu, "core_voltage", sensors.get("gpu_core_voltage"))
-        if sensors.get("gpu_core_voltage") is not None:
-            gpu["source"] = _append_source(gpu.get("source"), "lhm")
+        gpu_temperature = sensors.get("gpu_temperature_celsius")
+        _set_if_not_none(gpu, "temperature_c", gpu_temperature)
+        _set_if_not_none(gpu, "temperature_celsius", gpu_temperature)
+        _set_if_not_none(gpu, "power_watts", sensors.get("gpu_power_watts"))
+        gpu_core_clock = sensors.get("gpu_core_clock_mhz")
+        _set_if_not_none(gpu, "core_clock_mhz", gpu_core_clock)
+        if gpu_core_clock is not None:
+            gpu["core_clock_ghz"] = _mhz_to_ghz(gpu_core_clock)
+        gpu_memory_clock = sensors.get("gpu_memory_clock_mhz")
+        _set_if_not_none(gpu, "memory_clock_mhz", gpu_memory_clock)
+        _set_if_not_none(gpu, "mem_clock_mhz", gpu_memory_clock)
+        if gpu_memory_clock is not None:
+            gpu["memory_clock_ghz"] = _mhz_to_ghz(gpu_memory_clock)
+        _set_if_not_none(
+            gpu,
+            "hotspot_temperature_celsius",
+            sensors.get("gpu_hotspot_temperature_celsius"),
+        )
+        if any(
+            sensors.get(key) is not None
+            for key in (
+                "gpu_core_voltage",
+                "gpu_temperature_celsius",
+                "gpu_power_watts",
+                "gpu_core_clock_mhz",
+                "gpu_memory_clock_mhz",
+            )
+        ):
+            gpu["source"] = _append_source(gpu.get("source"), source_suffix)
+
+    memory = snapshot.get("memory")
+    if isinstance(memory, dict):
+        motherboard_temperature = sensors.get("motherboard_temperature_celsius")
+        module_temperatures = sensors.get("module_temperatures_celsius")
+        _set_if_not_none(
+            memory,
+            "motherboard_temperature_celsius",
+            motherboard_temperature,
+        )
+        if isinstance(module_temperatures, list):
+            memory["module_temperatures_celsius"] = list(module_temperatures)
+        if motherboard_temperature is not None or module_temperatures:
+            memory["source"] = _append_source(memory.get("source"), source_suffix)
 
 
 def _set_if_not_none(target: dict[str, Any], key: str, value: Any) -> None:
@@ -877,29 +1363,152 @@ def _configured_refresh_interval_seconds() -> float | None:
     return None
 
 
-class SchedulerLatencySampler:
+class _PdhFmtCounterValueUnion(ctypes.Union):
+    _fields_ = [
+        ("long_value", ctypes.c_long),
+        ("double_value", ctypes.c_double),
+        ("large_value", ctypes.c_longlong),
+        ("ansi_string_value", ctypes.c_char_p),
+        ("wide_string_value", ctypes.c_wchar_p),
+    ]
+
+
+class _PdhFmtCounterValue(ctypes.Structure):
+    _anonymous_ = ("value",)
+    _fields_ = [
+        ("status", wintypes.DWORD),
+        ("value", _PdhFmtCounterValueUnion),
+    ]
+
+
+class WindowsDpcTimeSampler:
+    PDH_FMT_DOUBLE = 0x00000200
+    COUNTER_PATH = r"\Processor Information(_Total)\% DPC Time"
+
     def __init__(
         self,
-        sleep: Callable[[float], None] | None = None,
-        now: Callable[[], float] | None = None,
-        target_seconds: float = 0.001,
+        read_value: Callable[[], float | None] | None = None,
     ):
-        self._sleep = sleep or time.sleep
-        self._now = now or time.perf_counter
-        self._target_seconds = target_seconds
+        self._read_value = read_value
+        self._lock = threading.Lock()
+        self._pdh: Any = None
+        self._query = ctypes.c_void_p()
+        self._counter = ctypes.c_void_p()
+        self._initialized = False
 
     def sample(self) -> float | None:
         try:
-            start = self._now()
-            self._sleep(self._target_seconds)
-            elapsed = self._now() - start
+            value = (
+                self._read_value()
+                if self._read_value is not None
+                else self._sample_windows_counter()
+            )
         except Exception:
             return None
-        jitter_us = max(0.0, (elapsed - self._target_seconds) * 1_000_000.0)
-        return round(min(jitter_us, 100_000.0), 1)
+        if value is None:
+            return None
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(parsed):
+            return None
+        return round(max(0.0, min(100.0, parsed)), 3)
+
+    def _sample_windows_counter(self) -> float | None:
+        if os.name != "nt":
+            return None
+
+        with self._lock:
+            if not self._initialized:
+                if not self._initialize_windows_counter():
+                    return None
+                # PDH rate counters require a baseline collection.
+                return None
+
+            if self._pdh.PdhCollectQueryData(self._query) != 0:
+                return None
+            value_type = wintypes.DWORD()
+            formatted = _PdhFmtCounterValue()
+            status = self._pdh.PdhGetFormattedCounterValue(
+                self._counter,
+                self.PDH_FMT_DOUBLE,
+                ctypes.byref(value_type),
+                ctypes.byref(formatted),
+            )
+            if status != 0 or formatted.status != 0:
+                return None
+            return float(formatted.double_value)
+
+    def _initialize_windows_counter(self) -> bool:
+        try:
+            pdh = ctypes.WinDLL("pdh", use_last_error=True)
+            pdh.PdhOpenQueryW.argtypes = [
+                wintypes.LPCWSTR,
+                ctypes.c_size_t,
+                ctypes.POINTER(ctypes.c_void_p),
+            ]
+            pdh.PdhOpenQueryW.restype = ctypes.c_long
+            pdh.PdhAddEnglishCounterW.argtypes = [
+                ctypes.c_void_p,
+                wintypes.LPCWSTR,
+                ctypes.c_size_t,
+                ctypes.POINTER(ctypes.c_void_p),
+            ]
+            pdh.PdhAddEnglishCounterW.restype = ctypes.c_long
+            pdh.PdhCollectQueryData.argtypes = [ctypes.c_void_p]
+            pdh.PdhCollectQueryData.restype = ctypes.c_long
+            pdh.PdhGetFormattedCounterValue.argtypes = [
+                ctypes.c_void_p,
+                wintypes.DWORD,
+                ctypes.POINTER(wintypes.DWORD),
+                ctypes.POINTER(_PdhFmtCounterValue),
+            ]
+            pdh.PdhGetFormattedCounterValue.restype = ctypes.c_long
+            pdh.PdhCloseQuery.argtypes = [ctypes.c_void_p]
+            pdh.PdhCloseQuery.restype = ctypes.c_long
+
+            query = ctypes.c_void_p()
+            counter = ctypes.c_void_p()
+            if pdh.PdhOpenQueryW(None, 0, ctypes.byref(query)) != 0:
+                return False
+            if (
+                pdh.PdhAddEnglishCounterW(
+                    query,
+                    self.COUNTER_PATH,
+                    0,
+                    ctypes.byref(counter),
+                )
+                != 0
+            ):
+                pdh.PdhCloseQuery(query)
+                return False
+            if pdh.PdhCollectQueryData(query) != 0:
+                pdh.PdhCloseQuery(query)
+                return False
+        except Exception:
+            return False
+
+        self._pdh = pdh
+        self._query = query
+        self._counter = counter
+        self._initialized = True
+        return True
+
+    def close(self) -> None:
+        with self._lock:
+            if self._pdh is not None and self._query:
+                try:
+                    self._pdh.PdhCloseQuery(self._query)
+                except Exception:
+                    pass
+            self._pdh = None
+            self._query = ctypes.c_void_p()
+            self._counter = ctypes.c_void_p()
+            self._initialized = False
 
 
-_SCHEDULER_LATENCY_SAMPLER = SchedulerLatencySampler()
+_DPC_TIME_SAMPLER = WindowsDpcTimeSampler()
 
 
 def read_cpu_snapshot() -> dict[str, Any]:
@@ -916,11 +1525,10 @@ def read_cpu_snapshot() -> dict[str, Any]:
         return psutil_snapshot or _fallback_cpu_snapshot()
 
     _append_history(_cpu_history, usage_percent)
-    clock_mhz = _read_cpu_clock_mhz_psutil()
     return _cpu_snapshot(
-        source="win32_getsystemtimes+psutil" if clock_mhz is not None else "win32_getsystemtimes",
+        source="win32_getsystemtimes",
         usage_percent=usage_percent,
-        clock_mhz=clock_mhz,
+        clock_mhz=None,
     )
 
 
@@ -1050,13 +1658,7 @@ def _read_cpu_snapshot_psutil() -> dict[str, Any] | None:
     except Exception:
         usage_percent = None
 
-    try:
-        freq = psutil.cpu_freq()
-        clock_mhz = getattr(freq, "current", None) if freq else None
-    except Exception:
-        clock_mhz = None
-
-    if usage_percent is None and clock_mhz is None:
+    if usage_percent is None:
         return None
 
     if usage_percent is not None:
@@ -1064,20 +1666,8 @@ def _read_cpu_snapshot_psutil() -> dict[str, Any] | None:
     return _cpu_snapshot(
         source="psutil",
         usage_percent=usage_percent,
-        clock_mhz=clock_mhz,
+        clock_mhz=None,
     )
-
-
-def _read_cpu_clock_mhz_psutil() -> float | None:
-    psutil = _optional_import("psutil")
-    if psutil is None:
-        return None
-
-    try:
-        freq = psutil.cpu_freq()
-        return _round_float_or_none(getattr(freq, "current", None) if freq else None)
-    except Exception:
-        return None
 
 
 def _cpu_snapshot(
@@ -1404,12 +1994,25 @@ _CPU_SAMPLER = CpuUsageSampler()
 
 
 def read_timeaudit_latest_snapshot() -> dict[str, Any]:
+    if not TIMEAUDIT_DSN:
+        return {
+            "_status": "disabled",
+            "_detail": "TIMEAUDIT_DSN 未配置",
+        }
+
     now = time.monotonic()
     with _timeaudit_cache_lock:
         if _timeaudit_cache_value is not None and now < _timeaudit_cache_expires_at:
             return dict(_timeaudit_cache_value)
 
-        stale = dict(_timeaudit_cache_value) if _timeaudit_cache_value is not None else {}
+        stale = (
+            dict(_timeaudit_cache_value)
+            if _timeaudit_cache_value is not None
+            else {
+                "_status": "connecting",
+                "_detail": "正在连接 TimeAudit",
+            }
+        )
         _start_timeaudit_refresh_locked()
         return stale
 
@@ -1427,14 +2030,25 @@ def _start_timeaudit_refresh_locked() -> None:
 def _refresh_timeaudit_cache() -> None:
     global _timeaudit_cache_expires_at, _timeaudit_cache_value, _timeaudit_refreshing
 
-    snapshot: dict[str, Any] = {}
+    snapshot: dict[str, Any]
     try:
         snapshot = asyncio.run(_read_timeaudit_latest_snapshot_async())
-    except Exception:
-        snapshot = {}
+    except Exception as exc:
+        snapshot = {
+            "_status": "error",
+            "_detail": type(exc).__name__,
+        }
 
     with _timeaudit_cache_lock:
-        if snapshot or _timeaudit_cache_value is None:
+        if (
+            snapshot.get("_status") == "error"
+            and isinstance(_timeaudit_cache_value, dict)
+            and _timeaudit_cache_value.get("timestamp") is not None
+        ):
+            preserved = dict(_timeaudit_cache_value)
+            preserved["_refresh_error"] = snapshot.get("_detail")
+            _timeaudit_cache_value = preserved
+        else:
             _timeaudit_cache_value = dict(snapshot)
         _timeaudit_cache_expires_at = time.monotonic() + TIMEAUDIT_CACHE_TTL_SECONDS
         _timeaudit_refreshing = False
@@ -1451,57 +2065,133 @@ def _reset_timeaudit_cache_for_tests() -> None:
 
 async def _read_timeaudit_latest_snapshot_async() -> dict[str, Any]:
     if not TIMEAUDIT_DSN:
-        return {}
+        return {
+            "_status": "disabled",
+            "_detail": "TIMEAUDIT_DSN 未配置",
+        }
 
     asyncpg = _optional_import("asyncpg")
     if asyncpg is None:
-        return {}
+        raise RuntimeError("asyncpg unavailable")
 
-    conn = await asyncpg.connect(TIMEAUDIT_DSN)
+    conn = await asyncpg.connect(
+        TIMEAUDIT_DSN,
+        timeout=TIMEAUDIT_CONNECT_TIMEOUT_SECONDS,
+        command_timeout=TIMEAUDIT_QUERY_TIMEOUT_SECONDS,
+    )
     try:
-        row = await conn.fetchrow(
-            """
-            SELECT timestamp,
-                   current_fps,
-                   average_fps,
-                   one_percent_low_fps,
-                   frametime_ms,
-                   frametime_jitter
-            FROM public.fact_system_hardware
-            ORDER BY timestamp DESC
-            LIMIT 1
-            """
+        row = await asyncio.wait_for(
+            conn.fetchrow(
+                """
+                SELECT timestamp,
+                       current_fps,
+                       average_fps,
+                       one_percent_low_fps,
+                       frametime_ms,
+                       frametime_jitter
+                FROM public.fact_system_hardware
+                ORDER BY timestamp DESC
+                LIMIT 1
+                """
+            ),
+            timeout=TIMEAUDIT_QUERY_TIMEOUT_SECONDS,
         )
     finally:
-        await conn.close()
+        try:
+            await asyncio.wait_for(
+                conn.close(),
+                timeout=TIMEAUDIT_QUERY_TIMEOUT_SECONDS,
+            )
+        except Exception:
+            pass
 
-    return dict(row) if row else {}
+    if not row:
+        return {
+            "_status": "idle",
+            "_detail": "TimeAudit 尚无硬件样本",
+        }
+    result = dict(row)
+    result["_status"] = "ok"
+    return result
 
 
 def read_fps_snapshot() -> dict[str, Any]:
     timeaudit = read_timeaudit_latest_snapshot()
-    current = _positive_float_or_none(timeaudit.get("current_fps"))
-    if current is not None:
-        average = _positive_float_or_none(timeaudit.get("average_fps"))
-        low_1_percent = _positive_float_or_none(timeaudit.get("one_percent_low_fps"))
-        frame_time = _positive_float_or_none(timeaudit.get("frametime_ms"))
-        return {
-            "current": current,
-            "average": average,
-            "low_1_percent": low_1_percent,
-            "frame_time_ms": frame_time,
-            "status": "active",
-            "source": "timeaudit_postgres",
-        }
-
-    return {
+    cache_status = (_empty_to_none(timeaudit.get("_status")) or "error").lower()
+    source = "disabled" if cache_status == "disabled" else "timeaudit_postgres"
+    base = {
         "current": None,
         "average": None,
         "low_1_percent": None,
         "frame_time_ms": None,
-        "status": "idle",
-        "source": "fallback",
+        "status": cache_status,
+        "source": source,
+        "sample_age_seconds": None,
+        "detail": _empty_to_none(timeaudit.get("_detail")),
     }
+    if cache_status in {"disabled", "connecting", "error"}:
+        return base
+    if cache_status == "idle" and timeaudit.get("timestamp") is None:
+        return base
+
+    sample_age = _sample_age_seconds(timeaudit.get("timestamp"))
+    base["sample_age_seconds"] = sample_age
+    if sample_age is None:
+        base["status"] = "error"
+        base["detail"] = "TimeAudit 样本缺少有效时间戳"
+        return base
+
+    current = _positive_float_or_none(timeaudit.get("current_fps"))
+    average = _positive_float_or_none(timeaudit.get("average_fps"))
+    low_1_percent = _positive_float_or_none(timeaudit.get("one_percent_low_fps"))
+    frame_time = _positive_float_or_none(timeaudit.get("frametime_ms"))
+    base.update(
+        {
+            "current": current,
+            "average": average,
+            "low_1_percent": low_1_percent,
+            "frame_time_ms": frame_time,
+        }
+    )
+    if sample_age > FPS_SAMPLE_FRESH_SECONDS:
+        base["status"] = "stale"
+        base["detail"] = f"最近帧样本已过期（{sample_age:.1f}s）"
+    elif current is not None:
+        base["status"] = "active"
+        base["detail"] = "PresentMon 帧采集正常"
+    else:
+        base["status"] = "idle"
+        base["detail"] = "PresentMon 正常，等待游戏启动"
+    return base
+
+
+def _sample_age_seconds(
+    value: Any,
+    now: dt.datetime | None = None,
+) -> float | None:
+    timestamp: dt.datetime
+    if isinstance(value, dt.datetime):
+        timestamp = value
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        try:
+            timestamp = dt.datetime.fromisoformat(text)
+        except ValueError:
+            return None
+    else:
+        return None
+
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=dt.timezone.utc)
+    current = now or dt.datetime.now(dt.timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=dt.timezone.utc)
+    age = (current.astimezone(dt.timezone.utc) - timestamp.astimezone(dt.timezone.utc)).total_seconds()
+    return round(max(0.0, age), 1)
 
 
 def read_memory_snapshot() -> dict[str, Any]:
@@ -1728,6 +2418,524 @@ def _fallback_disk_info() -> dict[str, Any]:
     }
 
 
+def read_physical_disk_topology() -> list[dict[str, Any]]:
+    now = time.monotonic()
+    with _physical_disk_topology_cache_lock:
+        if (
+            _physical_disk_topology_cache_value is not None
+            and now < _physical_disk_topology_cache_expires_at
+        ):
+            return [dict(item) for item in _physical_disk_topology_cache_value]
+
+        stale = (
+            [dict(item) for item in _physical_disk_topology_cache_value]
+            if _physical_disk_topology_cache_value is not None
+            else []
+        )
+        _start_physical_disk_topology_refresh_locked()
+        return stale
+
+
+def _start_physical_disk_topology_refresh_locked() -> None:
+    global _physical_disk_topology_refreshing
+
+    if _physical_disk_topology_refreshing:
+        return
+    _physical_disk_topology_refreshing = True
+    thread = threading.Thread(
+        target=_refresh_physical_disk_topology_cache,
+        daemon=True,
+    )
+    thread.start()
+
+
+def _refresh_physical_disk_topology_cache() -> None:
+    global _physical_disk_topology_cache_expires_at
+    global _physical_disk_topology_cache_value, _physical_disk_topology_refreshing
+
+    try:
+        raw = _read_physical_disk_topology_windows()
+        topology = _filter_physical_disk_topology(raw)
+        succeeded = True
+    except Exception:
+        topology = []
+        succeeded = False
+
+    with _physical_disk_topology_cache_lock:
+        if succeeded:
+            _physical_disk_topology_cache_value = [
+                dict(item) for item in topology
+            ]
+        ttl = (
+            PHYSICAL_DISK_TOPOLOGY_TTL_SECONDS
+            if succeeded
+            else PHYSICAL_DISK_TOPOLOGY_FAILURE_TTL_SECONDS
+        )
+        _physical_disk_topology_cache_expires_at = time.monotonic() + ttl
+        _physical_disk_topology_refreshing = False
+
+
+def _reset_physical_disk_cache_for_tests() -> None:
+    global _physical_disk_topology_cache_expires_at
+    global _physical_disk_topology_cache_value, _physical_disk_topology_refreshing
+
+    with _physical_disk_topology_cache_lock:
+        _physical_disk_topology_cache_value = None
+        _physical_disk_topology_cache_expires_at = 0.0
+        _physical_disk_topology_refreshing = False
+    sampler = globals().get("_PHYSICAL_DISK_RATE_SAMPLER")
+    if sampler is not None and hasattr(sampler, "reset"):
+        sampler.reset()
+
+
+def _read_physical_disk_topology_windows() -> list[dict[str, Any]]:
+    if os.name != "nt":
+        return []
+    powershell = shutil.which("powershell.exe") or shutil.which("pwsh.exe")
+    if powershell is None:
+        raise OSError("PowerShell is unavailable")
+
+    script = r"""
+$ErrorActionPreference = 'Stop'
+$OutputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$physicalById = @{}
+try {
+    Get-PhysicalDisk -ErrorAction Stop | ForEach-Object {
+        $physicalById["$($_.DeviceId)"] = $_
+    }
+} catch {}
+$result = @(
+    Get-CimInstance Win32_DiskDrive -ErrorAction Stop | ForEach-Object {
+        $disk = $_
+        $volumes = @()
+        Get-CimAssociatedInstance -InputObject $disk -Association Win32_DiskDriveToDiskPartition -ErrorAction SilentlyContinue |
+            ForEach-Object {
+                Get-CimAssociatedInstance -InputObject $_ -Association Win32_LogicalDiskToPartition -ErrorAction SilentlyContinue |
+                    ForEach-Object {
+                        $volumes += [pscustomobject]@{
+                            drive = "$($_.DeviceID)\"
+                            label = "$($_.VolumeName)"
+                            capacity_bytes = [uint64]$_.Size
+                            free_bytes = [uint64]$_.FreeSpace
+                            drive_type = [int]$_.DriveType
+                        }
+                    }
+            }
+        $physical = $physicalById["$($disk.Index)"]
+        [pscustomobject]@{
+            device_id = "$($disk.Index)"
+            model = "$($disk.Model)"
+            bus_type = if ($null -ne $physical) { "$($physical.BusType)" } else { "$($disk.InterfaceType)" }
+            interface_type = "$($disk.InterfaceType)"
+            media_type = if ($null -ne $physical) { "$($physical.MediaType)" } else { "$($disk.MediaType)" }
+            capacity_bytes = [uint64]$disk.Size
+            pnp_device_id = "$($disk.PNPDeviceID)"
+            volumes = @($volumes)
+        }
+    }
+)
+ConvertTo-Json -InputObject @($result) -Depth 6 -Compress
+"""
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    result = subprocess.run(
+        [powershell, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=10.0,
+        creationflags=creationflags,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise OSError(_empty_to_none(result.stderr) or "physical disk query failed")
+    text = result.stdout.lstrip("\ufeff").strip()
+    if not text:
+        return []
+    payload = json.loads(text)
+    if isinstance(payload, dict):
+        payload = [payload]
+    if not isinstance(payload, list):
+        raise ValueError("physical disk query did not return a list")
+    return [item for item in payload if isinstance(item, dict)]
+
+
+def _filter_physical_disk_topology(
+    raw_disks: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    filtered: list[dict[str, Any]] = []
+    for raw in raw_disks:
+        if not isinstance(raw, dict):
+            continue
+        capacity_bytes = _parse_counter_int(raw.get("capacity_bytes")) or 0
+        raw_volumes = raw.get("volumes")
+        volumes = raw_volumes if isinstance(raw_volumes, list) else []
+        if _physical_disk_is_excluded(raw, volumes, capacity_bytes):
+            continue
+
+        normalized_volumes: list[dict[str, Any]] = []
+        for volume in volumes:
+            if not isinstance(volume, dict):
+                continue
+            drive = _normalize_volume_drive(volume.get("drive"))
+            volume_capacity = _parse_counter_int(volume.get("capacity_bytes"))
+            free_bytes = _parse_counter_int(volume.get("free_bytes"))
+            normalized_volumes.append(
+                {
+                    "drive": drive,
+                    "label": _empty_to_none(volume.get("label")),
+                    "capacity_bytes": volume_capacity,
+                    "free_bytes": free_bytes,
+                }
+            )
+
+        measured_capacity = sum(
+            int(volume["capacity_bytes"])
+            for volume in normalized_volumes
+            if volume["capacity_bytes"] is not None
+        )
+        measured_free = sum(
+            int(volume["free_bytes"])
+            for volume in normalized_volumes
+            if volume["free_bytes"] is not None
+        )
+        used_percent = (
+            round(((measured_capacity - measured_free) / measured_capacity) * 100, 1)
+            if measured_capacity > 0 and measured_free <= measured_capacity
+            else None
+        )
+        volume_drives = sorted(
+            {
+                str(volume["drive"])
+                for volume in normalized_volumes
+                if volume["drive"] is not None
+            }
+        )
+        filtered.append(
+            {
+                "device_id": _empty_to_none(raw.get("device_id")) or str(len(filtered)),
+                "model": _empty_to_none(raw.get("model")),
+                "bus_type": _empty_to_none(raw.get("bus_type")),
+                "media_type": _empty_to_none(raw.get("media_type")),
+                "volume_drives": volume_drives,
+                "capacity_gb": _bytes_to_gb(capacity_bytes) if capacity_bytes > 0 else None,
+                "used_percent": used_percent,
+                "free_gb": _bytes_to_gb(measured_free) if measured_capacity > 0 else None,
+            }
+        )
+    return sorted(filtered, key=lambda item: _device_id_sort_key(item.get("device_id")))
+
+
+def _physical_disk_is_excluded(
+    raw: dict[str, Any],
+    volumes: list[Any],
+    capacity_bytes: int,
+) -> bool:
+    labels = [
+        (_empty_to_none(volume.get("label")) or "").casefold()
+        for volume in volumes
+        if isinstance(volume, dict)
+    ]
+    if "recover" in labels:
+        return True
+
+    identity = " ".join(
+        _empty_to_none(raw.get(key)) or ""
+        for key in (
+            "model",
+            "bus_type",
+            "interface_type",
+            "media_type",
+            "pnp_device_id",
+        )
+    ).casefold()
+    virtual_markers = (
+        "ramdisk",
+        "ram disk",
+        "romex",
+        "virtual disk",
+        "file backed virtual",
+    )
+    if any(marker in identity for marker in virtual_markers) or "devdrive" in labels:
+        return True
+
+    removable = (
+        "usb" in identity
+        or any(
+            _parse_counter_int(volume.get("drive_type")) == 2
+            or (_empty_to_none(volume.get("drive_type")) or "").casefold() == "removable"
+            for volume in volumes
+            if isinstance(volume, dict)
+        )
+    )
+    return removable and 0 < capacity_bytes < SMALL_REMOVABLE_DISK_BYTES
+
+
+def _normalize_volume_drive(value: Any) -> str | None:
+    text = _empty_to_none(value)
+    if text is None:
+        return None
+    if re.fullmatch(r"[A-Za-z]:", text):
+        text += "\\"
+    return text[0].upper() + text[1:] if re.match(r"^[A-Za-z]:", text) else text
+
+
+def _device_id_sort_key(value: Any) -> tuple[int, str]:
+    text = _empty_to_none(value) or ""
+    parsed = _parse_counter_int(text)
+    return (parsed if parsed is not None else 2**31 - 1, text)
+
+
+class PhysicalDiskRateSampler:
+    def __init__(
+        self,
+        read_counters: Callable[[], Any | None] | None = None,
+        now: Callable[[], float] | None = None,
+    ):
+        self._read_counters = read_counters or _read_disk_io_counters_psutil
+        self._now = now or time.monotonic
+        self._last: dict[str, tuple[float, int, int, int]] = {}
+
+    def reset(self) -> None:
+        self._last = {}
+
+    def sample(
+        self,
+        topology: list[dict[str, Any]],
+    ) -> dict[str, dict[str, Any]]:
+        try:
+            counters = self._read_counters()
+        except Exception:
+            counters = None
+        timestamp = self._now()
+        counter_map = counters if isinstance(counters, dict) else {}
+        results: dict[str, dict[str, Any]] = {}
+        next_last: dict[str, tuple[float, int, int, int]] = {}
+
+        for disk in topology:
+            device_id = _empty_to_none(disk.get("device_id"))
+            if device_id is None:
+                continue
+            counter = _physical_disk_counter(counter_map, device_id)
+            if counter is None:
+                results[device_id] = {
+                    "read_bytes_per_second": None,
+                    "write_bytes_per_second": None,
+                    "activity_percent": None,
+                    "source": "fallback",
+                    "status": "unavailable",
+                }
+                continue
+
+            read_bytes = _parse_counter_int(getattr(counter, "read_bytes", None))
+            write_bytes = _parse_counter_int(getattr(counter, "write_bytes", None))
+            busy_time = _physical_disk_busy_time_ms(counter)
+            if read_bytes is None or write_bytes is None or busy_time is None:
+                results[device_id] = {
+                    "read_bytes_per_second": None,
+                    "write_bytes_per_second": None,
+                    "activity_percent": None,
+                    "source": "fallback",
+                    "status": "unavailable",
+                }
+                continue
+
+            current = (timestamp, read_bytes, write_bytes, busy_time)
+            next_last[device_id] = current
+            previous = self._last.get(device_id)
+            read_rate = None
+            write_rate = None
+            activity = None
+            status = "warming"
+            if previous is not None:
+                elapsed = timestamp - previous[0]
+                read_delta = read_bytes - previous[1]
+                write_delta = write_bytes - previous[2]
+                busy_delta = busy_time - previous[3]
+                if elapsed > 0 and min(read_delta, write_delta, busy_delta) >= 0:
+                    read_rate = round(read_delta / elapsed, 1)
+                    write_rate = round(write_delta / elapsed, 1)
+                    activity = round(
+                        min(100.0, max(0.0, busy_delta / (elapsed * 10.0))),
+                        1,
+                    )
+                    status = (
+                        "active"
+                        if read_rate > 0 or write_rate > 0 or activity > 0
+                        else "idle"
+                    )
+            results[device_id] = {
+                "read_bytes_per_second": read_rate,
+                "write_bytes_per_second": write_rate,
+                "activity_percent": activity,
+                "source": "psutil",
+                "status": status,
+            }
+
+        self._last = next_last
+        return results
+
+
+def _read_disk_io_counters_psutil() -> dict[str, Any] | None:
+    psutil = _optional_import("psutil")
+    if psutil is None:
+        return None
+    try:
+        return psutil.disk_io_counters(perdisk=True)
+    except Exception:
+        return None
+
+
+def _physical_disk_counter(counters: dict[str, Any], device_id: str) -> Any | None:
+    expected = f"physicaldrive{device_id}".casefold()
+    for name, counter in counters.items():
+        normalized = str(name).replace("\\", "").casefold()
+        if normalized == expected:
+            return counter
+    return None
+
+
+def _physical_disk_busy_time_ms(counter: Any) -> int | None:
+    busy_time = _parse_counter_int(getattr(counter, "busy_time", None))
+    if busy_time is not None:
+        return busy_time
+    read_time = _parse_counter_int(getattr(counter, "read_time", None))
+    write_time = _parse_counter_int(getattr(counter, "write_time", None))
+    if read_time is None or write_time is None:
+        return None
+    return read_time + write_time
+
+
+_PHYSICAL_DISK_RATE_SAMPLER = PhysicalDiskRateSampler()
+
+
+def read_physical_disks() -> list[dict[str, Any]]:
+    topology = read_physical_disk_topology()
+    if not topology:
+        return []
+    rates = _PHYSICAL_DISK_RATE_SAMPLER.sample(topology)
+    lhm = read_lhm_sensor_snapshot()
+    sensor_matches = _match_lhm_disk_sensors(
+        topology,
+        lhm.get("disk_sensors") if isinstance(lhm.get("disk_sensors"), list) else [],
+    )
+    lhm_source = (
+        "lhm_stale" if lhm.get("status") == "stale" else "lhm"
+    )
+
+    result: list[dict[str, Any]] = []
+    for disk in topology:
+        device_id = str(disk.get("device_id"))
+        rate = rates.get(device_id, {})
+        sensor = sensor_matches.get(device_id, {})
+        activity = (
+            sensor.get("activity_percent")
+            if sensor.get("activity_percent") is not None
+            else rate.get("activity_percent")
+        )
+        status = _empty_to_none(rate.get("status")) or "unavailable"
+        if sensor.get("activity_percent") is not None:
+            status = "active" if float(sensor["activity_percent"]) > 0.1 else "idle"
+        source = "win32_cim"
+        if rate.get("source") == "psutil":
+            source = _append_source(source, "psutil")
+        if sensor:
+            source = _append_source(source, lhm_source)
+        result.append(
+            {
+                "device_id": device_id,
+                "model": disk.get("model"),
+                "bus_type": disk.get("bus_type"),
+                "media_type": disk.get("media_type"),
+                "volume_drives": list(disk.get("volume_drives") or []),
+                "capacity_gb": disk.get("capacity_gb"),
+                "used_percent": disk.get("used_percent"),
+                "free_gb": disk.get("free_gb"),
+                "read_bytes_per_second": rate.get("read_bytes_per_second"),
+                "write_bytes_per_second": rate.get("write_bytes_per_second"),
+                "activity_percent": activity,
+                "temperature_celsius": sensor.get("temperature_celsius"),
+                "source": source,
+                "status": status,
+            }
+        )
+    return sorted(result, key=_physical_disk_display_sort_key)
+
+
+def _physical_disk_display_sort_key(disk: dict[str, Any]) -> tuple[int, tuple[int, str]]:
+    drives = {
+        str(drive).upper().rstrip("\\") + ":"
+        if re.fullmatch(r"[A-Za-z]", str(drive).strip())
+        else str(drive).upper().rstrip("\\")
+        for drive in disk.get("volume_drives") or []
+    }
+    bus_type = (_empty_to_none(disk.get("bus_type")) or "").casefold()
+    media_type = (_empty_to_none(disk.get("media_type")) or "").casefold()
+    if "C:" in drives:
+        priority = 0
+    elif "usb" in bus_type or "removable" in media_type:
+        priority = 3
+    elif "nvme" in bus_type:
+        priority = 1
+    elif "hdd" in media_type or "sata" in bus_type:
+        priority = 2
+    else:
+        priority = 4
+    return (priority, _device_id_sort_key(disk.get("device_id")))
+
+
+def _match_lhm_disk_sensors(
+    topology: list[dict[str, Any]],
+    sensors: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    matches: dict[str, dict[str, Any]] = {}
+    used: set[int] = set()
+
+    for disk in topology:
+        device_id = str(disk.get("device_id"))
+        model = _normalize_disk_model(disk.get("model"))
+        for index, sensor in enumerate(sensors):
+            if index in used or not isinstance(sensor, dict):
+                continue
+            sensor_model = _normalize_disk_model(sensor.get("model"))
+            if model and sensor_model and (
+                model == sensor_model
+                or (len(model) >= 6 and model in sensor_model)
+                or (len(sensor_model) >= 6 and sensor_model in model)
+            ):
+                matches[device_id] = sensor
+                used.add(index)
+                break
+
+    for disk in topology:
+        device_id = str(disk.get("device_id"))
+        if device_id in matches:
+            continue
+        capacity = _parse_float(disk.get("capacity_gb"))
+        if capacity is None or capacity <= 0:
+            continue
+        candidates: list[tuple[float, int, dict[str, Any]]] = []
+        for index, sensor in enumerate(sensors):
+            if index in used or not isinstance(sensor, dict):
+                continue
+            sensor_capacity = _parse_float(sensor.get("total_space_gb"))
+            if sensor_capacity is None or sensor_capacity <= 0:
+                continue
+            difference = abs(sensor_capacity - capacity) / max(sensor_capacity, capacity)
+            if difference <= 0.12:
+                candidates.append((difference, index, sensor))
+        if len(candidates) == 1:
+            _, index, sensor = candidates[0]
+            matches[device_id] = sensor
+            used.add(index)
+    return matches
+
+
+def _normalize_disk_model(value: Any) -> str:
+    text = (_empty_to_none(value) or "").casefold()
+    return re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", text)
+
+
 class NetworkRateSampler:
     def __init__(
         self,
@@ -1775,6 +2983,7 @@ class NetworkRateSampler:
             "ping_ms": latency.get("ping_ms"),
             "jitter_ms": latency.get("jitter_ms"),
             "packet_loss_percent": latency.get("packet_loss_percent"),
+            "latency_status": latency.get("status"),
             "addresses": _local_addresses(),
             "source": "+".join(source_parts) if source_parts else "fallback",
         }
@@ -1816,32 +3025,66 @@ class NetworkLatencySampler:
         self._last_result: dict[str, Any] | None = None
         self._last_expires_at = 0.0
         self._history: deque[float] = deque(maxlen=15)
+        self._outcome_history: deque[bool] = deque(maxlen=15)
+        self._lock = threading.Lock()
+        self._refreshing = False
+        self._refresh_thread: threading.Thread | None = None
 
     def sample(self) -> dict[str, Any]:
         now = self._now()
-        if self._last_result is not None and now < self._last_expires_at:
-            return dict(self._last_result)
+        with self._lock:
+            if self._last_result is not None and now < self._last_expires_at:
+                return dict(self._last_result)
 
-        ping_ms = _round_float_or_none(self._read_ping_ms())
-        if ping_ms is None:
-            result = {
-                "ping_ms": None,
-                "jitter_ms": None,
-                "packet_loss_percent": 100.0,
-                "source": "ping",
-            }
-        else:
-            self._history.append(ping_ms)
-            result = {
+            if not self._refreshing:
+                self._start_refresh_locked()
+
+            if self._last_result is None:
+                return {
+                    "ping_ms": None,
+                    "jitter_ms": None,
+                    "packet_loss_percent": None,
+                    "source": "ping",
+                    "status": "connecting",
+                }
+            stale = dict(self._last_result)
+            stale["status"] = "stale"
+            return stale
+
+    def _start_refresh_locked(self) -> None:
+        self._refreshing = True
+        self._refresh_thread = threading.Thread(target=self._refresh, daemon=True)
+        self._refresh_thread.start()
+
+    def _refresh(self) -> None:
+        try:
+            ping_ms = _round_float_or_none(self._read_ping_ms())
+        except Exception:
+            ping_ms = None
+        completed_at = self._now()
+        with self._lock:
+            succeeded = ping_ms is not None
+            self._outcome_history.append(succeeded)
+            if ping_ms is not None:
+                self._history.append(ping_ms)
+            failures = sum(1 for outcome in self._outcome_history if not outcome)
+            packet_loss = round(
+                failures / len(self._outcome_history) * 100.0,
+                1,
+            )
+            self._last_result = {
                 "ping_ms": ping_ms,
-                "jitter_ms": _network_jitter(self._history),
-                "packet_loss_percent": 0.0,
+                "jitter_ms": (
+                    _network_jitter(self._history)
+                    if self._history
+                    else None
+                ),
+                "packet_loss_percent": packet_loss,
                 "source": "ping",
+                "status": "live" if succeeded else "unavailable",
             }
-
-        self._last_result = dict(result)
-        self._last_expires_at = now + self._ttl_seconds
-        return result
+            self._last_expires_at = completed_at + self._ttl_seconds
+            self._refreshing = False
 
 
 def _network_jitter(history: deque[float]) -> float:

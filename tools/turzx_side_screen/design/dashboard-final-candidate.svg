@@ -78,7 +78,7 @@
     <!-- 底部状态条 (加粗、提高可读性) -->
     <line x1="24" y1="102" x2="408" y2="102" stroke="#e6fcf4" stroke-width="1.2" />
     <rect x="24" y="106" width="384" height="18" rx="4" fill="#dcfce7" />
-    <text x="216" y="119" text-anchor="middle" class="font-sans" font-size="12" font-weight="900" fill="#116631" id="header-status-strip">系统正常  ·  前台 game.exe  ·  更新 0.5s</text>
+    <text x="216" y="119" text-anchor="middle" class="font-sans" font-size="12" font-weight="900" fill="#116631" id="header-status-strip">系统正常  ·  前台 game.exe  ·  更新 1s</text>
   </g>
 
   <!-- ================= CARD 2: CPU 处理器 (Y: 160, H: 280) ================= -->
@@ -462,7 +462,7 @@
     <!-- 刷新频率 -->
     <g transform="translate(382, 38)">
       <text x="0" y="14" class="font-sans text-lbl">数据刷新</text>
-      <text x="0" y="34" class="font-mono" font-size="15" font-weight="800" fill="#044e37" id="health-refresh">0.5s</text>
+      <text x="0" y="34" class="font-mono" font-size="15" font-weight="800" fill="#044e37" id="health-refresh">1s</text>
       <text x="0" y="46" class="font-sans" font-size="8" font-weight="600" fill="#4a7c6c">周期正常</text>
     </g>
   </g>

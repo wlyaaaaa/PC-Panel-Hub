@@ -3,6 +3,11 @@ param(
     [string]$Port = "COM7",
     [int]$IntervalMs = 1000,
     [int]$FullResyncEveryFrames = 300,
+    [int]$PreviewIntervalSeconds = 45,
+    [int64]$MaxStackLogBytes = 1048576,
+    [int64]$MaxStreamLogBytes = 5242880,
+    [int64]$MaxWatchdogLogBytes = 2097152,
+    [ValidateRange(1, 32)][int]$LogBackupCount = 3,
     [int]$ResumeDelaySeconds = 8,
     [int]$QuickBlankTimeoutMs = 2500,
     [int]$PollSeconds = 2,
@@ -21,12 +26,15 @@ $Root = (Resolve-Path -LiteralPath $Root).Path
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $outDir = Join-Path $scriptDir "out"
 $logPath = Join-Path $outDir "side-screen-watchdog.log"
-$stdoutPath = Join-Path $outDir "side-screen-stack.stdout.log"
-$stderrPath = Join-Path $outDir "side-screen-stack.stderr.log"
 $childPidPath = Join-Path $outDir "side-screen-stack-child.pid"
 $watchdogPidPath = Join-Path $outDir "side-screen-watchdog.pid"
 $pausedPath = Join-Path $outDir "side-screen-watchdog.paused"
 $heartbeatPath = Join-Path $outDir "stream\stream-heartbeat.json"
+$heartbeatPaths = @(
+    $heartbeatPath,
+    (Join-Path $outDir "stream\stream-heartbeat-a.json"),
+    (Join-Path $outDir "stream\stream-heartbeat-b.json")
+)
 $restartFlag = Join-Path $outDir "restart-on-start.flag"
 $stackScript = Join-Path $scriptDir "StartSideScreenStack.ps1"
 $stopScript = Join-Path $scriptDir "StopSideScreenStack.ps1"
@@ -39,10 +47,50 @@ $watchdogStartedUtc = [DateTime]::UtcNow
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 . $shutdownPolicy
 
+function Write-BoundedLogLine {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Message,
+        [Parameter(Mandatory = $true)][int64]$MaxBytes,
+        [int]$BackupCount = 3
+    )
+
+    try {
+        $directory = Split-Path -Parent $Path
+        if (-not [string]::IsNullOrWhiteSpace($directory)) {
+            New-Item -ItemType Directory -Force -Path $directory | Out-Null
+        }
+
+        $recordBytes = [Text.Encoding]::UTF8.GetByteCount($Message + [Environment]::NewLine)
+        if ($MaxBytes -gt 0 -and
+            (Test-Path -LiteralPath $Path -PathType Leaf) -and
+            ((Get-Item -LiteralPath $Path).Length + $recordBytes -gt $MaxBytes)) {
+            for ($index = $BackupCount; $index -ge 1; $index--) {
+                $source = if ($index -eq 1) { $Path } else { "{0}.{1}" -f $Path, ($index - 1) }
+                $destination = "{0}.{1}" -f $Path, $index
+                if (Test-Path -LiteralPath $source -PathType Leaf) {
+                    Remove-Item -LiteralPath $destination -Force -ErrorAction SilentlyContinue
+                    if ((Get-Item -LiteralPath $source).Length -gt $MaxBytes) {
+                        Remove-Item -LiteralPath $source -Force
+                    }
+                    else {
+                        Move-Item -LiteralPath $source -Destination $destination -Force
+                    }
+                }
+            }
+        }
+
+        Add-Content -LiteralPath $Path -Value $Message -Encoding UTF8
+    }
+    catch {
+        # Diagnostics are best effort: a log viewer must never stop the watchdog.
+    }
+}
+
 function Write-WatchdogLog {
     param([string]$Message)
     $line = "{0} {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $Message
-    Add-Content -LiteralPath $logPath -Value $line -Encoding UTF8
+    Write-BoundedLogLine -Path $logPath -Message $line -MaxBytes $MaxWatchdogLogBytes -BackupCount $LogBackupCount
     Write-Host $line
 }
 function Stop-Stack {
@@ -55,7 +103,9 @@ function Start-Stack {
     param([string]$Reason)
     Stop-Stack -Reason ("pre-start/{0}" -f $Reason)
     Remove-Item -LiteralPath $restartFlag -Force -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath $heartbeatPath -Force -ErrorAction SilentlyContinue
+    foreach ($candidatePath in $heartbeatPaths) {
+        Remove-Item -LiteralPath $candidatePath -Force -ErrorAction SilentlyContinue
+    }
     Write-WatchdogLog ("start stack reason={0} root={1} port={2} interval={3}" -f $Reason, $Root, $Port, $IntervalMs)
     $arguments = @(
         "-NoProfile",
@@ -65,37 +115,64 @@ function Start-Stack {
         "-Port", $Port,
         "-IntervalMs", [string]$IntervalMs,
         "-FullResyncEveryFrames", [string]$FullResyncEveryFrames,
+        "-PreviewIntervalSeconds", [string]$PreviewIntervalSeconds,
+        "-MaxStackLogBytes", [string]$MaxStackLogBytes,
+        "-MaxStreamLogBytes", [string]$MaxStreamLogBytes,
+        "-LogBackupCount", [string]$LogBackupCount,
         "-Worker"
     )
-    $process = Start-Process -FilePath "powershell.exe" -ArgumentList $arguments -WindowStyle Hidden -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -PassThru
+    $process = Start-Process -FilePath "powershell.exe" -ArgumentList $arguments -WindowStyle Hidden -PassThru
     Set-Content -LiteralPath $childPidPath -Value $process.Id -Encoding ASCII
     Write-WatchdogLog ("stack child pid={0}" -f $process.Id)
     return $process
 }
 
 function Get-StreamHeartbeatHealth {
-    if (!(Test-Path -LiteralPath $heartbeatPath -PathType Leaf)) {
+    $candidates = @(
+        $heartbeatPaths |
+            Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
+            ForEach-Object { Get-Item -LiteralPath $_ -ErrorAction SilentlyContinue } |
+            Where-Object { $null -ne $_ } |
+            Sort-Object LastWriteTimeUtc -Descending
+    )
+    if ($candidates.Count -eq 0) {
         return [pscustomobject]@{ Healthy = $false; Reason = "missing" }
     }
 
-    try {
-        $item = Get-Item -LiteralPath $heartbeatPath
+    $invalidReasons = @()
+    foreach ($item in $candidates) {
         $ageSeconds = ([DateTime]::UtcNow - $item.LastWriteTimeUtc).TotalSeconds
         if ($ageSeconds -gt $HeartbeatStaleSeconds) {
-            return [pscustomobject]@{ Healthy = $false; Reason = ("stale ageSeconds={0:N1}" -f $ageSeconds) }
+            $invalidReasons += ("stale {0} ageSeconds={1:N1}" -f $item.Name, $ageSeconds)
+            continue
         }
 
-        $heartbeat = Get-Content -Raw -LiteralPath $heartbeatPath | ConvertFrom-Json
-        if ($null -eq $heartbeat.frame -or [int64]$heartbeat.frame -le 0) {
-            return [pscustomobject]@{ Healthy = $false; Reason = "frame-invalid" }
+        try {
+            $heartbeat = Get-Content -Raw -LiteralPath $item.FullName | ConvertFrom-Json
+            if ($null -eq $heartbeat.frame -or [int64]$heartbeat.frame -le 0) {
+                $invalidReasons += ("frame-invalid {0}" -f $item.Name)
+                continue
+            }
+            $frameStatus = [string]$heartbeat.status
+            if ($frameStatus -ne "ok") {
+                return [pscustomobject]@{
+                    Healthy = $false
+                    Reason = ("frame-status={0} error={1}" -f $frameStatus, [string]$heartbeat.error)
+                }
+            }
+            return [pscustomobject]@{
+                Healthy = $true
+                Reason = ("frame={0} source={1}" -f [int64]$heartbeat.frame, $item.Name)
+            }
         }
-        if ([string]$heartbeat.status -eq "fatal") {
-            return [pscustomobject]@{ Healthy = $false; Reason = ("fatal error={0}" -f [string]$heartbeat.error) }
+        catch {
+            $invalidReasons += ("invalid {0}: {1}" -f $item.Name, $_.Exception.Message)
         }
-        return [pscustomobject]@{ Healthy = $true; Reason = ("frame={0}" -f [int64]$heartbeat.frame) }
     }
-    catch {
-        return [pscustomobject]@{ Healthy = $false; Reason = ("invalid: {0}" -f $_.Exception.Message) }
+
+    return [pscustomobject]@{
+        Healthy = $false
+        Reason = ($invalidReasons -join "; ")
     }
 }
 

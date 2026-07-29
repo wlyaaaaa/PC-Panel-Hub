@@ -115,7 +115,7 @@ namespace TURZX.SideScreen
                     Date = "2026-07-05",
                     Weekday = "周日",
                     Time = "17:02:35",
-                    UpdateIntervalSeconds = 0.5
+                    UpdateIntervalSeconds = 1.0
                 },
                 Weather = new WeatherSnapshot
                 {
@@ -162,14 +162,19 @@ namespace TURZX.SideScreen
                     Average = 141,
                     Low1Percent = 118,
                     FrameTimeMs = 6.9,
-                    Source = "PresentMon / RTSS API"
+                    Status = "active",
+                    Source = "presentmon",
+                    SampleAgeSeconds = 0.2,
+                    Detail = "game.exe"
                 },
                 Memory = new MemorySnapshot
                 {
                     RamUsagePercent = 34,
                     RamUsedGb = 22.0,
                     RamTotalGb = 64.0,
-                    VramUsagePercent = 14
+                    VramUsagePercent = 14,
+                    MotherboardTemperatureCelsius = 41,
+                    ModuleTemperaturesCelsius = new double[] { 44, 46 }
                 },
                 Network = new NetworkSnapshot
                 {
@@ -177,13 +182,19 @@ namespace TURZX.SideScreen
                     UploadBytesPerSecond = 22528,
                     PingMs = 18,
                     JitterMs = 2,
-                    PacketLossPercent = 0
+                    PacketLossPercent = 0,
+                    DpcPercent = 0.2
                 },
                 Disks = new DiskSnapshot[]
                 {
                     new DiskSnapshot { Drive = "C:", Label = "Win11", UsagePercent = 44, FreeText = "120 GB 可用" },
                     new DiskSnapshot { Drive = "D:", Label = "game", UsagePercent = 70, FreeText = "320 GB 可用" },
                     new DiskSnapshot { Drive = "E:", Label = "software", UsagePercent = 35, FreeText = "450 GB 可用" }
+                },
+                PhysicalDisks = new PhysicalDiskSnapshot[]
+                {
+                    new PhysicalDiskSnapshot { Model = "Samsung SSD 990 PRO 2TB", VolumeDrives = new string[] { "C:" }, BusType = "NVMe", MediaType = "SSD", CapacityGb = 1863, UsedPercent = 61, FreeGb = 726, ReadBytesPerSecond = 118 * 1024 * 1024, WriteBytesPerSecond = 77 * 1024 * 1024, ActivityPercent = 40, TemperatureCelsius = 49, Status = "ok", Source = "sample" },
+                    new PhysicalDiskSnapshot { Model = "WD_BLACK SN850X 4TB", VolumeDrives = new string[] { "D:", "E:" }, BusType = "NVMe", MediaType = "SSD", CapacityGb = 3726, UsedPercent = 74, FreeGb = 969, ReadBytesPerSecond = 4 * 1024 * 1024, WriteBytesPerSecond = 16 * 1024 * 1024, ActivityPercent = 11, TemperatureCelsius = 43, Status = "ok", Source = "sample" }
                 },
                 TopProcesses = new ProcessSnapshot[]
                 {
@@ -195,9 +206,8 @@ namespace TURZX.SideScreen
                 {
                     Status = "诊断服务在线",
                     Detail = "模块正常运转中",
-                    DpcLatencyUs = 430,
                     HardPageFaultsPerSecond = 0,
-                    RefreshIntervalSeconds = 0.5
+                    RefreshIntervalSeconds = 1.0
                 }
             };
         }

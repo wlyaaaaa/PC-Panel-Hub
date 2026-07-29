@@ -19,10 +19,48 @@ function Find-Csc {
     return $null
 }
 
+function Test-PythonModules {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [string[]]$Modules = @()
+    )
+
+    if (!(Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return $false
+    }
+    if ($Modules.Count -eq 0) {
+        return $true
+    }
+
+    & $Path -c "import importlib.util,sys;sys.exit(0 if all(importlib.util.find_spec(name) is not None for name in sys.argv[1:]) else 1)" @Modules 2>$null
+    return $LASTEXITCODE -eq 0
+}
+
 function Find-Python {
+    $requiresTimeAudit = -not [string]::IsNullOrWhiteSpace($env:TIMEAUDIT_DSN)
+    $requiredModules = if ($requiresTimeAudit) { @("psutil", "asyncpg") } else { @() }
     $command = Get-Command python -ErrorAction SilentlyContinue
-    if ($null -ne $command) {
-        return $command.Source
+    $commandPath = if ($command) { $command.Source } else { $null }
+    $candidates = if ($requiresTimeAudit) {
+        @(
+            (Join-Path $env:LOCALAPPDATA "Programs\Python\Python311\python.exe"),
+            $commandPath,
+            (Join-Path $env:LOCALAPPDATA "Programs\Python\Python314\python.exe"),
+            (Join-Path $env:LOCALAPPDATA "Microsoft\WindowsApps\python.exe")
+        )
+    } else {
+        @(
+            $commandPath,
+            (Join-Path $env:LOCALAPPDATA "Programs\Python\Python311\python.exe"),
+            (Join-Path $env:LOCALAPPDATA "Programs\Python\Python314\python.exe"),
+            (Join-Path $env:LOCALAPPDATA "Microsoft\WindowsApps\python.exe")
+        )
+    }
+
+    foreach ($candidate in @($candidates | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)) {
+        if (Test-PythonModules -Path $candidate -Modules $requiredModules) {
+            return $candidate
+        }
     }
     return $null
 }
@@ -37,9 +75,14 @@ $found = [ordered]@{}
 
 $python = Find-Python
 if ([string]::IsNullOrWhiteSpace($python)) {
-    $missing.Add("python")
+    if ([string]::IsNullOrWhiteSpace($env:TIMEAUDIT_DSN)) {
+        $missing.Add("python")
+    } else {
+        $missing.Add("python with psutil+asyncpg")
+    }
 } else {
     $found.python = $python
+    $found.python_timeaudit_ready = Test-PythonModules -Path $python -Modules @("psutil", "asyncpg")
 }
 
 $csc = Find-Csc

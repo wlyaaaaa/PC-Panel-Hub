@@ -209,14 +209,19 @@ namespace TURZX.SideScreen
                     VramTotalGb = 32.0,
                     LoadHistoryPercent = BuildHistory(gpu, frame + 3)
                 },
-                Fps = new FpsSnapshot { Current = 100 + frame, Average = 98 + frame, Low1Percent = 80 + frame, FrameTimeMs = 9.5, Source = "DiffProbe" },
-                Memory = new MemorySnapshot { RamUsagePercent = 34 + frame, RamUsedGb = 22.0, RamTotalGb = 64.0, VramUsagePercent = 14 + frame },
-                Network = new NetworkSnapshot { DownloadBytesPerSecond = 10240 + frame * 256, UploadBytesPerSecond = 22528 + frame * 512, PingMs = 18, JitterMs = 2, PacketLossPercent = 0 },
+                Fps = new FpsSnapshot { Current = 100 + frame, Average = 98 + frame, Low1Percent = 80 + frame, FrameTimeMs = 9.5, Status = "active", Source = "presentmon", SampleAgeSeconds = 0.1, Detail = "diff-probe.exe" },
+                Memory = new MemorySnapshot { RamUsagePercent = 34 + frame, RamUsedGb = 22.0, RamTotalGb = 64.0, VramUsagePercent = 14 + frame, MotherboardTemperatureCelsius = 41, ModuleTemperaturesCelsius = new double[] { 44 + frame / 10.0, 46 + frame / 10.0 } },
+                Network = new NetworkSnapshot { DownloadBytesPerSecond = 10240 + frame * 256, UploadBytesPerSecond = 22528 + frame * 512, PingMs = 18, JitterMs = 2, PacketLossPercent = 0, DpcPercent = 0.2 + frame / 100.0 },
                 Disks = new DiskSnapshot[]
                 {
                     new DiskSnapshot { Drive = "C:", Label = "Win11", UsagePercent = 44, FreeText = "343 GB 可用" },
                     new DiskSnapshot { Drive = "E:", Label = "Predator 4TB", UsagePercent = 35, FreeText = "2 TB 可用" },
                     new DiskSnapshot { Drive = "U:", Label = "AUTO", UsagePercent = 0, FreeText = "hotplug" }
+                },
+                PhysicalDisks = new PhysicalDiskSnapshot[]
+                {
+                    new PhysicalDiskSnapshot { Model = "Samsung SSD 990 PRO 2TB", VolumeDrives = new string[] { "C:" }, BusType = "NVMe", MediaType = "SSD", CapacityGb = 1863, UsedPercent = 61, FreeGb = 726, ReadBytesPerSecond = (118 + frame) * 1024 * 1024, WriteBytesPerSecond = (77 + frame) * 1024 * 1024, ActivityPercent = 40 + frame, TemperatureCelsius = 49, Status = "ok", Source = "diff_probe" },
+                    new PhysicalDiskSnapshot { Model = "WD_BLACK SN850X 4TB", VolumeDrives = new string[] { "E:" }, BusType = "NVMe", MediaType = "SSD", CapacityGb = 3726, UsedPercent = 35, FreeGb = 2048, ReadBytesPerSecond = frame * 1024 * 1024, WriteBytesPerSecond = (16 + frame) * 1024 * 1024, ActivityPercent = 11 + frame, TemperatureCelsius = 43, Status = "ok", Source = "diff_probe" }
                 },
                 TopProcesses = new ProcessSnapshot[]
                 {
@@ -224,7 +229,7 @@ namespace TURZX.SideScreen
                     new ProcessSnapshot { Name = "chrome.exe", CpuPercent = 6, GpuPercent = 3, MemoryGb = 3.1 },
                     new ProcessSnapshot { Name = "python.exe", Description = "metrics_agent", CpuPercent = 2, GpuPercent = 0, MemoryGb = 0.4 }
                 },
-                Health = new HealthSnapshot { Status = "差分探针运行中", Detail = "FRAME " + frame, DpcLatencyUs = 430 + frame, HardPageFaultsPerSecond = 0, RefreshIntervalSeconds = 1.0 }
+                Health = new HealthSnapshot { Status = "差分探针运行中", Detail = "FRAME " + frame, HardPageFaultsPerSecond = 0, RefreshIntervalSeconds = 1.0 }
             };
         }
 

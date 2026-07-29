@@ -15,7 +15,7 @@ $fpsTitle = "FPS / " + [char]0x5E27 + [char]0x7387
 $diskUsage = [string]([char]0x4F7F) + [char]0x7528 + [char]0x7387
 $systemOk = [string]([char]0x7CFB) + [char]0x7EDF + [char]0x6B63 + [char]0x5E38
 $foreground = [string]([char]0x524D) + [char]0x53F0 + " game.exe"
-$updated = [string]([char]0x66F4) + [char]0x65B0 + " 0.5s"
+$updated = [string]([char]0x66F4) + [char]0x65B0 + " 1s"
 
 $requiredText = @(
     $gpuCore,

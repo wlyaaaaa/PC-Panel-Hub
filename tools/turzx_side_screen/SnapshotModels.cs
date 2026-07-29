@@ -42,6 +42,9 @@ namespace TURZX.SideScreen
         [DataMember(Name = "disks")]
         public DiskSnapshot[] Disks { get; set; }
 
+        [DataMember(Name = "physical_disks")]
+        public PhysicalDiskSnapshot[] PhysicalDisks { get; set; }
+
         [DataMember(Name = "network")]
         public NetworkSnapshot Network { get; set; }
 
@@ -252,6 +255,12 @@ namespace TURZX.SideScreen
 
         [DataMember(Name = "status")]
         public string Status { get; set; }
+
+        [DataMember(Name = "sample_age_seconds")]
+        public double? SampleAgeSeconds { get; set; }
+
+        [DataMember(Name = "detail")]
+        public string Detail { get; set; }
     }
 
     [DataContract]
@@ -287,6 +296,12 @@ namespace TURZX.SideScreen
         [DataMember(Name = "total_gb")]
         public double? TotalGb { get; set; }
 
+        [DataMember(Name = "motherboard_temperature_celsius")]
+        public double? MotherboardTemperatureCelsius { get; set; }
+
+        [DataMember(Name = "module_temperatures_celsius")]
+        public double[] ModuleTemperaturesCelsius { get; set; }
+
         [DataMember(Name = "source")]
         public string Source { get; set; }
     }
@@ -320,6 +335,55 @@ namespace TURZX.SideScreen
     }
 
     [DataContract]
+    public sealed class PhysicalDiskSnapshot
+    {
+        [DataMember(Name = "model")]
+        public string Model { get; set; }
+
+        [DataMember(Name = "volume_drives")]
+        public string[] VolumeDrives { get; set; }
+
+        [DataMember(Name = "volumes")]
+        public string[] Volumes { get; set; }
+
+        [DataMember(Name = "bus_type")]
+        public string BusType { get; set; }
+
+        [DataMember(Name = "media_type")]
+        public string MediaType { get; set; }
+
+        [DataMember(Name = "capacity_gb")]
+        public double? CapacityGb { get; set; }
+
+        [DataMember(Name = "total_gb")]
+        public double? TotalGb { get; set; }
+
+        [DataMember(Name = "used_percent")]
+        public double? UsedPercent { get; set; }
+
+        [DataMember(Name = "free_gb")]
+        public double? FreeGb { get; set; }
+
+        [DataMember(Name = "read_bytes_per_second")]
+        public double? ReadBytesPerSecond { get; set; }
+
+        [DataMember(Name = "write_bytes_per_second")]
+        public double? WriteBytesPerSecond { get; set; }
+
+        [DataMember(Name = "activity_percent")]
+        public double? ActivityPercent { get; set; }
+
+        [DataMember(Name = "temperature_celsius")]
+        public double? TemperatureCelsius { get; set; }
+
+        [DataMember(Name = "status")]
+        public string Status { get; set; }
+
+        [DataMember(Name = "source")]
+        public string Source { get; set; }
+    }
+
+    [DataContract]
     public sealed class NetworkSnapshot
     {
         [DataMember(Name = "download_bytes_per_second")]
@@ -342,6 +406,12 @@ namespace TURZX.SideScreen
 
         [DataMember(Name = "packet_loss_percent")]
         public double? PacketLossPercent { get; set; }
+
+        [DataMember(Name = "dpc_latency_microseconds")]
+        public double? DpcLatencyMicroseconds { get; set; }
+
+        [DataMember(Name = "dpc_percent")]
+        public double? DpcPercent { get; set; }
 
         [DataMember(Name = "addresses")]
         public string[] Addresses { get; set; }

@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from types import SimpleNamespace
@@ -27,6 +28,7 @@ REQUIRED_SNAPSHOT_KEYS = {
     "fps",
     "memory",
     "disks",
+    "physical_disks",
     "network",
     "top_processes",
     "health",
@@ -36,8 +38,17 @@ REQUIRED_SNAPSHOT_KEYS = {
 
 class MetricsAgentTests(unittest.TestCase):
     def setUp(self):
+        trust_log_patcher = patch.object(metrics_agent, "_maybe_write_data_trust_log")
+        trust_log_patcher.start()
+        self.addCleanup(trust_log_patcher.stop)
         if hasattr(metrics_agent, "_reset_gpu_cache_for_tests"):
             metrics_agent._reset_gpu_cache_for_tests()
+        if hasattr(metrics_agent, "_reset_lhm_cache_for_tests"):
+            metrics_agent._reset_lhm_cache_for_tests()
+        if hasattr(metrics_agent, "_reset_physical_disk_cache_for_tests"):
+            metrics_agent._reset_physical_disk_cache_for_tests()
+        if hasattr(metrics_agent, "_reset_weather_cache_for_tests"):
+            metrics_agent._reset_weather_cache_for_tests()
 
     def test_build_snapshot_has_stable_schema(self):
         fake_disk = {
@@ -56,6 +67,7 @@ class MetricsAgentTests(unittest.TestCase):
                 return_value=metrics_agent.empty_snapshot()["weather"],
             ),
             patch.object(metrics_agent, "enumerate_disks", return_value=[fake_disk]),
+            patch.object(metrics_agent, "read_physical_disks", return_value=[]),
             patch.object(metrics_agent, "read_top_processes", return_value=[]),
             patch.object(
                 metrics_agent,
@@ -151,6 +163,13 @@ class MetricsAgentTests(unittest.TestCase):
             }
         )
         snapshot["disks"] = [{"drive": "C:\\", "used_percent": 44.0, "free_gb": 120.0, "total_gb": 512.0}]
+        snapshot["physical_disks"] = [
+            {
+                "device_id": "1",
+                "used_percent": 44.0,
+                "source": "win32_cim+psutil",
+            }
+        ]
         snapshot["network"].update(
             {
                 "source": "stdlib+ping",
@@ -170,12 +189,42 @@ class MetricsAgentTests(unittest.TestCase):
         self.assertEqual(0, trust["missing_count"])
         self.assertEqual("ok", trust["items"][0]["status"])
 
-    def test_data_trust_log_writes_jsonl_summary(self):
-        log_path = Path(__file__).resolve().parent / "out" / "data-trust-test.jsonl"
-        log_path.parent.mkdir(exist_ok=True)
-        if log_path.exists():
-            log_path.unlink()
+    def test_data_trust_marks_lhm_stale_cpu_gpu_and_disks(self):
+        cpu = {
+            "source": "win32_getsystemtimes+lhm_stale",
+            "usage_percent": 20.0,
+            "temperature_celsius": 60.0,
+            "power_watts": 100.0,
+            "clock_mhz": 1734.0,
+            "core_voltage": 1.2,
+        }
+        gpu = {
+            "source": "nvml+lhm_stale",
+            "usage_percent": 15.0,
+            "temperature_celsius": 50.0,
+            "power_watts": 120.0,
+            "core_clock_mhz": 2500.0,
+            "memory_clock_mhz": 16000.0,
+            "core_voltage": 0.95,
+        }
+        disks = [
+            {
+                "device_id": "1",
+                "used_percent": 50.0,
+                "source": "win32_cim+psutil+lhm_stale",
+            }
+        ]
 
+        items = [
+            metrics_agent._trust_cpu(cpu),
+            metrics_agent._trust_gpu(gpu),
+            metrics_agent._trust_disks(disks),
+        ]
+
+        self.assertEqual(["stale", "stale", "stale"], [item["status"] for item in items])
+        self.assertEqual([85, 85, 85], [item["score"] for item in items])
+
+    def test_data_trust_log_writes_jsonl_summary(self):
         trust = {
             "score": 82,
             "level": "warn",
@@ -185,13 +234,76 @@ class MetricsAgentTests(unittest.TestCase):
             "items": [{"component": "fps", "status": "idle", "score": 70}],
         }
 
-        metrics_agent.write_data_trust_log(log_path, trust, timestamp_unix_ms=123456)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_path = Path(temp_dir) / "data-trust-test.jsonl"
+            metrics_agent.write_data_trust_log(log_path, trust, timestamp_unix_ms=123456)
 
-        payload = json.loads(log_path.read_text(encoding="utf-8").strip())
+            payload = json.loads(log_path.read_text(encoding="utf-8").strip())
         self.assertEqual(123456, payload["timestamp_unix_ms"])
         self.assertEqual(82, payload["score"])
         self.assertEqual("fps", payload["worst_component"])
         self.assertEqual(1, payload["missing_count"])
+
+    def test_data_trust_log_rotates_before_exceeding_size_cap(self):
+        trust = {
+            "score": 82,
+            "level": "warn",
+            "worst_component": "fps",
+            "items": [{"component": "fps", "status": "idle", "score": 70}],
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_path = Path(temp_dir) / "data-trust.jsonl"
+            metrics_agent.write_data_trust_log(
+                log_path,
+                trust,
+                timestamp_unix_ms=1,
+                max_bytes=350,
+                backup_count=2,
+            )
+            metrics_agent.write_data_trust_log(
+                log_path,
+                trust,
+                timestamp_unix_ms=2,
+                max_bytes=350,
+                backup_count=2,
+            )
+            metrics_agent.write_data_trust_log(
+                log_path,
+                trust,
+                timestamp_unix_ms=3,
+                max_bytes=350,
+                backup_count=2,
+            )
+
+            self.assertTrue(log_path.exists())
+            self.assertTrue(Path(f"{log_path}.1").exists())
+            self.assertLessEqual(log_path.stat().st_size, 350)
+            self.assertLessEqual(Path(f"{log_path}.1").stat().st_size, 350)
+
+    def test_data_trust_log_discards_preexisting_oversized_generation(self):
+        trust = {
+            "score": 100,
+            "level": "ok",
+            "items": [],
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_path = Path(temp_dir) / "data-trust.jsonl"
+            log_path.write_bytes(b"x" * 4096)
+            Path(f"{log_path}.1").write_bytes(b"y" * 4096)
+
+            metrics_agent.write_data_trust_log(
+                log_path,
+                trust,
+                timestamp_unix_ms=1,
+                max_bytes=350,
+                backup_count=2,
+            )
+
+            retained = list(Path(temp_dir).glob("data-trust.jsonl*"))
+            self.assertTrue(retained)
+            self.assertTrue(all(path.stat().st_size <= 350 for path in retained))
 
     def test_display_time_uses_configured_china_timezone(self):
         value = metrics_agent.display_time_iso_from_utc(
@@ -219,6 +331,248 @@ class MetricsAgentTests(unittest.TestCase):
                 set(disk.keys()),
             )
             self.assertRegex(disk["drive"], r"^[A-Z]:\\$")
+
+    def test_physical_disk_topology_filters_to_four_real_disks_and_merges_c_e(self):
+        tib = 1024**4
+        gib = 1024**3
+        raw = [
+            {
+                "device_id": "0",
+                "model": "Hitachi HUS724040ALE641",
+                "bus_type": "SATA",
+                "media_type": "HDD",
+                "capacity_bytes": 4 * tib,
+                "volumes": [
+                    {"drive": "D:\\", "label": "Data", "capacity_bytes": 4 * tib, "free_bytes": 800 * gib, "drive_type": 3}
+                ],
+            },
+            {
+                "device_id": "1",
+                "model": "Predator SSD GM7000 4TB",
+                "bus_type": "NVMe",
+                "media_type": "SSD",
+                "capacity_bytes": 4 * tib,
+                "volumes": [
+                    {"drive": "C:\\", "label": "Windows", "capacity_bytes": 1 * tib, "free_bytes": 100 * gib, "drive_type": 3},
+                    {"drive": "E:\\", "label": "Projects", "capacity_bytes": 3 * tib, "free_bytes": 300 * gib, "drive_type": 3},
+                ],
+            },
+            {
+                "device_id": "2",
+                "model": "XPG GAMMIX S50 Lite",
+                "bus_type": "NVMe",
+                "media_type": "SSD",
+                "capacity_bytes": 2 * tib,
+                "volumes": [
+                    {"drive": "G:\\", "label": "Backup", "capacity_bytes": 2 * tib, "free_bytes": 1 * tib, "drive_type": 3}
+                ],
+            },
+            {
+                "device_id": "3",
+                "model": "Romex RAMDISK",
+                "bus_type": "RAM",
+                "media_type": "RAM Disk",
+                "capacity_bytes": 12 * gib,
+                "volumes": [
+                    {"drive": "Z:\\", "label": "Cache", "capacity_bytes": 12 * gib, "free_bytes": 4 * gib, "drive_type": 6}
+                ],
+            },
+            {
+                "device_id": "4",
+                "model": "Microsoft Virtual Disk",
+                "bus_type": "File Backed Virtual",
+                "media_type": "Unspecified",
+                "capacity_bytes": 300 * gib,
+                "volumes": [
+                    {"drive": "V:\\", "label": "DevDrive", "capacity_bytes": 300 * gib, "free_bytes": 100 * gib, "drive_type": 3}
+                ],
+            },
+            {
+                "device_id": "5",
+                "model": "Lenovo thinkplus 1TB",
+                "bus_type": "USB",
+                "media_type": "SSD",
+                "capacity_bytes": 1 * tib,
+                "pnp_device_id": "USBSTOR\\DISK&VEN_LENOVO",
+                "volumes": [
+                    {"drive": "H:\\", "label": "Cold", "capacity_bytes": 1 * tib, "free_bytes": 700 * gib, "drive_type": 3}
+                ],
+            },
+            {
+                "device_id": "6",
+                "model": "Kingston DataTraveler",
+                "bus_type": "USB",
+                "media_type": "Removable",
+                "capacity_bytes": 28_800_000_000,
+                "pnp_device_id": "USBSTOR\\DISK&VEN_KINGSTON",
+                "volumes": [
+                    {"drive": "F:\\", "label": "recover", "capacity_bytes": 28_800_000_000, "free_bytes": 10 * gib, "drive_type": 2}
+                ],
+            },
+        ]
+
+        disks = metrics_agent._filter_physical_disk_topology(raw)
+
+        self.assertEqual(["0", "1", "2", "5"], [disk["device_id"] for disk in disks])
+        predator = next(disk for disk in disks if disk["device_id"] == "1")
+        self.assertEqual(["C:\\", "E:\\"], predator["volume_drives"])
+
+    def test_small_usb_filter_uses_strict_32_billion_byte_boundary(self):
+        raw = [
+            {
+                "device_id": "6",
+                "model": "Small USB",
+                "bus_type": "USB",
+                "media_type": "Removable",
+                "capacity_bytes": 31_999_999_999,
+                "volumes": [],
+            },
+            {
+                "device_id": "7",
+                "model": "Boundary USB",
+                "bus_type": "USB",
+                "media_type": "Removable",
+                "capacity_bytes": 32_000_000_000,
+                "volumes": [],
+            },
+        ]
+
+        disks = metrics_agent._filter_physical_disk_topology(raw)
+
+        self.assertEqual(["7"], [disk["device_id"] for disk in disks])
+
+    def test_physical_disk_rate_sampler_reports_differential_rates(self):
+        readings = iter(
+            [
+                {
+                    "PhysicalDrive1": SimpleNamespace(
+                        read_bytes=1_000,
+                        write_bytes=2_000,
+                        read_time=100,
+                        write_time=200,
+                    )
+                },
+                {
+                    "PhysicalDrive1": SimpleNamespace(
+                        read_bytes=2_024,
+                        write_bytes=3_024,
+                        read_time=200,
+                        write_time=250,
+                    )
+                },
+            ]
+        )
+        timestamps = iter([10.0, 10.5])
+        sampler = metrics_agent.PhysicalDiskRateSampler(
+            read_counters=lambda: next(readings),
+            now=lambda: next(timestamps),
+        )
+        topology = [{"device_id": "1"}]
+
+        first = sampler.sample(topology)["1"]
+        second = sampler.sample(topology)["1"]
+
+        self.assertIsNone(first["read_bytes_per_second"])
+        self.assertIsNone(first["write_bytes_per_second"])
+        self.assertEqual("warming", first["status"])
+        self.assertEqual(2048.0, second["read_bytes_per_second"])
+        self.assertEqual(2048.0, second["write_bytes_per_second"])
+        self.assertEqual(30.0, second["activity_percent"])
+        self.assertEqual("active", second["status"])
+
+    def test_read_physical_disks_combines_topology_rates_and_lhm_temperature(self):
+        topology = [
+            {
+                "device_id": "1",
+                "model": "Predator SSD GM7000 4TB",
+                "bus_type": "NVMe",
+                "media_type": "SSD",
+                "volume_drives": ["C:\\", "E:\\"],
+                "capacity_gb": 3815.0,
+                "used_percent": 90.6,
+                "free_gb": 358.0,
+            }
+        ]
+        rates = {
+            "1": {
+                "read_bytes_per_second": 2_048.0,
+                "write_bytes_per_second": 4_096.0,
+                "activity_percent": 3.0,
+                "source": "psutil",
+                "status": "active",
+            }
+        }
+        lhm = {
+            "disk_sensors": [
+                {
+                    "model": "Predator SSD GM7000 4TB",
+                    "temperature_celsius": 58.0,
+                    "activity_percent": 4.5,
+                    "total_space_gb": 4096.8,
+                }
+            ],
+            "source": "lhm",
+            "status": "live",
+        }
+
+        with (
+            patch.object(metrics_agent, "read_physical_disk_topology", return_value=topology),
+            patch.object(metrics_agent._PHYSICAL_DISK_RATE_SAMPLER, "sample", return_value=rates),
+            patch.object(metrics_agent, "read_lhm_sensor_snapshot", return_value=lhm),
+        ):
+            disks = metrics_agent.read_physical_disks()
+
+        self.assertEqual(1, len(disks))
+        self.assertEqual(
+            {
+                "device_id",
+                "model",
+                "bus_type",
+                "media_type",
+                "volume_drives",
+                "capacity_gb",
+                "used_percent",
+                "free_gb",
+                "read_bytes_per_second",
+                "write_bytes_per_second",
+                "activity_percent",
+                "temperature_celsius",
+                "source",
+                "status",
+            },
+            set(disks[0]),
+        )
+        self.assertEqual(58.0, disks[0]["temperature_celsius"])
+        self.assertEqual(4.5, disks[0]["activity_percent"])
+        self.assertEqual("win32_cim+psutil+lhm", disks[0]["source"])
+
+    def test_physical_disks_are_sorted_for_system_nvme_hdd_usb_display(self):
+        disks = [
+            {"device_id": "0", "volume_drives": ["D:\\"], "bus_type": "SATA", "media_type": "HDD"},
+            {"device_id": "1", "volume_drives": ["C:\\", "E:\\"], "bus_type": "NVMe", "media_type": "SSD"},
+            {"device_id": "2", "volume_drives": ["G:\\"], "bus_type": "NVMe", "media_type": "SSD"},
+            {"device_id": "5", "volume_drives": ["H:\\"], "bus_type": "USB", "media_type": "SSD"},
+        ]
+
+        ordered = sorted(disks, key=metrics_agent._physical_disk_display_sort_key)
+
+        self.assertEqual(["1", "2", "0", "5"], [disk["device_id"] for disk in ordered])
+
+    def test_physical_topology_cold_refresh_is_non_blocking(self):
+        release = threading.Event()
+
+        def slow_read():
+            release.wait(timeout=1.0)
+            return []
+
+        with patch.object(metrics_agent, "_read_physical_disk_topology_windows", side_effect=slow_read):
+            started = time.perf_counter()
+            disks = metrics_agent.read_physical_disk_topology()
+            elapsed = time.perf_counter() - started
+            release.set()
+
+        self.assertEqual([], disks)
+        self.assertLess(elapsed, 0.1)
 
     def test_snapshot_handler_returns_json(self):
         expected = metrics_agent.empty_snapshot()
@@ -294,6 +648,81 @@ class MetricsAgentTests(unittest.TestCase):
         self.assertEqual("北 2级", weather["wind_text"])
         self.assertEqual("weather_shim", weather["source"])
 
+    def test_weather_cold_refresh_is_non_blocking_when_shim_is_slow(self):
+        entered = threading.Event()
+        release = threading.Event()
+
+        def slow_fetch(url, timeout):
+            entered.set()
+            release.wait(timeout=1.0)
+            return {
+                "code": "200",
+                "now": {"temp": "31", "text": "晴"},
+            }
+
+        with (
+            patch.object(
+                metrics_agent,
+                "_load_config",
+                return_value={"weather": {"city": "田家庵"}},
+            ),
+            patch.object(metrics_agent, "_fetch_json", side_effect=slow_fetch),
+        ):
+            started = time.perf_counter()
+            weather = metrics_agent.read_weather_snapshot()
+            elapsed = time.perf_counter() - started
+            self.assertTrue(entered.wait(timeout=0.2))
+            release.set()
+            deadline = time.monotonic() + 1.0
+            while metrics_agent._weather_refreshing and time.monotonic() < deadline:
+                time.sleep(0.01)
+
+        self.assertEqual("fallback", weather["source"])
+        self.assertEqual("connecting", weather["status"])
+        self.assertLess(elapsed, 0.1)
+
+    def test_build_snapshot_does_not_wait_for_slow_weather(self):
+        entered = threading.Event()
+        release = threading.Event()
+
+        def slow_fetch(url, timeout):
+            entered.set()
+            release.wait(timeout=1.0)
+            return {
+                "code": "200",
+                "now": {"temp": "31", "text": "晴"},
+            }
+
+        with (
+            patch.object(
+                metrics_agent,
+                "_load_config",
+                return_value={"weather": {"city": "田家庵"}},
+            ),
+            patch.object(metrics_agent, "_fetch_json", side_effect=slow_fetch),
+            patch.object(metrics_agent, "read_foreground_app", return_value=metrics_agent.empty_snapshot()["foreground_app"]),
+            patch.object(metrics_agent, "read_cpu_snapshot", return_value=metrics_agent.empty_snapshot()["cpu"]),
+            patch.object(metrics_agent, "read_gpu_snapshot", return_value=metrics_agent.empty_snapshot()["gpu"]),
+            patch.object(metrics_agent, "read_fps_snapshot", return_value=metrics_agent.empty_snapshot()["fps"]),
+            patch.object(metrics_agent, "read_memory_snapshot", return_value=metrics_agent.empty_snapshot()["memory"]),
+            patch.object(metrics_agent, "enumerate_disks", return_value=[]),
+            patch.object(metrics_agent, "read_physical_disks", return_value=[]),
+            patch.object(metrics_agent, "read_network_snapshot", return_value=metrics_agent.empty_snapshot()["network"]),
+            patch.object(metrics_agent, "read_top_processes", return_value=[]),
+            patch.object(metrics_agent, "read_lhm_sensor_snapshot", return_value={}),
+            patch.object(metrics_agent, "_maybe_write_data_trust_log"),
+        ):
+            started = time.perf_counter()
+            metrics_agent.build_snapshot()
+            elapsed = time.perf_counter() - started
+            self.assertTrue(entered.wait(timeout=0.2))
+            release.set()
+            deadline = time.monotonic() + 1.0
+            while metrics_agent._weather_refreshing and time.monotonic() < deadline:
+                time.sleep(0.01)
+
+        self.assertLess(elapsed, 0.2)
+
     def test_parse_float_accepts_libre_hardware_monitor_degree_text(self):
         self.assertEqual(66.4, metrics_agent._parse_float("66.4 ｡紊"))
         self.assertEqual(1.308, metrics_agent._parse_float("1.308 V"))
@@ -323,12 +752,77 @@ class MetricsAgentTests(unittest.TestCase):
                             "Text": "Gigabyte X870E AORUS PRO ICE",
                             "Children": [
                                 {"Text": "Voltages", "Children": [{"Text": "Vcore", "Value": "1.308 V"}]},
+                                {
+                                    "Text": "ITE IT8696E",
+                                    "Children": [
+                                        {
+                                            "Text": "Temperatures",
+                                            "Children": [{"Text": "System #1", "Value": "35.0 °C"}],
+                                        }
+                                    ],
+                                },
+                            ],
+                        },
+                        {
+                            "Text": "Asgard - VAM5UH64C32BG-DVALWA (#1)",
+                            "Children": [
+                                {
+                                    "Text": "Temperatures",
+                                    "Children": [{"Text": "DIMM #1", "Value": "61.3 °C"}],
+                                }
+                            ],
+                        },
+                        {
+                            "Text": "Asgard - VAM5UH64C32BG-DVALWA (#3)",
+                            "Children": [
+                                {
+                                    "Text": "Temperatures",
+                                    "Children": [{"Text": "DIMM #3", "Value": "62.0 °C"}],
+                                }
                             ],
                         },
                         {
                             "Text": "NVIDIA GeForce RTX 5090 D",
                             "Children": [
                                 {"Text": "Voltages", "Children": [{"Text": "GPU Core Voltage", "Value": "0.985 V"}]},
+                                {"Text": "Powers", "Children": [{"Text": "GPU Package", "Value": "154.4 W"}]},
+                                {
+                                    "Text": "Clocks",
+                                    "Children": [
+                                        {"Text": "GPU Core", "Value": "2835.0 MHz"},
+                                        {"Text": "GPU Memory", "Value": "16401.0 MHz"},
+                                    ],
+                                },
+                                {
+                                    "Text": "Temperatures",
+                                    "Children": [
+                                        {"Text": "GPU Core", "Value": "54.0 °C"},
+                                        {"Text": "GPU Memory Junction", "Value": "70.0 °C"},
+                                    ],
+                                },
+                            ],
+                        },
+                        {
+                            "Text": "XPG GAMMIX S50 Lite",
+                            "Children": [
+                                {
+                                    "Text": "Temperatures",
+                                    "Children": [
+                                        {"Text": "Composite Temperature", "Value": "49.0 °C"},
+                                        {"Text": "Temperature #1", "Value": "-217.0 °C"},
+                                    ],
+                                },
+                                {
+                                    "Text": "Load",
+                                    "Children": [
+                                        {"Text": "Used Space", "Value": "40.2 %"},
+                                        {"Text": "Total Activity", "Value": "46.2 %"},
+                                    ],
+                                },
+                                {
+                                    "Text": "Data",
+                                    "Children": [{"Text": "Total Space", "Value": "2048.4 GB"}],
+                                },
                             ],
                         },
                     ],
@@ -341,26 +835,99 @@ class MetricsAgentTests(unittest.TestCase):
         self.assertEqual(66.4, sensors["cpu_temperature_celsius"])
         self.assertEqual(144.8, sensors["cpu_power_watts"])
         self.assertEqual(1.308, sensors["cpu_core_voltage"])
-        self.assertEqual(5557.0, sensors["cpu_clock_mhz"])
+        self.assertEqual(1734.0, sensors["cpu_clock_mhz"])
         self.assertEqual(0.985, sensors["gpu_core_voltage"])
+        self.assertEqual(154.4, sensors["gpu_power_watts"])
+        self.assertEqual(54.0, sensors["gpu_temperature_celsius"])
+        self.assertEqual(2835.0, sensors["gpu_core_clock_mhz"])
+        self.assertEqual(16401.0, sensors["gpu_memory_clock_mhz"])
+        self.assertEqual(70.0, sensors["gpu_hotspot_temperature_celsius"])
+        self.assertEqual(35.0, sensors["motherboard_temperature_celsius"])
+        self.assertEqual([61.3, 62.0], sensors["module_temperatures_celsius"])
+        self.assertEqual(49.0, sensors["disk_sensors"][0]["temperature_celsius"])
+        self.assertEqual(46.2, sensors["disk_sensors"][0]["activity_percent"])
+
+    def test_lhm_url_candidates_use_config_and_cache_last_successful_endpoint(self):
+        attempts = []
+
+        def fake_fetch(url, timeout):
+            attempts.append(url)
+            if url == "http://127.0.0.1:18085/data.json":
+                return {"Text": "Sensor", "Children": []}
+            raise OSError("not listening")
+
+        with (
+            patch.dict(
+                metrics_agent.os.environ,
+                {"TURZX_LHM_SENSOR_URL": "http://127.0.0.1:18084"},
+                clear=False,
+            ),
+            patch.object(
+                metrics_agent,
+                "_load_config",
+                return_value={"metrics": {"lhmUrls": ["http://127.0.0.1:18085"]}},
+            ),
+            patch.object(metrics_agent, "_fetch_json", side_effect=fake_fetch),
+        ):
+            first_payload, first_url = metrics_agent._fetch_lhm_sensor_payload()
+            attempts.clear()
+            second_payload, second_url = metrics_agent._fetch_lhm_sensor_payload()
+
+        self.assertEqual({"Text": "Sensor", "Children": []}, first_payload)
+        self.assertEqual("http://127.0.0.1:18085/data.json", first_url)
+        self.assertEqual(first_payload, second_payload)
+        self.assertEqual(first_url, second_url)
+        self.assertEqual(["http://127.0.0.1:18085/data.json"], attempts)
+
+    def test_lhm_average_clock_without_average_effective_is_not_reported(self):
+        payload = {
+            "Text": "Sensor",
+            "Children": [
+                {
+                    "Text": "CPU",
+                    "Children": [
+                        {
+                            "Text": "Clocks",
+                            "Children": [
+                                {"Text": "Cores (Average)", "Value": "5557.0 MHz"},
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+
+        sensors = metrics_agent._lhm_sensor_snapshot_from_payload(payload)
+
+        self.assertIsNone(sensors["cpu_clock_mhz"])
 
     def test_build_snapshot_merges_lhm_metrics_and_refresh_interval(self):
         fake_cpu = metrics_agent.empty_snapshot()["cpu"]
         fake_cpu["clock_mhz"] = 4292.0
         fake_cpu["clock_ghz"] = 4.29
+        fake_cpu["source"] = "win32_getsystemtimes+psutil"
         fake_gpu = metrics_agent._fallback_gpu_snapshot()
         fake_memory = metrics_agent.empty_snapshot()["memory"]
         lhm = {
             "cpu_temperature_celsius": 66.4,
             "cpu_power_watts": 144.8,
             "cpu_core_voltage": 1.308,
-            "cpu_clock_mhz": 5557.0,
+            "cpu_clock_mhz": 1734.0,
             "gpu_core_voltage": 0.985,
+            "gpu_temperature_celsius": 54.0,
+            "gpu_power_watts": 154.4,
+            "gpu_core_clock_mhz": 2835.0,
+            "gpu_memory_clock_mhz": 16401.0,
+            "motherboard_temperature_celsius": 35.0,
+            "module_temperatures_celsius": [61.3, 62.0],
+            "source": "lhm",
+            "status": "live",
         }
 
         with (
             patch.object(metrics_agent, "read_weather_snapshot", return_value=metrics_agent.empty_snapshot()["weather"]),
             patch.object(metrics_agent, "enumerate_disks", return_value=[]),
+            patch.object(metrics_agent, "read_physical_disks", return_value=[]),
             patch.object(metrics_agent, "read_top_processes", return_value=[]),
             patch.object(metrics_agent, "read_network_snapshot", return_value=metrics_agent.empty_snapshot()["network"]),
             patch.object(metrics_agent, "read_foreground_app", return_value=metrics_agent.empty_snapshot()["foreground_app"]),
@@ -368,26 +935,78 @@ class MetricsAgentTests(unittest.TestCase):
             patch.object(metrics_agent, "read_gpu_snapshot", return_value=fake_gpu),
             patch.object(metrics_agent, "read_memory_snapshot", return_value=fake_memory),
             patch.object(metrics_agent, "read_lhm_sensor_snapshot", return_value=lhm),
-            patch.object(metrics_agent, "_configured_refresh_interval_seconds", return_value=0.5),
-            patch.object(metrics_agent, "_SCHEDULER_LATENCY_SAMPLER", SimpleNamespace(sample=lambda: 430.0)),
+            patch.object(metrics_agent, "_configured_refresh_interval_seconds", return_value=1.0),
+            patch.object(metrics_agent, "_DPC_TIME_SAMPLER", SimpleNamespace(sample=lambda: 0.2)),
         ):
             snapshot = metrics_agent.build_snapshot()
 
         self.assertEqual(66.4, snapshot["cpu"]["temperature_celsius"])
         self.assertEqual(144.8, snapshot["cpu"]["power_watts"])
         self.assertEqual(1.308, snapshot["cpu"]["core_voltage"])
-        self.assertEqual(5557.0, snapshot["cpu"]["clock_mhz"])
-        self.assertEqual(5.557, snapshot["cpu"]["clock_ghz"])
+        self.assertEqual(1734.0, snapshot["cpu"]["clock_mhz"])
+        self.assertEqual(1.734, snapshot["cpu"]["clock_ghz"])
+        self.assertEqual("win32_getsystemtimes+psutil+lhm", snapshot["cpu"]["source"])
         self.assertEqual(0.985, snapshot["gpu"]["core_voltage"])
-        self.assertEqual(0.5, snapshot["health"]["refresh_interval_seconds"])
-        self.assertEqual(430.0, snapshot["health"]["dpc_latency_us"])
+        self.assertEqual(54.0, snapshot["gpu"]["temperature_celsius"])
+        self.assertEqual(154.4, snapshot["gpu"]["power_watts"])
+        self.assertEqual(2835.0, snapshot["gpu"]["core_clock_mhz"])
+        self.assertEqual(16401.0, snapshot["gpu"]["memory_clock_mhz"])
+        self.assertEqual(35.0, snapshot["memory"]["motherboard_temperature_celsius"])
+        self.assertEqual([61.3, 62.0], snapshot["memory"]["module_temperatures_celsius"])
+        self.assertEqual(1.0, snapshot["health"]["refresh_interval_seconds"])
+        self.assertIsNone(snapshot["health"]["dpc_latency_us"])
+        self.assertEqual(0.2, snapshot["network"]["dpc_percent"])
+        self.assertIn("pdh", snapshot["network"]["source"])
+
+    def test_windows_dpc_sampler_reports_real_percent_contract(self):
+        sampler = metrics_agent.WindowsDpcTimeSampler(read_value=lambda: 0.23456)
+
+        self.assertEqual(0.235, sampler.sample())
+
+    def test_windows_dpc_sampler_failure_is_nonfatal(self):
+        sampler = metrics_agent.WindowsDpcTimeSampler(
+            read_value=lambda: (_ for _ in ()).throw(OSError("counter unavailable"))
+        )
+
+        self.assertIsNone(sampler.sample())
+
+    def test_build_snapshot_surfaces_fps_error_in_health_and_header(self):
+        fps_error = metrics_agent.empty_snapshot()["fps"]
+        fps_error.update(
+            {
+                "status": "error",
+                "source": "timeaudit_postgres",
+                "detail": "TimeoutError",
+            }
+        )
+        with (
+            patch.object(metrics_agent, "read_weather_snapshot", return_value=metrics_agent.empty_snapshot()["weather"]),
+            patch.object(metrics_agent, "read_foreground_app", return_value=metrics_agent.empty_snapshot()["foreground_app"]),
+            patch.object(metrics_agent, "read_cpu_snapshot", return_value=metrics_agent.empty_snapshot()["cpu"]),
+            patch.object(metrics_agent, "read_gpu_snapshot", return_value=metrics_agent.empty_snapshot()["gpu"]),
+            patch.object(metrics_agent, "read_fps_snapshot", return_value=fps_error),
+            patch.object(metrics_agent, "read_memory_snapshot", return_value=metrics_agent.empty_snapshot()["memory"]),
+            patch.object(metrics_agent, "enumerate_disks", return_value=[]),
+            patch.object(metrics_agent, "read_physical_disks", return_value=[]),
+            patch.object(metrics_agent, "read_network_snapshot", return_value=metrics_agent.empty_snapshot()["network"]),
+            patch.object(metrics_agent, "read_top_processes", return_value=[]),
+            patch.object(metrics_agent, "read_lhm_sensor_snapshot", return_value={}),
+            patch.object(metrics_agent, "_DPC_TIME_SAMPLER", SimpleNamespace(sample=lambda: None)),
+            patch.object(metrics_agent, "_maybe_write_data_trust_log"),
+        ):
+            snapshot = metrics_agent.build_snapshot()
+
+        self.assertEqual("degraded", snapshot["health"]["status"])
+        self.assertEqual("warn", snapshot["alert"]["level"])
+        self.assertEqual("采集异常 1 项", snapshot["alert"]["message"])
 
     def test_lhm_sensor_snapshot_returns_stale_cache_while_background_refresh_runs(self):
         if hasattr(metrics_agent, "_reset_lhm_cache_for_tests"):
             metrics_agent._reset_lhm_cache_for_tests()
-        cached = {"cpu_clock_mhz": 5557.0, "source": "lhm"}
+        cached = {"cpu_clock_mhz": 1734.0, "source": "lhm", "status": "live"}
         metrics_agent._lhm_cache_value = cached
         metrics_agent._lhm_cache_expires_at = 0.0
+        metrics_agent._lhm_last_success_at = time.monotonic()
         refresh_calls = []
 
         with (
@@ -404,10 +1023,12 @@ class MetricsAgentTests(unittest.TestCase):
         ):
             sensors = metrics_agent.read_lhm_sensor_snapshot()
 
-        self.assertEqual(cached, sensors)
+        self.assertEqual(1734.0, sensors["cpu_clock_mhz"])
+        self.assertEqual("lhm_stale", sensors["source"])
+        self.assertEqual("stale", sensors["status"])
         self.assertEqual([True], refresh_calls)
 
-    def test_lhm_sensor_snapshot_cold_cache_returns_empty_without_blocking(self):
+    def test_lhm_sensor_snapshot_cold_cache_returns_connecting_without_blocking(self):
         if hasattr(metrics_agent, "_reset_lhm_cache_for_tests"):
             metrics_agent._reset_lhm_cache_for_tests()
         refresh_calls = []
@@ -426,8 +1047,48 @@ class MetricsAgentTests(unittest.TestCase):
         ):
             sensors = metrics_agent.read_lhm_sensor_snapshot()
 
-        self.assertEqual({}, sensors)
+        self.assertEqual("lhm", sensors["source"])
+        self.assertEqual("connecting", sensors["status"])
         self.assertEqual([True], refresh_calls)
+
+    def test_lhm_sensor_snapshot_drops_values_after_stale_window(self):
+        metrics_agent._lhm_cache_value = {
+            "cpu_clock_mhz": 1734.0,
+            "source": "lhm",
+            "status": "live",
+        }
+        metrics_agent._lhm_cache_expires_at = 0.0
+        metrics_agent._lhm_last_success_at = (
+            time.monotonic() - metrics_agent.LHM_LAST_GOOD_MAX_AGE_SECONDS - 1.0
+        )
+
+        with patch.object(metrics_agent, "_start_lhm_sensor_refresh_locked"):
+            sensors = metrics_agent.read_lhm_sensor_snapshot()
+
+        self.assertNotIn("cpu_clock_mhz", sensors)
+        self.assertEqual("lhm", sensors["source"])
+        self.assertEqual("unavailable", sensors["status"])
+
+    def test_lhm_refresh_failure_marks_recent_cache_stale(self):
+        metrics_agent._lhm_cache_value = {
+            "cpu_clock_mhz": 1734.0,
+            "source": "lhm",
+            "status": "live",
+        }
+        metrics_agent._lhm_last_success_at = time.monotonic()
+        metrics_agent._lhm_refreshing = True
+
+        with patch.object(
+            metrics_agent,
+            "_fetch_lhm_sensor_payload",
+            side_effect=OSError("endpoint down"),
+        ):
+            metrics_agent._refresh_lhm_sensor_cache()
+        sensors = metrics_agent.read_lhm_sensor_snapshot()
+
+        self.assertEqual(1734.0, sensors["cpu_clock_mhz"])
+        self.assertEqual("lhm_stale", sensors["source"])
+        self.assertEqual("stale", sensors["status"])
 
     def test_network_rate_sampler_reports_bytes_per_second_from_delta(self):
         readings = iter(
@@ -452,15 +1113,17 @@ class MetricsAgentTests(unittest.TestCase):
 
     def test_network_latency_sampler_reports_ping_jitter_and_loss(self):
         readings = iter([55.0, 61.0, None])
-        timestamps = iter([10.0, 13.0, 16.0])
         sampler = metrics_agent.NetworkLatencySampler(
             read_ping_ms=lambda: next(readings),
-            now=lambda: next(timestamps),
-            ttl_seconds=0.0,
+            now=lambda: 10.0,
+            ttl_seconds=30.0,
         )
 
+        sampler._refresh()
         first = sampler.sample()
+        sampler._refresh()
         second = sampler.sample()
+        sampler._refresh()
         third = sampler.sample()
 
         self.assertEqual(55.0, first["ping_ms"])
@@ -468,7 +1131,64 @@ class MetricsAgentTests(unittest.TestCase):
         self.assertEqual(0.0, first["packet_loss_percent"])
         self.assertEqual(61.0, second["ping_ms"])
         self.assertEqual(6.0, second["jitter_ms"])
-        self.assertEqual(100.0, third["packet_loss_percent"])
+        self.assertEqual(33.3, third["packet_loss_percent"])
+
+    def test_network_latency_cold_refresh_is_non_blocking(self):
+        release = threading.Event()
+
+        def slow_ping():
+            release.wait(timeout=1.0)
+            return 55.0
+
+        sampler = metrics_agent.NetworkLatencySampler(
+            read_ping_ms=slow_ping,
+            ttl_seconds=30.0,
+        )
+
+        started = time.perf_counter()
+        result = sampler.sample()
+        elapsed = time.perf_counter() - started
+        release.set()
+
+        self.assertIsNone(result["ping_ms"])
+        self.assertEqual("connecting", result["status"])
+        self.assertLess(elapsed, 0.1)
+
+    def test_build_snapshot_does_not_wait_for_slow_ping(self):
+        release = threading.Event()
+
+        def slow_ping():
+            release.wait(timeout=1.0)
+            return 55.0
+
+        network_sampler = metrics_agent.NetworkRateSampler(
+            read_counters=lambda: SimpleNamespace(bytes_recv=1_000, bytes_sent=2_000),
+            latency_sampler=metrics_agent.NetworkLatencySampler(
+                read_ping_ms=slow_ping,
+                ttl_seconds=30.0,
+            ),
+        )
+
+        with (
+            patch.object(metrics_agent, "read_weather_snapshot", return_value=metrics_agent.empty_snapshot()["weather"]),
+            patch.object(metrics_agent, "read_foreground_app", return_value=metrics_agent.empty_snapshot()["foreground_app"]),
+            patch.object(metrics_agent, "read_cpu_snapshot", return_value=metrics_agent.empty_snapshot()["cpu"]),
+            patch.object(metrics_agent, "read_gpu_snapshot", return_value=metrics_agent.empty_snapshot()["gpu"]),
+            patch.object(metrics_agent, "read_fps_snapshot", return_value=metrics_agent.empty_snapshot()["fps"]),
+            patch.object(metrics_agent, "read_memory_snapshot", return_value=metrics_agent.empty_snapshot()["memory"]),
+            patch.object(metrics_agent, "enumerate_disks", return_value=[]),
+            patch.object(metrics_agent, "read_physical_disks", return_value=[]),
+            patch.object(metrics_agent, "read_network_snapshot", side_effect=network_sampler.sample),
+            patch.object(metrics_agent, "read_top_processes", return_value=[]),
+            patch.object(metrics_agent, "read_lhm_sensor_snapshot", return_value={}),
+            patch.object(metrics_agent, "_maybe_write_data_trust_log"),
+        ):
+            started = time.perf_counter()
+            metrics_agent.build_snapshot()
+            elapsed = time.perf_counter() - started
+            release.set()
+
+        self.assertLess(elapsed, 0.2)
 
     def test_process_activity_sampler_reports_cpu_and_memory_from_deltas(self):
         class FakeProcess:
@@ -702,12 +1422,17 @@ class MetricsAgentTests(unittest.TestCase):
         self.assertAlmostEqual(2.4, helper._loop_sleep_seconds(10.0, 10.6, 3.0), places=2)
         self.assertAlmostEqual(0.2, helper._loop_sleep_seconds(10.0, 13.5, 3.0), places=2)
 
-    def test_fps_snapshot_does_not_report_placeholder_zero_as_real_value(self):
-        with patch.object(metrics_agent, "read_timeaudit_latest_snapshot", return_value={}):
+    def test_fps_snapshot_cold_cache_reports_connecting_not_idle(self):
+        with patch.object(
+            metrics_agent,
+            "read_timeaudit_latest_snapshot",
+            return_value={"_status": "connecting"},
+        ):
             fps = metrics_agent.read_fps_snapshot()
 
         self.assertIsNone(fps["current"])
-        self.assertEqual("fallback", fps["source"])
+        self.assertEqual("connecting", fps["status"])
+        self.assertEqual("timeaudit_postgres", fps["source"])
 
     def test_timeaudit_snapshot_is_disabled_when_dsn_missing(self):
         if hasattr(metrics_agent, "_reset_timeaudit_cache_for_tests"):
@@ -715,13 +1440,16 @@ class MetricsAgentTests(unittest.TestCase):
         with patch.object(metrics_agent, "TIMEAUDIT_DSN", None):
             snapshot = metrics_agent.read_timeaudit_latest_snapshot()
 
-        self.assertEqual({}, snapshot)
+        self.assertEqual("disabled", snapshot["_status"])
 
     def test_fps_snapshot_uses_timeaudit_latest_row_when_present(self):
+        timestamp = metrics_agent.dt.datetime.now(metrics_agent.dt.timezone.utc)
         with patch.object(
             metrics_agent,
             "read_timeaudit_latest_snapshot",
             return_value={
+                "_status": "ok",
+                "timestamp": timestamp,
                 "current_fps": 144.4,
                 "average_fps": 141.2,
                 "one_percent_low_fps": 118.6,
@@ -734,7 +1462,73 @@ class MetricsAgentTests(unittest.TestCase):
         self.assertEqual(141.2, fps["average"])
         self.assertEqual(118.6, fps["low_1_percent"])
         self.assertEqual(6.9, fps["frame_time_ms"])
+        self.assertEqual("active", fps["status"])
+        self.assertLess(fps["sample_age_seconds"], 1.0)
         self.assertEqual("timeaudit_postgres", fps["source"])
+
+    def test_fps_snapshot_fresh_zero_row_is_normal_idle(self):
+        timestamp = metrics_agent.dt.datetime.now(metrics_agent.dt.timezone.utc)
+        with patch.object(
+            metrics_agent,
+            "read_timeaudit_latest_snapshot",
+            return_value={
+                "_status": "ok",
+                "timestamp": timestamp,
+                "current_fps": 0.0,
+                "average_fps": 0.0,
+                "one_percent_low_fps": 0.0,
+                "frametime_ms": 0.0,
+            },
+        ):
+            fps = metrics_agent.read_fps_snapshot()
+
+        self.assertEqual("idle", fps["status"])
+        self.assertEqual("timeaudit_postgres", fps["source"])
+        self.assertIsNone(fps["current"])
+
+    def test_fps_snapshot_old_row_is_stale_not_live(self):
+        timestamp = metrics_agent.dt.datetime.now(metrics_agent.dt.timezone.utc) - metrics_agent.dt.timedelta(seconds=30)
+        with patch.object(
+            metrics_agent,
+            "read_timeaudit_latest_snapshot",
+            return_value={
+                "_status": "ok",
+                "timestamp": timestamp,
+                "current_fps": 144.0,
+                "average_fps": 140.0,
+                "one_percent_low_fps": 110.0,
+                "frametime_ms": 6.9,
+            },
+        ):
+            fps = metrics_agent.read_fps_snapshot()
+
+        self.assertEqual("stale", fps["status"])
+        self.assertGreaterEqual(fps["sample_age_seconds"], 29.0)
+
+    def test_fps_snapshot_propagates_collection_error(self):
+        with patch.object(
+            metrics_agent,
+            "read_timeaudit_latest_snapshot",
+            return_value={"_status": "error", "_detail": "TimeoutError"},
+        ):
+            fps = metrics_agent.read_fps_snapshot()
+
+        self.assertEqual("error", fps["status"])
+        self.assertEqual("TimeoutError", fps["detail"])
+
+    def test_fps_idle_does_not_lower_trust(self):
+        item = metrics_agent._trust_fps(
+            {
+                "status": "idle",
+                "source": "timeaudit_postgres",
+                "current": None,
+                "frame_time_ms": None,
+            }
+        )
+
+        self.assertEqual(100, item["score"])
+        self.assertEqual("ok", item["status"])
+        self.assertEqual([], item["missing"])
 
     def test_timeaudit_latest_snapshot_returns_stale_cache_while_background_refresh_runs(self):
         if hasattr(metrics_agent, "_reset_timeaudit_cache_for_tests"):
@@ -761,7 +1555,7 @@ class MetricsAgentTests(unittest.TestCase):
         self.assertEqual(cached, snapshot)
         self.assertEqual([True], refresh_calls)
 
-    def test_timeaudit_latest_snapshot_cold_cache_returns_empty_without_blocking(self):
+    def test_timeaudit_latest_snapshot_cold_cache_returns_connecting_without_blocking(self):
         if hasattr(metrics_agent, "_reset_timeaudit_cache_for_tests"):
             metrics_agent._reset_timeaudit_cache_for_tests()
         refresh_calls = []
@@ -780,8 +1574,61 @@ class MetricsAgentTests(unittest.TestCase):
         ):
             snapshot = metrics_agent.read_timeaudit_latest_snapshot()
 
-        self.assertEqual({}, snapshot)
+        self.assertEqual("connecting", snapshot["_status"])
         self.assertEqual([True], refresh_calls)
+
+    def test_timeaudit_refresh_exposes_query_failure(self):
+        metrics_agent._reset_timeaudit_cache_for_tests()
+
+        with patch.object(
+            metrics_agent,
+            "_read_timeaudit_latest_snapshot_async",
+            side_effect=TimeoutError("database timeout"),
+        ):
+            metrics_agent._refresh_timeaudit_cache()
+
+        self.assertEqual("error", metrics_agent._timeaudit_cache_value["_status"])
+        self.assertEqual("TimeoutError", metrics_agent._timeaudit_cache_value["_detail"])
+        self.assertFalse(metrics_agent._timeaudit_refreshing)
+
+    def test_timeaudit_query_uses_bounded_connection_and_command_timeouts(self):
+        calls = {}
+
+        class FakeConnection:
+            async def fetchrow(self, query):
+                calls["query"] = query
+                return {
+                    "timestamp": metrics_agent.dt.datetime.now(metrics_agent.dt.timezone.utc),
+                    "current_fps": 0.0,
+                }
+
+            async def close(self):
+                calls["closed"] = True
+
+        class FakeAsyncpg:
+            async def connect(self, dsn, **kwargs):
+                calls["dsn"] = dsn
+                calls["kwargs"] = kwargs
+                return FakeConnection()
+
+        with (
+            patch.object(metrics_agent, "TIMEAUDIT_DSN", "postgresql://local/test"),
+            patch.object(metrics_agent, "_optional_import", return_value=FakeAsyncpg()),
+        ):
+            result = metrics_agent.asyncio.run(
+                metrics_agent._read_timeaudit_latest_snapshot_async()
+            )
+
+        self.assertEqual("ok", result["_status"])
+        self.assertEqual(
+            metrics_agent.TIMEAUDIT_CONNECT_TIMEOUT_SECONDS,
+            calls["kwargs"]["timeout"],
+        )
+        self.assertEqual(
+            metrics_agent.TIMEAUDIT_QUERY_TIMEOUT_SECONDS,
+            calls["kwargs"]["command_timeout"],
+        )
+        self.assertTrue(calls["closed"])
 
     def test_gpu_snapshot_falls_back_with_stable_schema_when_sources_fail(self):
         with (
@@ -987,7 +1834,7 @@ class MetricsAgentTests(unittest.TestCase):
         self.assertIsNone(cpu["usage_percent"])
         self.assertEqual("fallback", cpu["source"])
 
-    def test_cpu_snapshot_uses_psutil_when_available(self):
+    def test_cpu_snapshot_uses_psutil_load_but_rejects_nominal_clock(self):
         sampler = metrics_agent.CpuUsageSampler(lambda: None)
         fake_psutil = SimpleNamespace(
             cpu_percent=lambda interval=None: 42.5,
@@ -1003,12 +1850,12 @@ class MetricsAgentTests(unittest.TestCase):
 
         self.assertEqual("AMD Ryzen 9", cpu["model"])
         self.assertEqual(42.5, cpu["usage_percent"])
-        self.assertEqual(5557.0, cpu["clock_mhz"])
+        self.assertIsNone(cpu["clock_mhz"])
         self.assertEqual("active", cpu["status"])
         self.assertEqual("psutil", cpu["source"])
         self.assertGreaterEqual(len(cpu["load_history_percent"]), 1)
 
-    def test_cpu_snapshot_combines_win32_usage_with_psutil_clock(self):
+    def test_cpu_snapshot_does_not_label_psutil_nominal_clock_as_dynamic(self):
         readings = iter(
             [
                 (100, 1_000, 1_000),
@@ -1029,8 +1876,8 @@ class MetricsAgentTests(unittest.TestCase):
             cpu = metrics_agent.read_cpu_snapshot()
 
         self.assertEqual(75.0, cpu["usage_percent"])
-        self.assertEqual(5557.0, cpu["clock_mhz"])
-        self.assertEqual("win32_getsystemtimes+psutil", cpu["source"])
+        self.assertIsNone(cpu["clock_mhz"])
+        self.assertEqual("win32_getsystemtimes", cpu["source"])
 
     def test_build_snapshot_copies_vram_into_memory_block(self):
         fake_gpu = metrics_agent._fallback_gpu_snapshot()
@@ -1041,12 +1888,14 @@ class MetricsAgentTests(unittest.TestCase):
         with (
             patch.object(metrics_agent, "read_weather_snapshot", return_value=metrics_agent.empty_snapshot()["weather"]),
             patch.object(metrics_agent, "enumerate_disks", return_value=[]),
+            patch.object(metrics_agent, "read_physical_disks", return_value=[]),
             patch.object(metrics_agent, "read_top_processes", return_value=[]),
             patch.object(metrics_agent, "read_network_snapshot", return_value=metrics_agent.empty_snapshot()["network"]),
             patch.object(metrics_agent, "read_foreground_app", return_value=metrics_agent.empty_snapshot()["foreground_app"]),
             patch.object(metrics_agent, "read_cpu_snapshot", return_value=metrics_agent.empty_snapshot()["cpu"]),
             patch.object(metrics_agent, "read_gpu_snapshot", return_value=fake_gpu),
             patch.object(metrics_agent, "read_memory_snapshot", return_value=fake_memory),
+            patch.object(metrics_agent, "read_lhm_sensor_snapshot", return_value={}),
         ):
             snapshot = metrics_agent.build_snapshot()
 

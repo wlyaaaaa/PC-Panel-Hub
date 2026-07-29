@@ -14,6 +14,7 @@ namespace TURZX.SideScreen
     {
         private const string DefaultMetricsUrl = "http://127.0.0.1:18765/snapshot";
         private const int DefaultHttpTimeoutMs = 450;
+        private const int DefaultPreviewIntervalSeconds = 45;
 
         public static int Main(string[] args)
         {
@@ -45,9 +46,11 @@ namespace TURZX.SideScreen
             long previousFrameStartTicks = -1;
             int consecutiveSendFailures = 0;
             int lastFullFrame = 0;
+            long lastPreviewTicks = -1;
 
             Console.WriteLine("TURZX stream starting: frames=" + (options.FrameCount == 0 ? "infinite" : options.FrameCount.ToString()) +
                 ", intervalMs=" + options.IntervalMs +
+                ", previewIntervalSeconds=" + options.PreviewIntervalSeconds +
                 ", dryRun=" + options.DryRun +
                 ", diff=" + options.UseDiff +
                 ", altHelper=" + options.AltHelper +
@@ -87,11 +90,23 @@ namespace TURZX.SideScreen
                         {
                             renderWatch.Stop();
                             renderMs = renderWatch.ElapsedMilliseconds;
-                            if (!string.IsNullOrWhiteSpace(options.PreviewDir))
+                            long previewTicks = Stopwatch.GetTimestamp();
+                            if (!string.IsNullOrWhiteSpace(options.PreviewDir) &&
+                                ShouldWritePreview(lastPreviewTicks, previewTicks, Stopwatch.Frequency, options.PreviewIntervalSeconds))
                             {
-                                Directory.CreateDirectory(options.PreviewDir);
-                                string preview = Path.Combine(options.PreviewDir, "stream-last.png");
-                                bitmap.Save(preview, ImageFormat.Png);
+                                // Preview is diagnostic only. A transient file lock or storage error
+                                // must never suppress the primary COM frame send.
+                                lastPreviewTicks = previewTicks;
+                                try
+                                {
+                                    Directory.CreateDirectory(options.PreviewDir);
+                                    string preview = Path.Combine(options.PreviewDir, "stream-last.png");
+                                    SavePreviewAtomically(bitmap, preview);
+                                }
+                                catch (Exception previewError)
+                                {
+                                    Console.WriteLine("preview warning: " + DescribeException(previewError));
+                                }
                             }
 
                             if (options.DryRun)
@@ -220,6 +235,26 @@ namespace TURZX.SideScreen
             return ComputeSleepMilliseconds(frameStartTicks, intervalMs, nowTicks, frequency);
         }
 
+        internal static bool ShouldWritePreviewForTest(long lastPreviewTicks, long nowTicks, long frequency, int previewIntervalSeconds)
+        {
+            return ShouldWritePreview(lastPreviewTicks, nowTicks, frequency, previewIntervalSeconds);
+        }
+
+        internal static int DefaultPreviewIntervalSecondsForTest()
+        {
+            return DefaultPreviewIntervalSeconds;
+        }
+
+        internal static void WriteUtf8TextAtomicallyForTest(string path, string content)
+        {
+            WriteUtf8TextAtomically(path, content);
+        }
+
+        internal static bool WriteHeartbeatCopiesForTest(string previewDir, int frame, string content)
+        {
+            return WriteHeartbeatCopies(previewDir, frame, content);
+        }
+
         internal static void ApplyStreamIntervalForTest(Snapshot snapshot, int intervalMs)
         {
             ApplyStreamInterval(snapshot, intervalMs);
@@ -282,6 +317,21 @@ namespace TURZX.SideScreen
 
             double remainingMs = remainingTicks * 1000.0 / frequency;
             return (int)Math.Ceiling(remainingMs);
+        }
+
+        private static bool ShouldWritePreview(long lastPreviewTicks, long nowTicks, long frequency, int previewIntervalSeconds)
+        {
+            if (lastPreviewTicks < 0)
+            {
+                return true;
+            }
+            if (previewIntervalSeconds <= 0 || frequency <= 0)
+            {
+                return false;
+            }
+
+            long intervalTicks = (long)previewIntervalSeconds * frequency;
+            return nowTicks - lastPreviewTicks >= intervalTicks;
         }
 
         private static void SleepUntil(long targetTicks)
@@ -402,33 +452,103 @@ namespace TURZX.SideScreen
                 return;
             }
 
+            StringBuilder json = new StringBuilder();
+            json.AppendLine("{");
+            AppendJsonProperty(json, "utc", DateTime.UtcNow.ToString("o"), true);
+            AppendJsonProperty(json, "port", options.Port, true);
+            AppendJsonProperty(json, "status", frameStatus, true);
+            AppendJsonProperty(json, "snapshot_status", snapshotStatus, true);
+            AppendJsonProperty(json, "error", frameError, true);
+            AppendJsonProperty(json, "frame", frame, true);
+            AppendJsonProperty(json, "sent", sent, true);
+            AppendJsonProperty(json, "failed", failed, true);
+            AppendJsonProperty(json, "consecutive_send_failures", consecutiveSendFailures, true);
+            AppendJsonProperty(json, "last_full_frame", lastFullFrame, true);
+            AppendJsonProperty(json, "period_ms", periodMs, true);
+            AppendJsonProperty(json, "fetch_ms", fetchMs, true);
+            AppendJsonProperty(json, "render_ms", renderMs, true);
+            AppendJsonProperty(json, "elapsed_ms", elapsedMs, true);
+            AppendJsonProperty(json, "sleep_ms", sleepMs, false);
+            json.AppendLine("}");
+            WriteHeartbeatCopies(options.PreviewDir, frame, json.ToString());
+        }
+
+        private static bool WriteHeartbeatCopies(string previewDir, int frame, string content)
+        {
+            if (string.IsNullOrWhiteSpace(previewDir))
+            {
+                return false;
+            }
+
+            string slotName = frame % 2 == 0 ? "stream-heartbeat-a.json" : "stream-heartbeat-b.json";
+            bool wrote = TryWriteUtf8TextAtomically(Path.Combine(previewDir, slotName), content);
+            if (TryWriteUtf8TextAtomically(Path.Combine(previewDir, "stream-heartbeat.json"), content))
+            {
+                wrote = true;
+            }
+            return wrote;
+        }
+
+        private static bool TryWriteUtf8TextAtomically(string path, string content)
+        {
             try
             {
-                Directory.CreateDirectory(options.PreviewDir);
-                string path = Path.Combine(options.PreviewDir, "stream-heartbeat.json");
-                StringBuilder json = new StringBuilder();
-                json.AppendLine("{");
-                AppendJsonProperty(json, "utc", DateTime.UtcNow.ToString("o"), true);
-                AppendJsonProperty(json, "port", options.Port, true);
-                AppendJsonProperty(json, "status", frameStatus, true);
-                AppendJsonProperty(json, "snapshot_status", snapshotStatus, true);
-                AppendJsonProperty(json, "error", frameError, true);
-                AppendJsonProperty(json, "frame", frame, true);
-                AppendJsonProperty(json, "sent", sent, true);
-                AppendJsonProperty(json, "failed", failed, true);
-                AppendJsonProperty(json, "consecutive_send_failures", consecutiveSendFailures, true);
-                AppendJsonProperty(json, "last_full_frame", lastFullFrame, true);
-                AppendJsonProperty(json, "period_ms", periodMs, true);
-                AppendJsonProperty(json, "fetch_ms", fetchMs, true);
-                AppendJsonProperty(json, "render_ms", renderMs, true);
-                AppendJsonProperty(json, "elapsed_ms", elapsedMs, true);
-                AppendJsonProperty(json, "sleep_ms", sleepMs, false);
-                json.AppendLine("}");
-                File.WriteAllText(path, json.ToString(), Encoding.UTF8);
+                WriteUtf8TextAtomically(path, content);
+                return true;
             }
             catch
             {
-                // Heartbeat is diagnostic only; never break rendering or device sends.
+                // Readers can lock one target without taking down the other heartbeat slot.
+                return false;
+            }
+        }
+
+        private static void WriteUtf8TextAtomically(string path, string content)
+        {
+            WriteFileAtomically(path, delegate(string tempPath)
+            {
+                File.WriteAllText(tempPath, content, new UTF8Encoding(false));
+            });
+        }
+
+        private static void SavePreviewAtomically(Bitmap bitmap, string path)
+        {
+            WriteFileAtomically(path, delegate(string tempPath)
+            {
+                bitmap.Save(tempPath, ImageFormat.Png);
+            });
+        }
+
+        private static void WriteFileAtomically(string path, Action<string> writeTemporaryFile)
+        {
+            string directory = Path.GetDirectoryName(path);
+            if (string.IsNullOrWhiteSpace(directory))
+            {
+                directory = Directory.GetCurrentDirectory();
+            }
+            Directory.CreateDirectory(directory);
+
+            string tempPath = Path.Combine(
+                directory,
+                "." + Path.GetFileName(path) + "." + Process.GetCurrentProcess().Id + "." + Guid.NewGuid().ToString("N") + ".tmp");
+            try
+            {
+                writeTemporaryFile(tempPath);
+                if (File.Exists(path))
+                {
+                    File.Replace(tempPath, path, null);
+                }
+                else
+                {
+                    File.Move(tempPath, path);
+                }
+            }
+            finally
+            {
+                if (File.Exists(tempPath))
+                {
+                    File.Delete(tempPath);
+                }
             }
         }
 
@@ -598,7 +718,7 @@ namespace TURZX.SideScreen
                     Date = DateTime.Now.ToString("yyyy-MM-dd"),
                     Weekday = ChineseWeekday(DateTime.Now),
                     Time = DateTime.Now.ToString("HH:mm:ss"),
-                    UpdateIntervalSeconds = 0.5
+                    UpdateIntervalSeconds = 1.0
                 },
                 Weather = new WeatherSnapshot
                 {
@@ -631,9 +751,9 @@ namespace TURZX.SideScreen
                     MemoryClockGhz = 16.4,
                     LoadHistoryPercent = new double[] { 10, 9, 16, 31, gpu, 4, 1, 20, 41, 36, 6, 0, 22 }
                 },
-                Fps = new FpsSnapshot { Current = 144, Average = 141, Low1Percent = 118, FrameTimeMs = 6.9, Source = "PresentMon / RTSS API" },
-                Memory = new MemorySnapshot { RamUsagePercent = 34, RamUsedGb = 22, RamTotalGb = 64, VramUsagePercent = 14 },
-                Network = new NetworkSnapshot { DownloadBytesPerSecond = 10240, UploadBytesPerSecond = 22528, PingMs = 18, JitterMs = 2, PacketLossPercent = 0 },
+                Fps = new FpsSnapshot { Current = 144, Average = 141, Low1Percent = 118, FrameTimeMs = 6.9, Status = "active", Source = "presentmon", SampleAgeSeconds = 0.2, Detail = "game.exe" },
+                Memory = new MemorySnapshot { RamUsagePercent = 34, RamUsedGb = 22, RamTotalGb = 64, VramUsagePercent = 14, MotherboardTemperatureCelsius = 41, ModuleTemperaturesCelsius = new double[] { 44, 46 } },
+                Network = new NetworkSnapshot { DownloadBytesPerSecond = 10240, UploadBytesPerSecond = 22528, PingMs = 18, JitterMs = 2, PacketLossPercent = 0, DpcPercent = 0.2 },
                 Disks = new DiskSnapshot[]
                 {
                     new DiskSnapshot { Drive = "C:", Label = "Win11", UsagePercent = 44, FreeText = "343 GB 可用" },
@@ -646,7 +766,7 @@ namespace TURZX.SideScreen
                     new ProcessSnapshot { Name = "chrome.exe", CpuPercent = 6, GpuPercent = 3, MemoryGb = 3.1 },
                     new ProcessSnapshot { Name = "python.exe", Description = "metrics_agent", CpuPercent = 2, GpuPercent = 0, MemoryGb = 0.4 }
                 },
-                Health = new HealthSnapshot { Status = "诊断服务在线", Detail = "模块正常运转中", DpcLatencyUs = 430, HardPageFaultsPerSecond = 0, RefreshIntervalSeconds = 0.5 },
+                Health = new HealthSnapshot { Status = "诊断服务在线", Detail = "模块正常运转中", HardPageFaultsPerSecond = 0, RefreshIntervalSeconds = 1.0 },
                 Trust = new TrustSnapshot
                 {
                     Score = 96,
@@ -674,7 +794,7 @@ namespace TURZX.SideScreen
 
         private static void PrintUsage()
         {
-            Console.WriteLine("TURZX.SideScreen.Stream.exe [--sample] [--dry-run] [--diff] [--alt-helper] [--frames N] [--interval-ms 1000] [--full-resync-every-frames 300] [--max-consecutive-send-failures 5] [--metrics-url URL] [--root TURZX_ROOT] [--port COM7]");
+            Console.WriteLine("TURZX.SideScreen.Stream.exe [--sample] [--dry-run] [--diff] [--alt-helper] [--frames N] [--interval-ms 1000] [--preview-interval-seconds 45] [--full-resync-every-frames 300] [--max-consecutive-send-failures 5] [--metrics-url URL] [--root TURZX_ROOT] [--port COM7]");
             Console.WriteLine("frames=0 means infinite. --diff sends one full baseline frame, then command-204 differential frames.");
         }
 
@@ -691,6 +811,7 @@ namespace TURZX.SideScreen
             public int SendTimeoutMs = 240000;
             public int MaxConsecutiveSendFailures = 5;
             public int FullResyncEveryFrames = 300;
+            public int PreviewIntervalSeconds = DefaultPreviewIntervalSeconds;
             public string MetricsUrl = DefaultMetricsUrl;
             public string Root = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "..", ".."));
             public string Port = "COM7";
@@ -714,6 +835,7 @@ namespace TURZX.SideScreen
                     else if (arg == "--send-timeout-ms") options.SendTimeoutMs = int.Parse(Next(args, ref i, arg));
                     else if (arg == "--max-consecutive-send-failures") options.MaxConsecutiveSendFailures = int.Parse(Next(args, ref i, arg));
                     else if (arg == "--full-resync-every-frames") options.FullResyncEveryFrames = int.Parse(Next(args, ref i, arg));
+                    else if (arg == "--preview-interval-seconds") options.PreviewIntervalSeconds = int.Parse(Next(args, ref i, arg));
                     else if (arg == "--metrics-url") options.MetricsUrl = Next(args, ref i, arg);
                     else if (arg == "--root") options.Root = Next(args, ref i, arg);
                     else if (arg == "--port") options.Port = Next(args, ref i, arg);
@@ -726,6 +848,7 @@ namespace TURZX.SideScreen
                 if (options.IntervalMs < 0) throw new ArgumentOutOfRangeException("interval-ms");
                 if (options.MaxConsecutiveSendFailures < 0) throw new ArgumentOutOfRangeException("max-consecutive-send-failures");
                 if (options.FullResyncEveryFrames < 0) throw new ArgumentOutOfRangeException("full-resync-every-frames");
+                if (options.PreviewIntervalSeconds < 0) throw new ArgumentOutOfRangeException("preview-interval-seconds");
                 return options;
             }
 

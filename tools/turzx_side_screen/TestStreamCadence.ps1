@@ -4,6 +4,9 @@ $ErrorActionPreference = "Stop"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $outDir = Join-Path $scriptDir "out\tests"
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+Get-ChildItem -LiteralPath $outDir -Filter "TestStreamCadenceProgram.*" -File -ErrorAction SilentlyContinue |
+    Where-Object { $_.LastWriteTimeUtc -lt [DateTime]::UtcNow.AddDays(-1) } |
+    Remove-Item -Force -ErrorAction SilentlyContinue
 
 $programPath = Join-Path $outDir ("TestStreamCadenceProgram.{0}.cs" -f $PID)
 $exePath = Join-Path $outDir ("TestStreamCadenceProgram.{0}.exe" -f $PID)
@@ -93,6 +96,51 @@ public static class TestStreamCadenceProgram
             SideScreenStreamApp.ShouldSendFullFrameForTest(300, true, 300));
         Equal("zero disables periodic full baselines after startup", false,
             SideScreenStreamApp.ShouldSendFullFrameForTest(300, true, 0));
+        Equal("preview writes the first frame", true,
+            SideScreenStreamApp.ShouldWritePreviewForTest(-1, 1000, 1000, 45));
+        Equal("preview is throttled before the configured interval", false,
+            SideScreenStreamApp.ShouldWritePreviewForTest(1000, 45999, 1000, 45));
+        Equal("preview refreshes at the configured interval", true,
+            SideScreenStreamApp.ShouldWritePreviewForTest(1000, 46000, 1000, 45));
+        Equal("non-positive preview interval keeps only the initial diagnostic frame", false,
+            SideScreenStreamApp.ShouldWritePreviewForTest(1000, 1001, 1000, 0));
+        Equal("default preview interval is diagnostic rather than per-frame", 45,
+            SideScreenStreamApp.DefaultPreviewIntervalSecondsForTest());
+
+        string atomicDir = System.IO.Path.Combine(
+            System.IO.Path.GetTempPath(),
+            "turzx-stream-atomic-" + Guid.NewGuid().ToString("N"));
+        System.IO.Directory.CreateDirectory(atomicDir);
+        try
+        {
+            string atomicPath = System.IO.Path.Combine(atomicDir, "stream-heartbeat.json");
+            SideScreenStreamApp.WriteUtf8TextAtomicallyForTest(atomicPath, "{\"frame\":1}");
+            Equal("atomic heartbeat creates the target", "{\"frame\":1}", System.IO.File.ReadAllText(atomicPath));
+            SideScreenStreamApp.WriteUtf8TextAtomicallyForTest(atomicPath, "{\"frame\":2}");
+            Equal("atomic heartbeat replaces the complete target", "{\"frame\":2}", System.IO.File.ReadAllText(atomicPath));
+            Equal("atomic heartbeat leaves no temporary files", 0, System.IO.Directory.GetFiles(atomicDir, "*.tmp").Length);
+
+            Equal("redundant heartbeat writes a slot and legacy copy", true,
+                SideScreenStreamApp.WriteHeartbeatCopiesForTest(atomicDir, 2, "{\"frame\":2,\"status\":\"ok\"}"));
+            string slotAPath = System.IO.Path.Combine(atomicDir, "stream-heartbeat-a.json");
+            Equal("even frames use heartbeat slot A", true, System.IO.File.Exists(slotAPath));
+
+            using (System.IO.FileStream legacyLock = System.IO.File.Open(
+                atomicPath,
+                System.IO.FileMode.Open,
+                System.IO.FileAccess.Read,
+                System.IO.FileShare.None))
+            {
+                Equal("locked legacy heartbeat does not block the alternate slot", true,
+                    SideScreenStreamApp.WriteHeartbeatCopiesForTest(atomicDir, 3, "{\"frame\":3,\"status\":\"ok\"}"));
+            }
+            string slotBPath = System.IO.Path.Combine(atomicDir, "stream-heartbeat-b.json");
+            Equal("odd frames use heartbeat slot B", "{\"frame\":3,\"status\":\"ok\"}", System.IO.File.ReadAllText(slotBPath));
+        }
+        finally
+        {
+            System.IO.Directory.Delete(atomicDir, true);
+        }
         string described = SideScreenStreamApp.DescribeExceptionForTest(
             new System.Reflection.TargetInvocationException(
                 new InvalidOperationException("inner device detail")));
@@ -134,37 +182,43 @@ public static class TestStreamCadenceProgram
 }
 '@
 
-Set-Content -LiteralPath $programPath -Value $program -Encoding UTF8
+try {
+    Set-Content -LiteralPath $programPath -Value $program -Encoding UTF8
 
-$cscCommand = Get-Command csc -ErrorAction SilentlyContinue
-$cscPath = $null
-if ($null -ne $cscCommand) {
-    $cscPath = $cscCommand.Source
-}
-if ([string]::IsNullOrWhiteSpace($cscPath)) {
-    $frameworkCsc = Join-Path $env:WINDIR "Microsoft.NET\Framework64\v4.0.30319\csc.exe"
-    if (Test-Path -LiteralPath $frameworkCsc) {
-        $cscPath = $frameworkCsc
+    $cscCommand = Get-Command csc -ErrorAction SilentlyContinue
+    $cscPath = $null
+    if ($null -ne $cscCommand) {
+        $cscPath = $cscCommand.Source
+    }
+    if ([string]::IsNullOrWhiteSpace($cscPath)) {
+        $frameworkCsc = Join-Path $env:WINDIR "Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+        if (Test-Path -LiteralPath $frameworkCsc) {
+            $cscPath = $frameworkCsc
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($cscPath)) {
+        throw "csc.exe not found."
+    }
+
+    $sources = @(
+        $programPath,
+        (Join-Path $scriptDir "SnapshotModels.cs"),
+        (Join-Path $scriptDir "TURZX.SideScreen.Renderer.cs"),
+        (Join-Path $scriptDir "TURZX.SideScreen.TurzxHelperSender.cs"),
+        (Join-Path $scriptDir "TURZX.SideScreen.Stream.cs")
+    )
+
+    & $cscPath /nologo /codepage:65001 /utf8output /target:exe /main:TestStreamCadenceProgram /out:$exePath /r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Runtime.Serialization.dll $sources
+    if ($LASTEXITCODE -ne 0) {
+        throw "csc failed with exit code $LASTEXITCODE"
+    }
+
+    & $exePath
+    if ($LASTEXITCODE -ne 0) {
+        throw "stream cadence test failed with exit code $LASTEXITCODE"
     }
 }
-if ([string]::IsNullOrWhiteSpace($cscPath)) {
-    throw "csc.exe not found."
-}
-
-$sources = @(
-    $programPath,
-    (Join-Path $scriptDir "SnapshotModels.cs"),
-    (Join-Path $scriptDir "TURZX.SideScreen.Renderer.cs"),
-    (Join-Path $scriptDir "TURZX.SideScreen.TurzxHelperSender.cs"),
-    (Join-Path $scriptDir "TURZX.SideScreen.Stream.cs")
-)
-
-& $cscPath /nologo /codepage:65001 /utf8output /target:exe /main:TestStreamCadenceProgram /out:$exePath /r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Runtime.Serialization.dll $sources
-if ($LASTEXITCODE -ne 0) {
-    throw "csc failed with exit code $LASTEXITCODE"
-}
-
-& $exePath
-if ($LASTEXITCODE -ne 0) {
-    throw "stream cadence test failed with exit code $LASTEXITCODE"
+finally {
+    Remove-Item -LiteralPath $programPath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $exePath -Force -ErrorAction SilentlyContinue
 }

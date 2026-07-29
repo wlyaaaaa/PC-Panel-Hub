@@ -68,7 +68,7 @@ namespace TURZX.SideScreen
                     CpuBlue, CpuBlue, CpuBlue2,
                     snapshot.Cpu == null ? null : snapshot.Cpu.LoadHistoryPercent);
 
-                DrawHardwareCard(g, fonts, 24, 454, "GPU 核心", GpuDisplayName(snapshot.Gpu),
+                DrawHardwareCard(g, fonts, 24, 424, "GPU 核心", GpuDisplayName(snapshot.Gpu),
                     snapshot.Gpu == null ? null : snapshot.Gpu.UsagePercent,
                     FormatTemperature(First(snapshot.Gpu == null ? null : snapshot.Gpu.TemperatureCelsius, snapshot.Gpu == null ? null : snapshot.Gpu.TemperatureC)),
                     FormatWatts(snapshot.Gpu == null ? null : snapshot.Gpu.PowerWatts),
@@ -82,9 +82,8 @@ namespace TURZX.SideScreen
                 DrawFps(g, fonts, snapshot.Fps);
                 DrawMemory(g, fonts, snapshot.Memory, snapshot.Gpu);
                 DrawNetwork(g, fonts, snapshot.Network);
-                DrawDisks(g, fonts, snapshot.Disks);
+                DrawDisks(g, fonts, snapshot.PhysicalDisks, snapshot.Disks);
                 DrawApps(g, fonts, snapshot.TopProcesses);
-                DrawHealth(g, fonts, snapshot.Health, renderTime, snapshot.Trust);
             }
 
             return bitmap;
@@ -148,7 +147,7 @@ namespace TURZX.SideScreen
             string voltageLabel, string voltageValue, Color accent, Color gradientStart, Color gradientEnd, double[] history)
         {
             double usageValue = Value(usagePercent);
-            DrawCard(g, x, y, 432, 280, accent);
+            DrawCard(g, x, y, 432, 250, accent);
             DrawText(g, title, fonts.Title, Green, x + 24, y + 22);
             DrawText(g, FitText(g, model, fonts.Sans14Bold, 360), fonts.Sans14Bold, Dark, x + 24, y + 43);
 
@@ -167,30 +166,30 @@ namespace TURZX.SideScreen
             DrawMiniPanel(g, fonts, x + 186, y + 126, 104, 46, clockLabel, clockValue, Dark);
             DrawMiniPanel(g, fonts, x + 296, y + 126, 112, 46, voltageLabel, voltageValue, Dark);
 
-            DrawText(g, "当前负载", fonts.Sans11Bold, Muted, x + 24, y + 184);
-            DrawProgress(g, x + 24, y + 200, 384, 6, usageValue, gradientStart, gradientEnd, false);
-
-            DrawText(g, "负载历史 / 实时采样", fonts.Sans11Bold, Muted, x + 24, y + 214);
-            DrawHistory(g, x + 24, y + 228, 384, 38, usageValue, history, accent);
+            DrawText(g, "负载历史 / 实时采样", fonts.Sans12Bold, Muted, x + 24, y + 181);
+            DrawHistory(g, x + 24, y + 198, 384, 38, usageValue, history, accent);
         }
 
         private static void DrawFps(Graphics g, FontSet fonts, FpsSnapshot fps)
         {
             const float x = 24;
-            const float y = 748;
+            const float y = 688;
             DrawCard(g, x, y, 432, 130, NetGreen);
             DrawText(g, "FPS / 帧率", fonts.Title, Green, x + 24, y + 18);
 
-            if (fps == null || (!fps.Current.HasValue && !fps.Average.HasValue && !fps.Low1Percent.HasValue && !fps.FrameTimeMs.HasValue))
+            string status = FpsStatus(fps);
+            if (status != "active")
             {
-                DrawText(g, "等待游戏帧", fonts.Sans20Bold, Dark, x + 24, y + 50);
-                DrawText(g, "PresentMon / RTSS 捕获到游戏后显示", fonts.Sans11, Muted, x + 24, y + 80);
+                Color statusColor = status == "error" ? GpuPink : status == "stale" ? CpuBlue : Dark;
+                DrawText(g, FpsStatusTitle(status), fonts.Sans20Bold, statusColor, x + 24, y + 48);
+                DrawText(g, FitText(g, FpsStatusDetail(fps, status), fonts.Sans12, 384), fonts.Sans12, Muted, x + 24, y + 80);
                 return;
             }
 
             string current = FormatWholeOptional(fps == null ? null : fps.Current);
             DrawText(g, current, fonts.Mono64Bold, Dark, x + 24, y + 32);
             DrawText(g, "FPS", fonts.Sans16Bold, Dark, x + 24 + MeasureWidth(g, current, fonts.Mono64Bold) + 10, y + 68);
+            DrawRightText(g, "PresentMon · 活跃", fonts.Sans10Bold, NetGreen, x + 258, y + 18, 150, 14);
 
             DrawMiniPanel(g, fonts, x + 184, y + 44, 68, 54, "平均", FormatWholeOptional(fps == null ? null : fps.Average), Dark);
             DrawMiniPanel(g, fonts, x + 258, y + 44, 64, 54, "1%低", FormatWholeOptional(fps == null ? null : fps.Low1Percent), GpuPink);
@@ -200,8 +199,8 @@ namespace TURZX.SideScreen
         private static void DrawMemory(Graphics g, FontSet fonts, MemorySnapshot memory, GpuSnapshot gpu)
         {
             const float x = 24;
-            const float y = 892;
-            DrawCard(g, x, y, 432, 130, Hex("#0ea5e9"));
+            const float y = 832;
+            DrawCard(g, x, y, 432, 160, Hex("#0ea5e9"));
             DrawText(g, "RAM 内存 / VRAM 显存", fonts.Title, Green, x + 24, y + 18);
 
             double ramPct = Value(First(memory == null ? null : memory.RamUsagePercent, memory == null ? null : memory.UsedPercent));
@@ -217,103 +216,94 @@ namespace TURZX.SideScreen
             string vramClock = "显存频率 " + FormatGhz(First(gpu == null ? null : gpu.MemoryClockGhz, GhzFromMhz(gpu == null ? null : gpu.MemoryClockMhz)));
             DrawRightText(g, vramClock, fonts.Sans12, Muted, x + 216, y + 82, 192, 16);
             DrawProgress(g, x + 24, y + 102, 384, 6, vramPct, GpuPink, GpuPink2, false);
+
+            double[] dimm = memory == null ? null : memory.ModuleTemperaturesCelsius;
+            DrawMetricPill(g, fonts, x + 24, y + 122, 120, "主板 " + FormatTemperature(memory == null ? null : memory.MotherboardTemperatureCelsius), Hex("#ecfdf5"), Dark);
+            DrawMetricPill(g, fonts, x + 150, y + 122, 120, "DIMM A " + FormatTemperature(ArrayValue(dimm, 0)), Hex("#e0f2fe"), CpuBlue);
+            DrawMetricPill(g, fonts, x + 276, y + 122, 132, "DIMM B " + FormatTemperature(ArrayValue(dimm, 1)), Hex("#fce7f3"), GpuPink);
         }
 
         private static void DrawNetwork(Graphics g, FontSet fonts, NetworkSnapshot network)
         {
             const float x = 24;
-            const float y = 1036;
-            DrawCard(g, x, y, 432, 115, NetGreen);
+            const float y = 1006;
+            DrawCard(g, x, y, 432, 150, NetGreen);
             DrawText(g, "网络实时速率", fonts.Title, Green, x + 24, y + 17);
 
-            DrawFittedText(g, "↓" + FormatRateCompact(First(network == null ? null : network.DownloadBytesPerSecond, network == null ? null : network.RxBytesPerSecond)), new Font[] { fonts.Sans30Bold, fonts.Sans28Bold, fonts.Sans24Bold, fonts.Sans20Bold }, NetGreen, x + 24, y + 39, 138);
+            DrawFittedText(g, "↓" + FormatRateCompact(First(network == null ? null : network.DownloadBytesPerSecond, network == null ? null : network.RxBytesPerSecond)), new Font[] { fonts.Sans30Bold, fonts.Sans28Bold, fonts.Sans24Bold, fonts.Sans20Bold }, NetGreen, x + 24, y + 39, 176);
             DrawText(g, "下载速度", fonts.Sans12Bold, Muted, x + 24, y + 72);
 
-            DrawFittedText(g, "↑" + FormatRateCompact(First(network == null ? null : network.UploadBytesPerSecond, network == null ? null : network.TxBytesPerSecond)), new Font[] { fonts.Sans30Bold, fonts.Sans28Bold, fonts.Sans24Bold, fonts.Sans20Bold }, CpuBlue, x + 168, y + 39, 136);
-            DrawText(g, "上传速度", fonts.Sans12Bold, Muted, x + 168, y + 72);
+            DrawFittedText(g, "↑" + FormatRateCompact(First(network == null ? null : network.UploadBytesPerSecond, network == null ? null : network.TxBytesPerSecond)), new Font[] { fonts.Sans30Bold, fonts.Sans28Bold, fonts.Sans24Bold, fonts.Sans20Bold }, CpuBlue, x + 216, y + 39, 192);
+            DrawText(g, "上传速度", fonts.Sans12Bold, Muted, x + 216, y + 72);
 
-            FillRoundRect(g, x + 306, y + 38, 102, 54, 6, MiniFill);
-            DrawRoundRect(g, x + 306, y + 38, 102, 54, 6, MiniBorder, 0.8f);
-            DrawCenteredText(g, FormatMsCompact(network == null ? null : network.PingMs), fonts.Mono18Bold, Dark, x + 306, y + 42, 102, 18);
-            DrawCenteredText(g, "延迟状态", fonts.Sans10Bold, Muted, x + 306, y + 58, 102, 12);
-            string detail = NetworkDetailLine(network);
-            DrawCenteredText(g, FitText(g, detail, fonts.Sans9, 92), fonts.Sans9, Muted, x + 311, y + 70, 92, 12);
+            DrawMetricPill(g, fonts, x + 24, y + 105, 90, "延迟 " + FormatMsCompact(network == null ? null : network.PingMs), Hex("#ecfdf5"), Dark);
+            DrawMetricPill(g, fonts, x + 122, y + 105, 90, "抖动 " + FormatMsCompact(network == null ? null : network.JitterMs), Hex("#ecfdf5"), Muted);
+            DrawMetricPill(g, fonts, x + 220, y + 105, 90, "丢包 " + FormatPercent(network == null ? null : network.PacketLossPercent), Hex("#e0f2fe"), CpuBlue);
+            DrawMetricPill(g, fonts, x + 318, y + 105, 90, "DPC " + FormatPercentOneDecimal(network == null ? null : network.DpcPercent), Hex("#fce7f3"), GpuPink);
         }
 
-        private static void DrawDisks(Graphics g, FontSet fonts, DiskSnapshot[] disks)
+        private static void DrawDisks(Graphics g, FontSet fonts, PhysicalDiskSnapshot[] physicalDisks, DiskSnapshot[] legacyDisks)
         {
             const float x = 24;
-            const float y = 1165;
-            DrawCard(g, x, y, 432, 320, DiskGreen);
-            DrawText(g, "磁盘存储器", fonts.Title, Green, x + 24, y + 17);
-            DrawText(g, "盘符卷标", fonts.Sans11Bold, Muted, x + 24, y + 38);
-            DrawText(g, "使用率", fonts.Sans11Bold, Muted, x + 130, y + 38);
-            DrawRightText(g, "剩余可用空间", fonts.Sans11Bold, Muted, x + 292, y + 38, 116, 14);
+            const float y = 1170;
+            DrawCard(g, x, y, 432, 390, DiskGreen);
+            DrawText(g, "物理磁盘 / 实时 I/O", fonts.Title, Green, x + 24, y + 17);
+            DrawRightText(g, "最多显示 4 块", fonts.Sans10Bold, Muted, x + 280, y + 18, 128, 14);
 
-            int count = disks == null ? 0 : Math.Min(8, disks.Length);
+            PhysicalDiskSnapshot[] disks = ResolvePhysicalDisks(physicalDisks, legacyDisks);
+            int count = disks == null ? 0 : Math.Min(4, disks.Length);
             if (count == 0)
             {
-                DrawCenteredText(g, "无磁盘数据", fonts.Sans13Bold, Muted, x + 24, y + 144, 384, 24);
+                DrawCenteredText(g, "无物理磁盘数据", fonts.Sans13Bold, Muted, x + 24, y + 180, 384, 24);
             }
             else
             {
-                float step = count <= 7 ? 34f : 29f;
                 for (int i = 0; i < count; i++)
                 {
-                    DrawDiskRow(g, fonts, disks[i], i, x + 24, y + 52 + i * step);
+                    float rowY = y + 48 + i * 78;
+                    DrawPhysicalDiskRow(g, fonts, disks[i], i, x + 24, rowY);
+                    if (i < count - 1)
+                    {
+                        DrawLine(g, x + 24, rowY + 68, x + 408, rowY + 68, GreenLine, 1.1f);
+                    }
                 }
             }
-
         }
 
-        private static void DrawDiskRow(Graphics g, FontSet fonts, DiskSnapshot disk, int index, float x, float y)
+        private static void DrawPhysicalDiskRow(Graphics g, FontSet fonts, PhysicalDiskSnapshot disk, int index, float x, float y)
         {
             if (disk == null)
             {
-                disk = new DiskSnapshot();
+                disk = new PhysicalDiskSnapshot();
             }
 
-            string label = NormalizeDrive(disk.Drive) + " " + Safe(disk.Label, "");
-            double pct = Value(First(disk.UsagePercent, disk.UsedPercent));
-            Color start;
-            Color end;
-            if (index == 0 || index == 4)
-            {
-                start = CpuBlue;
-                end = CpuBlue2;
-            }
-            else if (index >= 5)
-            {
-                start = GpuPink;
-                end = GpuPink2;
-            }
-            else
-            {
-                start = DiskGreen;
-                end = DiskGreen2;
-            }
+            Color accent = index % 3 == 0 ? CpuBlue : index % 3 == 1 ? DiskGreen : GpuPink;
+            DrawText(g, FitText(g, PhysicalDiskDisplayName(disk), fonts.Sans13Bold, 216), fonts.Sans13Bold, Dark, x, y + 1);
+            DrawRightText(g, FitText(g, PhysicalDiskIdentity(disk), fonts.Sans11Bold, 160), fonts.Sans11Bold, Muted, x + 224, y + 3, 160, 16);
 
-            DrawText(g, FitText(g, label.Trim(), fonts.Sans13Bold, 96), fonts.Sans13Bold, pct <= 0.01 ? Muted : Dark, x, y + 5);
-            DrawProgress(g, x + 106, y + 8, 150, 8, pct, start, end, true);
-            DrawText(g, FormatWhole(pct) + "%", fonts.Mono13Bold, start, x + 268, y + 5);
-            DrawRightText(g, FormatDiskFree(disk), fonts.Sans13Bold, Muted, x + 316, y + 5, 92, 16);
+            string capacity = FormatPhysicalDiskCapacity(disk);
+            DrawDiskMetricPill(g, fonts, x, y + 26, 80, PhysicalDiskVolumes(disk), Hex("#f2faf6"), Muted);
+            DrawDiskMetricPill(g, fonts, x + 84, y + 26, 112, capacity, Hex("#ecfdf5"), accent);
+            DrawDiskMetricPill(g, fonts, x + 200, y + 26, 60, "读" + FormatDiskRateCompact(disk.ReadBytesPerSecond), Hex("#e0f2fe"), CpuBlue);
+            DrawDiskMetricPill(g, fonts, x + 264, y + 26, 60, "写" + FormatDiskRateCompact(disk.WriteBytesPerSecond), Hex("#fce7f3"), GpuPink);
+            DrawDiskMetricPill(g, fonts, x + 328, y + 26, 56, "活动" + FormatPercent(disk.ActivityPercent), Hex("#dcfce7"), Green);
         }
 
         private static void DrawApps(Graphics g, FontSet fonts, ProcessSnapshot[] processes)
         {
             const float x = 24;
-            const float y = 1499;
-            DrawCard(g, x, y, 432, 280, Indigo);
+            const float y = 1574;
+            DrawCard(g, x, y, 432, 330, Indigo);
             DrawText(g, "应用资源排行", fonts.Title, Green, x + 24, y + 18);
 
             for (int i = 0; i < 3; i++)
             {
-                float rowY = y + 46 + i * 70;
+                float rowY = y + 48 + i * 88;
                 ProcessSnapshot process = processes != null && i < processes.Length ? processes[i] : null;
                 DrawProcessRow(g, fonts, process, i, x + 24, rowY);
                 if (i < 2)
                 {
-                    DrawLine(g, x + 24, rowY + 62, x + 408, rowY + 62, GreenLine, 1.2f);
+                    DrawLine(g, x + 24, rowY + 78, x + 408, rowY + 78, GreenLine, 1.2f);
                 }
             }
         }
@@ -349,45 +339,11 @@ namespace TURZX.SideScreen
             return 1;
         }
 
-        private static void DrawHealth(Graphics g, FontSet fonts, HealthSnapshot health, TimeSnapshot time, TrustSnapshot trust)
-        {
-            const float x = 24;
-            const float y = 1793;
-            Color levelColor = TrustLevelColor(trust);
-            DrawCard(g, x, y, 432, 111, levelColor);
-            DrawText(g, "数据可信度", fonts.Title, Green, x + 24, y + 16);
-            DrawRightText(g, FitText(g, TrustStatusLine(trust, health), fonts.Sans9Bold, 210), fonts.Sans9Bold, Muted, x + 198, y + 18, 210, 14);
-
-            string score = TrustScoreValue(trust);
-            DrawText(g, score, fonts.Mono40Bold, levelColor, x + 24, y + 40);
-            if (trust != null && trust.Score.HasValue)
-            {
-                DrawText(g, "%", fonts.Sans16Bold, levelColor, x + 24 + MeasureWidth(g, score, fonts.Mono40Bold) + 4, y + 51);
-            }
-            DrawText(g, TrustDetailText(trust), fonts.Sans9Bold, Muted, x + 26, y + 79);
-
-            DrawDashedLine(g, x + 148, y + 42, x + 148, y + 88, GreenLine);
-            DrawDashedLine(g, x + 246, y + 42, x + 246, y + 88, GreenLine);
-            DrawDashedLine(g, x + 334, y + 42, x + 334, y + 88, GreenLine);
-
-            DrawText(g, "最弱项", fonts.Sans9Bold, Muted, x + 166, y + 42);
-            DrawText(g, FitText(g, TrustWorstText(trust), fonts.Mono15Bold, 66), fonts.Mono15Bold, TrustWorstColor(trust), x + 166, y + 60);
-            DrawText(g, TrustWorstDetail(trust), fonts.Sans8Bold, Muted, x + 166, y + 78);
-
-            DrawText(g, "缺失/回退", fonts.Sans9Bold, Muted, x + 264, y + 42);
-            DrawText(g, TrustIssueValue(trust), fonts.Mono15Bold, Dark, x + 264, y + 60);
-            DrawText(g, "数据块", fonts.Sans8Bold, Muted, x + 264, y + 78);
-
-            DrawText(g, "DPC", fonts.Sans9Bold, Muted, x + 352, y + 42);
-            DrawText(g, FormatNumber(health == null ? null : health.DpcLatencyUs, "0") + "us", fonts.Mono15Bold, Dark, x + 352, y + 60);
-            DrawText(g, FormatSeconds(First(health == null ? null : health.RefreshIntervalSeconds, time == null ? null : time.UpdateIntervalSeconds)), fonts.Sans8Bold, Muted, x + 352, y + 78);
-        }
-
         private static void DrawMiniPanel(Graphics g, FontSet fonts, float x, float y, float width, float height, string label, string value, Color valueColor)
         {
             FillRoundRect(g, x, y, width, height, 6, MiniFill);
             DrawRoundRect(g, x, y, width, height, 6, MiniBorder, 0.8f);
-            DrawText(g, label, fonts.Sans11Bold, Muted, x + 12, y + 8);
+            DrawText(g, label, fonts.Sans12Bold, Muted, x + 12, y + 8);
             DrawFittedText(g, value, new Font[] { fonts.Mono16Bold, fonts.Mono14Bold }, valueColor, x + 12, y + 27, width - 20);
         }
 
@@ -395,6 +351,12 @@ namespace TURZX.SideScreen
         {
             FillRoundRect(g, x, y, width, 22, 5, fill);
             DrawCenteredText(g, FitText(g, text, fonts.Mono11Bold, width - 10), fonts.Mono11Bold, color, x, y + 5, width, 13);
+        }
+
+        private static void DrawDiskMetricPill(Graphics g, FontSet fonts, float x, float y, float width, string text, Color fill, Color color)
+        {
+            FillRoundRect(g, x, y, width, 22, 5, fill);
+            DrawCenteredText(g, FitText(g, text, fonts.Mono10Bold, width - 8), fonts.Mono10Bold, color, x, y + 5, width, 13);
         }
 
         private static void DrawMetricBox(Graphics g, FontSet fonts, float x, float y, float width, string label, string value, Color fill, Color color)
@@ -463,8 +425,8 @@ namespace TURZX.SideScreen
 
             using (GraphicsPath fill = new GraphicsPath())
             using (GraphicsPath line = new GraphicsPath())
-            using (SolidBrush areaBrush = new SolidBrush(Color.FromArgb(22, color)))
-            using (Pen pen = new Pen(color, 1.4f))
+            using (SolidBrush areaBrush = new SolidBrush(Color.FromArgb(26, color)))
+            using (Pen pen = new Pen(color, 1.8f))
             {
                 if (points.Length >= 3)
                 {
@@ -844,154 +806,6 @@ namespace TURZX.SideScreen
             return value;
         }
 
-        private static string HealthStatusText(HealthSnapshot health)
-        {
-            string status = health == null ? null : health.Status;
-            if (String.Equals(status, "ok", StringComparison.OrdinalIgnoreCase))
-            {
-                return "诊断服务在线";
-            }
-            if (String.Equals(status, "degraded", StringComparison.OrdinalIgnoreCase))
-            {
-                return "诊断服务降级";
-            }
-            return Safe(status, "诊断服务在线");
-        }
-
-        private static string HealthDetailText(HealthSnapshot health)
-        {
-            if (health == null)
-            {
-                return "模块正常运转中";
-            }
-            if (!String.IsNullOrWhiteSpace(health.Detail))
-            {
-                return health.Detail;
-            }
-            if (health.Errors != null && health.Errors.Length > 0)
-            {
-                return "采集异常 " + health.Errors.Length.ToString("0", Invariant) + " 项";
-            }
-            return "模块正常运转中";
-        }
-
-        private static string HealthErrorValue(HealthSnapshot health)
-        {
-            int count = health == null || health.Errors == null ? 0 : health.Errors.Length;
-            return count == 0 ? "OK" : count.ToString("0", Invariant);
-        }
-
-        private static string HealthErrorText(HealthSnapshot health)
-        {
-            int count = health == null || health.Errors == null ? 0 : health.Errors.Length;
-            return count == 0 ? "无异常" : "采集异常";
-        }
-
-        private static string TrustScoreValue(TrustSnapshot trust)
-        {
-            return trust != null && trust.Score.HasValue ? trust.Score.Value.ToString("0", Invariant) : "--";
-        }
-
-        private static Color TrustLevelColor(TrustSnapshot trust)
-        {
-            string level = trust == null ? null : trust.Level;
-            if (String.Equals(level, "bad", StringComparison.OrdinalIgnoreCase))
-            {
-                return GpuPink;
-            }
-            if (String.Equals(level, "warn", StringComparison.OrdinalIgnoreCase))
-            {
-                return CpuBlue;
-            }
-            return Green;
-        }
-
-        private static Color TrustWorstColor(TrustSnapshot trust)
-        {
-            TrustItemSnapshot item = TrustWorstItem(trust);
-            if (item == null || !item.Score.HasValue || item.Score.Value >= 90)
-            {
-                return Green;
-            }
-            return item.Score.Value < 50 ? GpuPink : CpuBlue;
-        }
-
-        private static string TrustStatusLine(TrustSnapshot trust, HealthSnapshot health)
-        {
-            if (trust == null)
-            {
-                return HealthStatusText(health);
-            }
-            string level = Safe(trust.Level, "unknown").ToLowerInvariant();
-            if (level == "ok")
-            {
-                return "来源完整";
-            }
-            if (level == "bad")
-            {
-                return "关键数据缺失";
-            }
-            return "部分来源降级";
-        }
-
-        private static string TrustDetailText(TrustSnapshot trust)
-        {
-            if (trust == null)
-            {
-                return "等待可信度评分";
-            }
-            return Safe(trust.Summary, "可信度 " + TrustScoreValue(trust) + "/100");
-        }
-
-        private static string TrustWorstText(TrustSnapshot trust)
-        {
-            TrustItemSnapshot item = TrustWorstItem(trust);
-            if (item == null || !item.Score.HasValue || item.Score.Value >= 90)
-            {
-                return "无";
-            }
-            return Safe(!String.IsNullOrWhiteSpace(item.Label) ? item.Label : item.Component, "--");
-        }
-
-        private static string TrustWorstDetail(TrustSnapshot trust)
-        {
-            TrustItemSnapshot item = TrustWorstItem(trust);
-            if (item == null || !item.Score.HasValue || item.Score.Value >= 90)
-            {
-                return "全部正常";
-            }
-            return FitPlain(Safe(item.Status, "warn"), 8);
-        }
-
-        private static string TrustIssueValue(TrustSnapshot trust)
-        {
-            int missing = trust == null || !trust.MissingCount.HasValue ? 0 : trust.MissingCount.Value;
-            int fallback = trust == null || !trust.FallbackCount.HasValue ? 0 : trust.FallbackCount.Value;
-            return missing.ToString("0", Invariant) + "/" + fallback.ToString("0", Invariant);
-        }
-
-        private static TrustItemSnapshot TrustWorstItem(TrustSnapshot trust)
-        {
-            if (trust == null || trust.Items == null || trust.Items.Length == 0)
-            {
-                return null;
-            }
-
-            TrustItemSnapshot worst = null;
-            foreach (TrustItemSnapshot item in trust.Items)
-            {
-                if (item == null)
-                {
-                    continue;
-                }
-                if (worst == null || Value(item.Score) < Value(worst.Score))
-                {
-                    worst = item;
-                }
-            }
-            return worst;
-        }
-
         private static string FormatWeather(WeatherSnapshot weather)
         {
             string city = Safe(weather == null ? null : weather.City, "--");
@@ -1038,6 +852,81 @@ namespace TURZX.SideScreen
                 return "丢" + FormatPercent(network.PacketLossPercent);
             }
             return "延迟采样中";
+        }
+
+        private static string FpsStatus(FpsSnapshot fps)
+        {
+            string status = fps == null ? "" : Safe(fps.Status, "").Trim().ToLowerInvariant();
+            if (status == "active" || status == "idle" || status == "connecting" || status == "stale" || status == "error" || status == "disabled")
+            {
+                if (status == "active" && fps != null && !fps.Current.HasValue && !fps.Average.HasValue && !fps.Low1Percent.HasValue && !fps.FrameTimeMs.HasValue)
+                {
+                    return "connecting";
+                }
+                return status;
+            }
+            if (status == "warmup" || status == "starting")
+            {
+                return "connecting";
+            }
+            if (status == "failed" || status == "unavailable")
+            {
+                return "error";
+            }
+            return fps != null && (fps.Current.HasValue || fps.Average.HasValue || fps.Low1Percent.HasValue || fps.FrameTimeMs.HasValue)
+                ? "active"
+                : "idle";
+        }
+
+        private static string FpsStatusTitle(string status)
+        {
+            if (status == "active")
+            {
+                return "帧率采集中";
+            }
+            if (status == "connecting")
+            {
+                return "正在连接帧源";
+            }
+            if (status == "stale")
+            {
+                return "帧数据已过期";
+            }
+            if (status == "error")
+            {
+                return "帧率采集异常";
+            }
+            if (status == "disabled")
+            {
+                return "帧率采集未启用";
+            }
+            return "等待游戏帧";
+        }
+
+        private static string FpsStatusDetail(FpsSnapshot fps, string status)
+        {
+            if (status == "connecting")
+            {
+                return "PresentMon 正在建立采集连接";
+            }
+            if (status == "stale")
+            {
+                if (fps != null && fps.SampleAgeSeconds.HasValue)
+                {
+                    return "PresentMon 最近样本 " + FormatNumber(fps.SampleAgeSeconds, "0.#") + "s 前";
+                }
+                return "PresentMon 最近样本已失效";
+            }
+            if (status == "error")
+            {
+                string detail = fps == null ? null : fps.Detail;
+                return String.IsNullOrWhiteSpace(detail) ? "PresentMon 无法读取帧数据" : "PresentMon · " + detail;
+            }
+            if (status == "disabled")
+            {
+                return "配置 TIMEAUDIT_DSN 后启用 PresentMon 数据";
+            }
+            return "PresentMon 正在等待游戏启动";
         }
 
         private static string FormatTemperature(double? value)
@@ -1146,6 +1035,102 @@ namespace TURZX.SideScreen
             return "--";
         }
 
+        private static PhysicalDiskSnapshot[] ResolvePhysicalDisks(PhysicalDiskSnapshot[] physicalDisks, DiskSnapshot[] legacyDisks)
+        {
+            if (physicalDisks != null && physicalDisks.Length > 0)
+            {
+                return physicalDisks;
+            }
+            // Logical volumes cannot safely preserve the physical-disk filtering contract:
+            // they can duplicate a multi-volume SSD and reintroduce RECOVER/small USB drives.
+            return new PhysicalDiskSnapshot[0];
+        }
+
+        private static string PhysicalDiskIdentity(PhysicalDiskSnapshot disk)
+        {
+            List<string> parts = new List<string>();
+            if (disk != null && !String.IsNullOrWhiteSpace(disk.BusType))
+            {
+                parts.Add(disk.BusType.Trim());
+            }
+            if (
+                disk != null
+                && !String.IsNullOrWhiteSpace(disk.MediaType)
+                && !String.Equals(disk.MediaType.Trim(), "Unspecified", StringComparison.OrdinalIgnoreCase)
+                && !String.Equals(disk.MediaType.Trim(), "Unknown", StringComparison.OrdinalIgnoreCase)
+            )
+            {
+                parts.Add(disk.MediaType.Trim());
+            }
+            if (disk != null && disk.TemperatureCelsius.HasValue)
+            {
+                parts.Add(FormatTemperature(disk.TemperatureCelsius));
+            }
+            return parts.Count == 0 ? "总线 -- · 温度 --" : String.Join(" · ", parts.ToArray());
+        }
+
+        private static string PhysicalDiskDisplayName(PhysicalDiskSnapshot disk)
+        {
+            string model = Safe(disk == null ? null : disk.Model, "未知磁盘").Trim();
+            string[] genericSuffixes = new string[]
+            {
+                " SCSI Disk Device",
+                " ATA Device",
+                " USB Device"
+            };
+            foreach (string suffix in genericSuffixes)
+            {
+                if (model.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
+                {
+                    return model.Substring(0, model.Length - suffix.Length).Trim();
+                }
+            }
+            return model;
+        }
+
+        private static string PhysicalDiskVolumes(PhysicalDiskSnapshot disk)
+        {
+            string[] volumes = disk == null || disk.VolumeDrives == null || disk.VolumeDrives.Length == 0
+                ? (disk == null ? null : disk.Volumes)
+                : disk.VolumeDrives;
+            if (volumes == null || volumes.Length == 0)
+            {
+                return "卷 --";
+            }
+            string[] normalized = new string[volumes.Length];
+            for (int i = 0; i < volumes.Length; i++)
+            {
+                normalized[i] = NormalizeDrive(volumes[i]);
+            }
+            return "卷 " + String.Join("/", normalized);
+        }
+
+        private static string FormatPhysicalDiskCapacity(PhysicalDiskSnapshot disk)
+        {
+            if (disk == null)
+            {
+                return "--";
+            }
+            string capacity = FormatCapacityCompact(First(disk.CapacityGb, disk.TotalGb));
+            string used = FormatPercent(disk.UsedPercent);
+            string free = FormatCapacityCompact(disk.FreeGb);
+            return capacity + "·" + used + "·余" + free;
+        }
+
+        private static string FormatCapacityCompact(double? valueGb)
+        {
+            if (!valueGb.HasValue)
+            {
+                return "--";
+            }
+            double value = Math.Max(0, valueGb.Value);
+            if (value >= 1024)
+            {
+                return (value / 1024.0).ToString(value >= 10240 ? "0.#" : "0.0", Invariant) + "T";
+            }
+            return value.ToString(value >= 100 ? "0" : "0.#", Invariant) + "G";
+        }
+
         private static string FormatRate(double? bytesPerSecond)
         {
             if (!bytesPerSecond.HasValue)
@@ -1176,6 +1161,31 @@ namespace TURZX.SideScreen
             return FormatRate(bytesPerSecond).Replace(" ", "");
         }
 
+        private static string FormatDiskRateCompact(double? bytesPerSecond)
+        {
+            if (!bytesPerSecond.HasValue)
+            {
+                return "--";
+            }
+            double value = Math.Max(0, bytesPerSecond.Value);
+            if (value < 1024)
+            {
+                return value.ToString("0", Invariant) + "B/s";
+            }
+            value /= 1024.0;
+            if (value < 1024)
+            {
+                return value.ToString("0", Invariant) + "K/s";
+            }
+            value /= 1024.0;
+            if (value < 1024)
+            {
+                return value.ToString(value < 10 ? "0.#" : "0", Invariant) + "M/s";
+            }
+            value /= 1024.0;
+            return value.ToString(value < 10 ? "0.#" : "0", Invariant) + "G/s";
+        }
+
         private static string FormatPercent(double? value)
         {
             if (!value.HasValue)
@@ -1183,6 +1193,15 @@ namespace TURZX.SideScreen
                 return "--";
             }
             return FormatWhole(Value(value)) + "%";
+        }
+
+        private static string FormatPercentOneDecimal(double? value)
+        {
+            if (!value.HasValue)
+            {
+                return "--";
+            }
+            return Clamp(value.Value, 0, 100).ToString("0.0", Invariant) + "%";
         }
 
         private static string FormatPaddedPercent(double? value)
@@ -1273,6 +1292,11 @@ namespace TURZX.SideScreen
         private static double? First(double? first, double? second)
         {
             return first.HasValue ? first : second;
+        }
+
+        private static double? ArrayValue(double[] values, int index)
+        {
+            return values != null && index >= 0 && index < values.Length ? (double?)values[index] : null;
         }
 
         private static double Value(double? value)

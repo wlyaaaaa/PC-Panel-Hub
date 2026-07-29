@@ -37,7 +37,7 @@ time, weather, alert, foreground_app, cpu, gpu, fps, memory, disks, network, top
 - 频率：MHz，UI 可显示 GHz
 - 电压：V
 - 网络：B/s 或 KB/s，renderer 负责格式化
-- DPC：us
+- DPC：Windows `% DPC Time`
 
 ## Current Build Order
 

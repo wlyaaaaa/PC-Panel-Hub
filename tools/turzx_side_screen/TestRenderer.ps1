@@ -3,9 +3,10 @@ $ErrorActionPreference = "Stop"
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $outDir = Join-Path $scriptDir "out"
-$previewPath = Join-Path $outDir "renderer-preview.png"
+$previewPath = Join-Path $outDir "tests\renderer-preview.png"
 
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+New-Item -ItemType Directory -Force -Path (Split-Path -Parent $previewPath) | Out-Null
 
 $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("turzx_renderer_" + [Guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Force -Path $tempRoot | Out-Null
@@ -71,6 +72,111 @@ internal static class RenderPreview
             return 7;
         }
 
+        MethodInfo fpsStatusMethod = typeof(SideScreenRenderer).GetMethod("FpsStatus", BindingFlags.NonPublic | BindingFlags.Static);
+        MethodInfo fpsTitleMethod = typeof(SideScreenRenderer).GetMethod("FpsStatusTitle", BindingFlags.NonPublic | BindingFlags.Static);
+        MethodInfo fpsDetailMethod = typeof(SideScreenRenderer).GetMethod("FpsStatusDetail", BindingFlags.NonPublic | BindingFlags.Static);
+        if (fpsStatusMethod == null || fpsTitleMethod == null || fpsDetailMethod == null)
+        {
+            Console.Error.WriteLine("FPS state helpers not found.");
+            return 8;
+        }
+
+        string[] fpsStates = new string[] { "idle", "connecting", "stale", "error", "disabled", "active" };
+        string[] fpsTitles = new string[] { "等待游戏帧", "正在连接帧源", "帧数据已过期", "帧率采集异常", "帧率采集未启用", "帧率采集中" };
+        for (int stateIndex = 0; stateIndex < fpsStates.Length; stateIndex++)
+        {
+            string expectedState = fpsStates[stateIndex];
+            FpsSnapshot stateSnapshot = new FpsSnapshot
+            {
+                Status = expectedState,
+                Current = expectedState == "active" ? (double?)144 : null,
+                SampleAgeSeconds = expectedState == "stale" ? (double?)2.5 : null,
+                Detail = expectedState == "error" ? "采集进程未就绪" : null,
+                Source = "presentmon"
+            };
+            string actualState = (string)fpsStatusMethod.Invoke(null, new object[] { stateSnapshot });
+            if (actualState != expectedState)
+            {
+                Console.Error.WriteLine("Unexpected FPS state: expected {0}, got {1}", expectedState, actualState);
+                return 9;
+            }
+            string actualTitle = (string)fpsTitleMethod.Invoke(null, new object[] { expectedState });
+            if (actualTitle != fpsTitles[stateIndex])
+            {
+                Console.Error.WriteLine("Unexpected FPS title: expected {0}, got {1}", fpsTitles[stateIndex], actualTitle);
+                return 10;
+            }
+        }
+
+        string idleTitle = (string)fpsTitleMethod.Invoke(null, new object[] { "idle" });
+        string idleDetail = (string)fpsDetailMethod.Invoke(null, new object[] { new FpsSnapshot { Status = "idle" }, "idle" });
+        if (idleTitle != "等待游戏帧" || idleDetail != "PresentMon 正在等待游戏启动" || idleDetail.IndexOf("RT" + "SS", StringComparison.OrdinalIgnoreCase) >= 0)
+        {
+            Console.Error.WriteLine("Unexpected idle FPS copy: " + idleTitle + " / " + idleDetail);
+            return 11;
+        }
+
+        MethodInfo resolvePhysicalDisksMethod = typeof(SideScreenRenderer).GetMethod("ResolvePhysicalDisks", BindingFlags.NonPublic | BindingFlags.Static);
+        if (resolvePhysicalDisksMethod == null)
+        {
+            Console.Error.WriteLine("ResolvePhysicalDisks method not found.");
+            return 12;
+        }
+        PhysicalDiskSnapshot[] resolvedLegacyDisks = (PhysicalDiskSnapshot[])resolvePhysicalDisksMethod.Invoke(
+            null,
+            new object[]
+            {
+                new PhysicalDiskSnapshot[0],
+                new DiskSnapshot[]
+                {
+                    new DiskSnapshot { Drive = "F:", Label = "RECOVER", TotalGb = 15 }
+                }
+            }
+        );
+        if (resolvedLegacyDisks.Length != 0)
+        {
+            Console.Error.WriteLine("Logical disk fallback bypassed the physical disk filter.");
+            return 13;
+        }
+
+        MethodInfo diskRateMethod = typeof(SideScreenRenderer).GetMethod("FormatDiskRateCompact", BindingFlags.NonPublic | BindingFlags.Static);
+        if (diskRateMethod == null)
+        {
+            Console.Error.WriteLine("FormatDiskRateCompact method not found.");
+            return 14;
+        }
+        string largeDiskRate = (string)diskRateMethod.Invoke(null, new object[] { (double?)(115.9 * 1024 * 1024) });
+        if (largeDiskRate != "116M/s")
+        {
+            Console.Error.WriteLine("Large disk rate is not compact enough: " + largeDiskRate);
+            return 15;
+        }
+
+        MethodInfo diskNameMethod = typeof(SideScreenRenderer).GetMethod("PhysicalDiskDisplayName", BindingFlags.NonPublic | BindingFlags.Static);
+        MethodInfo diskVolumesMethod = typeof(SideScreenRenderer).GetMethod("PhysicalDiskVolumes", BindingFlags.NonPublic | BindingFlags.Static);
+        MethodInfo diskIdentityMethod = typeof(SideScreenRenderer).GetMethod("PhysicalDiskIdentity", BindingFlags.NonPublic | BindingFlags.Static);
+        if (diskNameMethod == null || diskVolumesMethod == null || diskIdentityMethod == null)
+        {
+            Console.Error.WriteLine("Physical disk display helpers not found.");
+            return 16;
+        }
+        PhysicalDiskSnapshot usbDisk = new PhysicalDiskSnapshot
+        {
+            Model = "Lenovo thinkplus 1TB SCSI Disk Device",
+            VolumeDrives = new string[] { "H:\\" },
+            BusType = "USB",
+            MediaType = "Unspecified",
+            TemperatureCelsius = 40
+        };
+        string usbName = (string)diskNameMethod.Invoke(null, new object[] { usbDisk });
+        string usbVolumes = (string)diskVolumesMethod.Invoke(null, new object[] { usbDisk });
+        string usbIdentity = (string)diskIdentityMethod.Invoke(null, new object[] { usbDisk });
+        if (usbName != "Lenovo thinkplus 1TB" || usbVolumes != "卷 H:" || usbIdentity != "USB · 40°C")
+        {
+            Console.Error.WriteLine("Unexpected USB disk display: " + usbName + " / " + usbVolumes + " / " + usbIdentity);
+            return 17;
+        }
+
         Console.WriteLine("Preview written: " + args[0]);
         return 0;
     }
@@ -84,7 +190,7 @@ internal static class RenderPreview
             Date = "2026-07-05",
             Weekday = "周日",
             Time = "17:02:35",
-            UpdateIntervalSeconds = 0.5
+            UpdateIntervalSeconds = 1.0
         };
         snapshot.Weather = new WeatherSnapshot
         {
@@ -133,7 +239,10 @@ internal static class RenderPreview
             Average = 141,
             Low1Percent = 118,
             FrameTimeMs = 6.9,
-            Source = "PresentMon / RTSS API"
+            Status = "active",
+            Source = "presentmon",
+            SampleAgeSeconds = 0.3,
+            Detail = "game.exe"
         };
         snapshot.Memory = new MemorySnapshot
         {
@@ -142,7 +251,9 @@ internal static class RenderPreview
             RamTotalGb = 64.0,
             VramUsagePercent = 14,
             VramUsedGb = 4.5,
-            VramTotalGb = 32.0
+            VramTotalGb = 32.0,
+            MotherboardTemperatureCelsius = 41,
+            ModuleTemperaturesCelsius = new double[] { 44, 46 }
         };
         snapshot.Network = new NetworkSnapshot
         {
@@ -150,7 +261,8 @@ internal static class RenderPreview
             UploadBytesPerSecond = 22 * 1024,
             PingMs = 18,
             JitterMs = 2,
-            PacketLossPercent = 0
+            PacketLossPercent = 0,
+            DpcPercent = 0.2
         };
         snapshot.Disks = new DiskSnapshot[]
         {
@@ -161,6 +273,67 @@ internal static class RenderPreview
             new DiskSnapshot { Drive = "G:", Label = "data", UsagePercent = 64, FreeText = "1.2 TB 可用" },
             new DiskSnapshot { Drive = "H:", Label = "1871", UsagePercent = 17, FreeText = "871 GB 可用" },
             new DiskSnapshot { Drive = "Z:", Label = "RAMDISK-EXTREMELY-LONG-VOLUME-LABEL", UsagePercent = 3, FreeText = "23 GB 可用" }
+        };
+        snapshot.PhysicalDisks = new PhysicalDiskSnapshot[]
+        {
+            new PhysicalDiskSnapshot
+            {
+                Model = "Predator GM7000 4TB",
+                VolumeDrives = new string[] { "C:", "E:" },
+                BusType = "NVMe",
+                MediaType = "SSD",
+                CapacityGb = 3726,
+                UsedPercent = 91,
+                FreeGb = 357,
+                ReadBytesPerSecond = 118 * 1024 * 1024,
+                WriteBytesPerSecond = 77 * 1024 * 1024,
+                ActivityPercent = 40,
+                TemperatureCelsius = 58,
+                Status = "ok",
+                Source = "windows_storage"
+            },
+            new PhysicalDiskSnapshot
+            {
+                Model = "XPG GAMMIX S50 Lite 2TB",
+                VolumeDrives = new string[] { "G:" },
+                BusType = "NVMe",
+                MediaType = "SSD",
+                CapacityGb = 1863,
+                UsedPercent = 40,
+                FreeGb = 1118,
+                ReadBytesPerSecond = 4 * 1024 * 1024,
+                WriteBytesPerSecond = 16 * 1024 * 1024,
+                ActivityPercent = 11,
+                TemperatureCelsius = 45
+            },
+            new PhysicalDiskSnapshot
+            {
+                Model = "Hitachi HUS724040ALE641 4TB",
+                VolumeDrives = new string[] { "D:" },
+                BusType = "SATA",
+                MediaType = "HDD",
+                CapacityGb = 3726,
+                UsedPercent = 76,
+                FreeGb = 889,
+                ReadBytesPerSecond = 130 * 1024 * 1024,
+                WriteBytesPerSecond = 0,
+                ActivityPercent = 100,
+                TemperatureCelsius = 45
+            },
+            new PhysicalDiskSnapshot
+            {
+                Model = "Lenovo thinkplus 1TB",
+                VolumeDrives = new string[] { "H:" },
+                BusType = "USB",
+                MediaType = "SSD",
+                CapacityGb = 932,
+                UsedPercent = 34,
+                FreeGb = 631,
+                ReadBytesPerSecond = 0,
+                WriteBytesPerSecond = 0,
+                ActivityPercent = 0,
+                TemperatureCelsius = 40
+            }
         };
         snapshot.TopProcesses = new ProcessSnapshot[]
         {
@@ -179,9 +352,8 @@ internal static class RenderPreview
         {
             Status = "诊断服务在线",
             Detail = "模块正常运转中",
-            DpcLatencyUs = 430,
             HardPageFaultsPerSecond = 0,
-            RefreshIntervalSeconds = 0.5
+            RefreshIntervalSeconds = 1.0
         };
         snapshot.Trust = new TrustSnapshot
         {
@@ -255,7 +427,9 @@ internal static class RenderPreview
             Current = 0,
             Average = null,
             Status = "idle",
-            Source = "fallback"
+            Source = "presentmon",
+            SampleAgeSeconds = 12,
+            Detail = "no game present"
         };
         snapshot.Memory = new MemorySnapshot
         {
@@ -263,6 +437,8 @@ internal static class RenderPreview
             UsedGb = 22.0,
             AvailableGb = 42.0,
             TotalGb = 64.0,
+            MotherboardTemperatureCelsius = null,
+            ModuleTemperaturesCelsius = new double[0],
             Source = "win32"
         };
         snapshot.Disks = new DiskSnapshot[]
@@ -273,6 +449,7 @@ internal static class RenderPreview
         {
             RxBytesPerSecond = 1536,
             TxBytesPerSecond = 4096,
+            DpcPercent = 0.1,
             Addresses = new string[] { "127.0.0.1" },
             Source = "stdlib"
         };
@@ -348,8 +525,27 @@ try {
     Add-Type -AssemblyName System.Drawing
     $bitmap = [System.Drawing.Bitmap]::FromFile($previewPath)
     try {
-        $cpuBox = $bitmap.GetPixel(322, 1558)
-        $ramBox = $bitmap.GetPixel(398, 1558)
+        $expectedAccents = @(
+            @{ Name = "CPU"; X = 25; Y = 180; R = 2; G = 132; B = 199 },
+            @{ Name = "GPU"; X = 25; Y = 444; R = 219; G = 39; B = 119 },
+            @{ Name = "FPS"; X = 25; Y = 708; R = 5; G = 150; B = 105 },
+            @{ Name = "Memory"; X = 25; Y = 852; R = 14; G = 165; B = 233 },
+            @{ Name = "Network"; X = 25; Y = 1026; R = 5; G = 150; B = 105 },
+            @{ Name = "PhysicalDisks"; X = 25; Y = 1190; R = 21; G = 128; B = 61 },
+            @{ Name = "Apps"; X = 25; Y = 1594; R = 129; G = 140; B = 248 },
+            @{ Name = "AppsBottom"; X = 25; Y = 1880; R = 129; G = 140; B = 248 }
+        )
+        foreach ($expected in $expectedAccents) {
+            $pixel = $bitmap.GetPixel($expected.X, $expected.Y)
+            if ([Math]::Abs([int]$pixel.R - [int]$expected.R) -gt 4 -or
+                [Math]::Abs([int]$pixel.G - [int]$expected.G) -gt 4 -or
+                [Math]::Abs([int]$pixel.B - [int]$expected.B) -gt 4) {
+                throw "Expected $($expected.Name) accent near RGB($($expected.R),$($expected.G),$($expected.B)) at ($($expected.X),$($expected.Y)), got RGB($($pixel.R),$($pixel.G),$($pixel.B))"
+            }
+        }
+
+        $cpuBox = $bitmap.GetPixel(322, 1640)
+        $ramBox = $bitmap.GetPixel(398, 1640)
         if (!($cpuBox.B -gt 220 -and $cpuBox.R -lt 235)) {
             throw "Expected app CPU metric box on the right side, got RGB($($cpuBox.R),$($cpuBox.G),$($cpuBox.B))"
         }

@@ -4,10 +4,10 @@ Self-hosted realtime dashboard for 480x1920 TURZX USB side screens.
 
 This project replaces the stock TURZX monitoring page with a custom local stack:
 
-- Python metrics agents for CPU, GPU, FPS, weather, disks, network, foreground app, and process ranking.
+- Python metrics agents for CPU/GPU thermals, effective clocks and voltages, FPS, weather, physical-disk I/O, network quality, foreground app, and process ranking.
 - C# / GDI+ renderer for a dense 480x1920 dashboard.
 - COM7 differential frame streaming for low-interference 1s updates, with stale-data fallback so slow metrics reads do not stall the clock.
-- Data trust scoring and JSONL diagnostics.
+- Bounded JSONL diagnostics and explicit source/error states.
 - Windows Scheduled Task startup support with highest privilege.
 
 ## Current Status
@@ -21,8 +21,12 @@ Known assumptions:
 - Runtime OS: Windows.
 - Python 3.11+ recommended.
 - .NET Framework compiler `csc.exe` is required for the renderer/stream binaries.
-- Hardware metrics work best with NVIDIA NVML, LibreHardwareMonitor, RTSS/PresentMon, and the optional `E:\TimeAudit` telemetry stack.
+- Hardware metrics work best with NVIDIA NVML and LibreHardwareMonitor.
+- FPS comes from the optional TimeAudit/PresentMon chain enabled with `TIMEAUDIT_DSN`; no RTSS integration is required.
 - Optional TimeAudit FPS source is enabled with `TIMEAUDIT_DSN`; no database password is stored in this repository.
+- A fresh all-zero FPS sample means “waiting for a game”, not a collection fault. Connecting, stale, and error states are shown separately.
+- The displayed DPC value is Windows `Processor Information(_Total)\% DPC Time`, not a synthetic scheduler-delay measurement.
+- Physical disks are merged across their drive letters. Volumes named `RECOVER`, virtual/RAM disks, and USB/removable media smaller than 32,000,000,000 bytes are excluded.
 
 ## Quick Start
 

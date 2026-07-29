@@ -15,7 +15,7 @@ TURZX SideScreen is intentionally split into small local processes:
 3. `top_processes_helper.py`
    - Samples process CPU/RAM independently every 3 seconds.
    - Writes `out\top-processes.json`.
-   - Prevents heavy process sampling from blocking the 0.5s main snapshot loop.
+   - Prevents heavy process sampling from blocking the 1s main snapshot loop.
 
 4. `TURZX.SideScreen.Stream.exe`
    - Fetches snapshots with a short timeout and reuses the last good snapshot if metrics are slow.

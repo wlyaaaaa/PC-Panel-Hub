@@ -3,6 +3,10 @@ param(
     [string]$Port = "COM7",
     [int]$IntervalMs = 1000,
     [int]$FullResyncEveryFrames = 300,
+    [int]$PreviewIntervalSeconds = 45,
+    [int64]$MaxStackLogBytes = 1048576,
+    [int64]$MaxStreamLogBytes = 5242880,
+    [ValidateRange(1, 32)][int]$LogBackupCount = 3,
     [switch]$Worker
 )
 
@@ -12,12 +16,54 @@ $ErrorActionPreference = "Stop"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $outDir = Join-Path $scriptDir "out"
 $logPath = Join-Path $outDir "side-screen-stack.log"
+$stdoutPath = Join-Path $outDir "side-screen-stack.stdout.log"
+$stderrPath = Join-Path $outDir "side-screen-stack.stderr.log"
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+
+function Write-BoundedLogLine {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Message,
+        [Parameter(Mandatory = $true)][int64]$MaxBytes,
+        [int]$BackupCount = 3
+    )
+
+    try {
+        $directory = Split-Path -Parent $Path
+        if (-not [string]::IsNullOrWhiteSpace($directory)) {
+            New-Item -ItemType Directory -Force -Path $directory | Out-Null
+        }
+
+        $recordBytes = [Text.Encoding]::UTF8.GetByteCount($Message + [Environment]::NewLine)
+        if ($MaxBytes -gt 0 -and
+            (Test-Path -LiteralPath $Path -PathType Leaf) -and
+            ((Get-Item -LiteralPath $Path).Length + $recordBytes -gt $MaxBytes)) {
+            for ($index = $BackupCount; $index -ge 1; $index--) {
+                $source = if ($index -eq 1) { $Path } else { "{0}.{1}" -f $Path, ($index - 1) }
+                $destination = "{0}.{1}" -f $Path, $index
+                if (Test-Path -LiteralPath $source -PathType Leaf) {
+                    Remove-Item -LiteralPath $destination -Force -ErrorAction SilentlyContinue
+                    if ((Get-Item -LiteralPath $source).Length -gt $MaxBytes) {
+                        Remove-Item -LiteralPath $source -Force
+                    }
+                    else {
+                        Move-Item -LiteralPath $source -Destination $destination -Force
+                    }
+                }
+            }
+        }
+
+        Add-Content -LiteralPath $Path -Value $Message -Encoding UTF8
+    }
+    catch {
+        # Diagnostics are best effort: a log viewer must never stop the display worker.
+    }
+}
 
 function Write-StackLog {
     param([string]$Message)
     $line = "{0} {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $Message
-    Add-Content -LiteralPath $logPath -Value $line -Encoding UTF8
+    Write-BoundedLogLine -Path $logPath -Message $line -MaxBytes $MaxStackLogBytes -BackupCount $LogBackupCount
 }
 
 if (-not $Worker) {
@@ -53,29 +99,63 @@ if (-not $Worker) {
             "-Port", $Port,
             "-IntervalMs", [string]$IntervalMs
             "-FullResyncEveryFrames", [string]$FullResyncEveryFrames
+            "-PreviewIntervalSeconds", [string]$PreviewIntervalSeconds
+            "-MaxStackLogBytes", [string]$MaxStackLogBytes
+            "-MaxStreamLogBytes", [string]$MaxStreamLogBytes
+            "-LogBackupCount", [string]$LogBackupCount
         ) `
         -WorkingDirectory $scriptDir `
         -WindowStyle Hidden | Out-Null
     exit 0
 }
 
-function Find-Python {
-    $cmd = Get-Command python -ErrorAction SilentlyContinue
-    if ($cmd -and (Test-Path -LiteralPath $cmd.Source)) {
-        return $cmd.Source
-    }
-
-    $candidates = @(
-        (Join-Path $env:LOCALAPPDATA "Programs\Python\Python311\python.exe"),
-        (Join-Path $env:LOCALAPPDATA "Microsoft\WindowsApps\python.exe")
+function Test-PythonModules {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [string[]]$Modules = @()
     )
 
-    foreach ($candidate in $candidates) {
-        if (Test-Path -LiteralPath $candidate) {
+    if (!(Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return $false
+    }
+    if ($Modules.Count -eq 0) {
+        return $true
+    }
+
+    & $Path -c "import importlib.util,sys;sys.exit(0 if all(importlib.util.find_spec(name) is not None for name in sys.argv[1:]) else 1)" @Modules 2>$null
+    return $LASTEXITCODE -eq 0
+}
+
+function Find-Python {
+    $requiresTimeAudit = -not [string]::IsNullOrWhiteSpace($env:TIMEAUDIT_DSN)
+    $requiredModules = if ($requiresTimeAudit) { @("psutil", "asyncpg") } else { @() }
+    $cmd = Get-Command python -ErrorAction SilentlyContinue
+    $commandPath = if ($cmd) { $cmd.Source } else { $null }
+    $candidates = if ($requiresTimeAudit) {
+        @(
+            (Join-Path $env:LOCALAPPDATA "Programs\Python\Python311\python.exe"),
+            $commandPath,
+            (Join-Path $env:LOCALAPPDATA "Programs\Python\Python314\python.exe"),
+            (Join-Path $env:LOCALAPPDATA "Microsoft\WindowsApps\python.exe")
+        )
+    } else {
+        @(
+            $commandPath,
+            (Join-Path $env:LOCALAPPDATA "Programs\Python\Python311\python.exe"),
+            (Join-Path $env:LOCALAPPDATA "Programs\Python\Python314\python.exe"),
+            (Join-Path $env:LOCALAPPDATA "Microsoft\WindowsApps\python.exe")
+        )
+    }
+
+    foreach ($candidate in @($candidates | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)) {
+        if (Test-PythonModules -Path $candidate -Modules $requiredModules) {
             return $candidate
         }
     }
 
+    if ($requiresTimeAudit) {
+        throw "No Python interpreter with required modules psutil+asyncpg was found for TimeAudit FPS."
+    }
     throw "python.exe not found"
 }
 
@@ -105,6 +185,7 @@ Stop-ProcessByCommandLine -NamePattern "python*" -CommandPattern "*turzx_weather
 Stop-ProcessByCommandLine -NamePattern "TURZX.SideScreen.Stream.exe" -CommandPattern "*turzx_side_screen*"
 
 $python = Find-Python
+Write-StackLog ("python selected path={0} timeauditModulesRequired={1}" -f $python, (-not [string]::IsNullOrWhiteSpace($env:TIMEAUDIT_DSN)))
 $weatherShim = Join-Path $Root "tools\turzx_weather_shim\turzx_weather_shim.py"
 $weatherDir = Split-Path -Parent $weatherShim
 Start-Process -FilePath $python `
@@ -122,4 +203,13 @@ Write-StackLog "top processes helper launched"
 Start-Sleep -Milliseconds 900
 
 $streamScript = Join-Path $scriptDir "StartVideoStream.ps1"
-& $streamScript -Root $Root -Port $Port -IntervalMs $IntervalMs -Frames 0 -FullResyncEveryFrames $FullResyncEveryFrames -Diff
+try {
+    & $streamScript -Root $Root -Port $Port -IntervalMs $IntervalMs -Frames 0 -FullResyncEveryFrames $FullResyncEveryFrames -PreviewIntervalSeconds $PreviewIntervalSeconds -PythonPath $python -Diff *>&1 |
+        ForEach-Object {
+            Write-BoundedLogLine -Path $stdoutPath -Message ([string]$_) -MaxBytes $MaxStreamLogBytes -BackupCount $LogBackupCount
+        }
+}
+catch {
+    Write-BoundedLogLine -Path $stderrPath -Message ("{0} {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $_.Exception.Message) -MaxBytes $MaxStackLogBytes -BackupCount $LogBackupCount
+    throw
+}

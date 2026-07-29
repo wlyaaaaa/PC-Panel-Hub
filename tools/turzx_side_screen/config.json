@@ -8,7 +8,7 @@
   "screen": {
     "width": 480,
     "height": 1920,
-    "dataRefreshMs": 500,
+    "dataRefreshMs": 1000,
     "maxSendMs": 450,
     "largeDiffFallbackMs": 1000,
     "forceFullFrameOnStart": true
@@ -17,8 +17,7 @@
     "url": "http://127.0.0.1:18765/snapshot",
     "listenHost": "127.0.0.1",
     "listenPort": 18765,
-    "pollMs": 500,
-    "timeAuditRoot": "E:\\TimeAudit"
+    "pollMs": 1000
   },
   "weather": {
     "city": "田家庵",
@@ -38,7 +37,7 @@
     "networkAccent": "#059669",
     "diskAccent": "#15803d",
     "maxTopProcesses": 3,
-    "maxDiskRows": 8,
+    "maxDiskRows": 4,
     "historySeconds": 60
   }
 }
