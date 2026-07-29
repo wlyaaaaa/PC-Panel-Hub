@@ -193,7 +193,7 @@ namespace TURZX.SideScreen
 
             DrawMiniPanel(g, fonts, x + 184, y + 44, 68, 54, "平均", FormatWholeOptional(fps == null ? null : fps.Average), Dark);
             DrawMiniPanel(g, fonts, x + 258, y + 44, 64, 54, "1%低", FormatWholeOptional(fps == null ? null : fps.Low1Percent), GpuPink);
-            DrawMiniPanel(g, fonts, x + 328, y + 44, 80, 54, "帧时间", FormatMsCompact(fps == null ? null : fps.FrameTimeMs), Dark);
+            DrawMiniPanel(g, fonts, x + 328, y + 44, 80, 54, "帧时间", FormatFrameTimeCompact(fps == null ? null : fps.FrameTimeMs), Dark);
         }
 
         private static void DrawMemory(Graphics g, FontSet fonts, MemorySnapshot memory, GpuSnapshot gpu)
@@ -239,7 +239,7 @@ namespace TURZX.SideScreen
             DrawMetricPill(g, fonts, x + 24, y + 105, 188, "延迟 " + FormatMsCompact(network == null ? null : network.PingMs), Hex("#ecfdf5"), Dark);
             DrawMetricPill(g, fonts, x + 220, y + 105, 188, "抖动 " + FormatMsCompact(network == null ? null : network.JitterMs), Hex("#ecfdf5"), Muted);
             DrawMetricPill(g, fonts, x + 24, y + 137, 188, "丢包 " + FormatPercent(network == null ? null : network.PacketLossPercent), Hex("#e0f2fe"), CpuBlue);
-            DrawMetricPill(g, fonts, x + 220, y + 137, 188, "DPC " + FormatPercentOneDecimal(network == null ? null : network.DpcPercent), Hex("#fce7f3"), GpuPink);
+            DrawMetricPill(g, fonts, x + 220, y + 137, 188, FormatDpcMetric(network == null ? null : network.DpcPercent), Hex("#fce7f3"), GpuPink);
         }
 
         private static void DrawDisks(Graphics g, FontSet fonts, PhysicalDiskSnapshot[] physicalDisks, DiskSnapshot[] legacyDisks)
@@ -981,6 +981,38 @@ namespace TURZX.SideScreen
                 return "--";
             }
             return FormatNumber(value, "0.#") + "ms";
+        }
+
+        private static string FormatFrameTimeCompact(double? value)
+        {
+            if (!value.HasValue || double.IsNaN(value.Value) || double.IsInfinity(value.Value))
+            {
+                return "--";
+            }
+
+            double milliseconds = Math.Max(0, value.Value);
+            if (milliseconds >= 3600000)
+            {
+                return FormatNumber(milliseconds / 3600000, "0.#") + "h";
+            }
+            if (milliseconds >= 60000)
+            {
+                return FormatNumber(milliseconds / 60000, "0.#") + "m";
+            }
+            if (milliseconds >= 999.5)
+            {
+                return FormatNumber(milliseconds / 1000, "0.#") + "s";
+            }
+            if (milliseconds >= 100)
+            {
+                return FormatNumber(milliseconds, "0") + "ms";
+            }
+            return FormatNumber(milliseconds, "0.#") + "ms";
+        }
+
+        private static string FormatDpcMetric(double? value)
+        {
+            return "DPC占用 " + FormatPercentOneDecimal(value);
         }
 
         private static string FormatGb(double? value, string pattern)

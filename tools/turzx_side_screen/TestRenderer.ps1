@@ -177,6 +177,45 @@ internal static class RenderPreview
             return 17;
         }
 
+        MethodInfo frameTimeMethod = typeof(SideScreenRenderer).GetMethod("FormatFrameTimeCompact", BindingFlags.NonPublic | BindingFlags.Static);
+        if (frameTimeMethod == null)
+        {
+            Console.Error.WriteLine("FormatFrameTimeCompact method not found.");
+            return 18;
+        }
+        object[,] frameTimeCases = new object[,]
+        {
+            { (double?)6.9, "6.9ms" },
+            { (double?)342.4, "342ms" },
+            { (double?)1000, "1s" },
+            { (double?)1234.5, "1.2s" },
+            { (double?)60000, "1m" }
+        };
+        for (int frameTimeIndex = 0; frameTimeIndex < frameTimeCases.GetLength(0); frameTimeIndex++)
+        {
+            double? frameTimeValue = (double?)frameTimeCases[frameTimeIndex, 0];
+            string expectedFrameTime = (string)frameTimeCases[frameTimeIndex, 1];
+            string actualFrameTime = (string)frameTimeMethod.Invoke(null, new object[] { frameTimeValue });
+            if (actualFrameTime != expectedFrameTime)
+            {
+                Console.Error.WriteLine("Unexpected frame-time format for {0}: expected {1}, got {2}", frameTimeValue, expectedFrameTime, actualFrameTime);
+                return 19;
+            }
+        }
+
+        MethodInfo dpcMetricMethod = typeof(SideScreenRenderer).GetMethod("FormatDpcMetric", BindingFlags.NonPublic | BindingFlags.Static);
+        if (dpcMetricMethod == null)
+        {
+            Console.Error.WriteLine("FormatDpcMetric method not found.");
+            return 20;
+        }
+        string dpcMetric = (string)dpcMetricMethod.Invoke(null, new object[] { (double?)0.2 });
+        if (dpcMetric != "DPC占用 0.2%")
+        {
+            Console.Error.WriteLine("Unexpected DPC metric label: " + dpcMetric);
+            return 21;
+        }
+
         Console.WriteLine("Preview written: " + args[0]);
         return 0;
     }
