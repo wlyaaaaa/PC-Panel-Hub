@@ -34,6 +34,7 @@ time, weather, alert, foreground_app, cpu, gpu, fps, memory, disks, network, top
 
 - 温度：摄氏度
 - 功耗：W
+- CPU 使用率：Windows `% Processor Utility`（任务管理器口径）；不可用时回退 `GetSystemTimes`
 - 频率：MHz，UI 可显示 GHz
 - 电压：V
 - 网络：B/s 或 KB/s，renderer 负责格式化

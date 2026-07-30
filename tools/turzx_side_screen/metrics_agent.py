@@ -1385,9 +1385,9 @@ class _PdhFmtCounterValue(ctypes.Structure):
     ]
 
 
-class WindowsDpcTimeSampler:
+class WindowsPdhPercentSampler:
     PDH_FMT_DOUBLE = 0x00000200
-    COUNTER_PATH = r"\Processor Information(_Total)\% DPC Time"
+    COUNTER_PATH = ""
 
     def __init__(
         self,
@@ -1512,10 +1512,32 @@ class WindowsDpcTimeSampler:
             self._initialized = False
 
 
+class WindowsDpcTimeSampler(WindowsPdhPercentSampler):
+    COUNTER_PATH = r"\Processor Information(_Total)\% DPC Time"
+
+
+class WindowsProcessorUtilitySampler(WindowsPdhPercentSampler):
+    COUNTER_PATH = r"\Processor Information(_Total)\% Processor Utility"
+
+
 _DPC_TIME_SAMPLER = WindowsDpcTimeSampler()
+_CPU_UTILITY_SAMPLER = WindowsProcessorUtilitySampler()
 
 
 def read_cpu_snapshot() -> dict[str, Any]:
+    try:
+        utility_percent = _CPU_UTILITY_SAMPLER.sample()
+    except Exception:
+        utility_percent = None
+
+    if utility_percent is not None:
+        _append_history(_cpu_history, utility_percent)
+        return _cpu_snapshot(
+            source="pdh_processor_utility",
+            usage_percent=utility_percent,
+            clock_mhz=None,
+        )
+
     try:
         usage_percent = _CPU_SAMPLER.sample()
         if usage_percent is None and _CPU_SAMPLER.has_baseline:

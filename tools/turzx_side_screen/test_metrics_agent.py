@@ -1880,6 +1880,7 @@ class MetricsAgentTests(unittest.TestCase):
         sampler = metrics_agent.CpuUsageSampler(lambda: None)
 
         with (
+            patch.object(metrics_agent, "_CPU_UTILITY_SAMPLER", SimpleNamespace(sample=lambda: None)),
             patch.object(metrics_agent, "_CPU_SAMPLER", sampler),
             patch.object(metrics_agent, "_optional_import", return_value=None),
         ):
@@ -1912,6 +1913,7 @@ class MetricsAgentTests(unittest.TestCase):
         )
 
         with (
+            patch.object(metrics_agent, "_CPU_UTILITY_SAMPLER", SimpleNamespace(sample=lambda: None)),
             patch.object(metrics_agent, "_CPU_SAMPLER", sampler),
             patch.object(metrics_agent, "_optional_import", return_value=fake_psutil),
             patch.object(metrics_agent, "_read_cpu_model", return_value="AMD Ryzen 9"),
@@ -1939,6 +1941,7 @@ class MetricsAgentTests(unittest.TestCase):
         )
 
         with (
+            patch.object(metrics_agent, "_CPU_UTILITY_SAMPLER", SimpleNamespace(sample=lambda: None)),
             patch.object(metrics_agent, "_CPU_SAMPLER", sampler),
             patch.object(metrics_agent, "_optional_import", return_value=fake_psutil),
             patch.object(metrics_agent, "_read_cpu_model", return_value="AMD Ryzen 9"),
@@ -1948,6 +1951,28 @@ class MetricsAgentTests(unittest.TestCase):
         self.assertEqual(75.0, cpu["usage_percent"])
         self.assertIsNone(cpu["clock_mhz"])
         self.assertEqual("win32_getsystemtimes", cpu["source"])
+
+    def test_cpu_snapshot_prefers_task_manager_processor_utility(self):
+        time_sampler = metrics_agent.CpuUsageSampler(
+            lambda: (100, 1_000, 1_000)
+        )
+
+        with (
+            patch.object(metrics_agent, "_CPU_UTILITY_SAMPLER", SimpleNamespace(sample=lambda: 38.6)),
+            patch.object(metrics_agent, "_CPU_SAMPLER", time_sampler),
+            patch.object(metrics_agent, "_read_cpu_model", return_value="AMD Ryzen 9"),
+        ):
+            cpu = metrics_agent.read_cpu_snapshot()
+
+        self.assertEqual(38.6, cpu["usage_percent"])
+        self.assertEqual("pdh_processor_utility", cpu["source"])
+
+    def test_windows_processor_utility_sampler_clamps_boosted_values(self):
+        sampler = metrics_agent.WindowsProcessorUtilitySampler(
+            read_value=lambda: 123.456
+        )
+
+        self.assertEqual(100.0, sampler.sample())
 
     def test_build_snapshot_copies_vram_into_memory_block(self):
         fake_gpu = metrics_agent._fallback_gpu_snapshot()
