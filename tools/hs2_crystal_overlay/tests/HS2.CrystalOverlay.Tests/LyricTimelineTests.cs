@@ -58,6 +58,27 @@ public sealed class LyricTimelineTests
     }
 
     [Fact]
+    public void SeekingBackward_RecomputesTheLineAndItsScrollProgress()
+    {
+        const string lyric = """
+            [00:00.000]第一句很长的歌词
+            [00:10.000]第二句很长的歌词
+            [00:20.000]第三句
+            """;
+        var timeline = LyricTimeline.Parse(lyric);
+
+        var later = Assert.IsType<LyricFrame>(
+            timeline.At(TimeSpan.FromSeconds(15)));
+        var afterBackwardSeek = Assert.IsType<LyricFrame>(
+            timeline.At(TimeSpan.FromSeconds(2)));
+
+        Assert.Equal("第二句很长的歌词", later.Text);
+        Assert.Equal(0.5, later.LineProgress, 3);
+        Assert.Equal("第一句很长的歌词", afterBackwardSeek.Text);
+        Assert.Equal(0.2, afterBackwardSeek.LineProgress, 3);
+    }
+
+    [Fact]
     public void BilingualDocument_AlignsTranslationByTimestamp()
     {
         const string original = """

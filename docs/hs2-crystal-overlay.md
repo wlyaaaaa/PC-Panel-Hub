@@ -122,6 +122,11 @@ E:\Projects\Tools\TURZX-SideScreen\tools\hs2_crystal_overlay\Publish-HS2Task.ps1
 
 ## 验收要求
 
+本地视觉验收可用 `--demo=<场景>` 启动打包应用；支持 `media`、
+`notification`、`stack`、`game`、`task`、`system`、`call` 和 `alert`。
+`stack` 会同时发布三条合成通知，用于实机确认“两张并排、其余排队、逐批
+满 5 秒后消失”。所有演示值都是合成数据，正常无参数启动不进入演示模式。
+
 - 单元测试覆盖优先级、寿命、恢复、去重、歌词时间轴、进度、网络防误报、
   显示器安全选择和协议校验。
 - 应用与桥接均零警告构建，桥接安装可重复执行。

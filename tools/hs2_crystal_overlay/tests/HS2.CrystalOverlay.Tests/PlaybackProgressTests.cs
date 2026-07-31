@@ -29,4 +29,19 @@ public sealed class PlaybackProgressTests
                 TimeSpan.FromSeconds(positionSeconds),
                 TimeSpan.FromSeconds(durationSeconds)));
     }
+
+    [Fact]
+    public void SeekingBackward_ImmediatelyMovesTheProgressBackward()
+    {
+        var beforeSeek = PlaybackProgress.Calculate(
+            TimeSpan.FromSeconds(90),
+            TimeSpan.FromSeconds(180));
+        var afterSeek = PlaybackProgress.Calculate(
+            TimeSpan.FromSeconds(24),
+            TimeSpan.FromSeconds(180));
+
+        Assert.Equal(0.5, beforeSeek, 6);
+        Assert.Equal(24d / 180d, afterSeek, 6);
+        Assert.True(afterSeek < beforeSeek);
+    }
 }

@@ -58,14 +58,30 @@ public partial class App : Application
             new DirectOverlayWindow(),
             placement);
 
-        var isDemo = Environment.GetCommandLineArgs().Any(argument =>
+        var activationArguments = string.IsNullOrWhiteSpace(args.Arguments)
+            ? []
+            : args.Arguments.Split(
+                ' ',
+                StringSplitOptions.RemoveEmptyEntries |
+                StringSplitOptions.TrimEntries);
+        var demoArgument = Environment.GetCommandLineArgs()
+            .Skip(1)
+            .Concat(activationArguments)
+            .FirstOrDefault(argument =>
                 string.Equals(
                     argument,
                     "--demo",
+                    StringComparison.OrdinalIgnoreCase) ||
+                argument.StartsWith(
+                    "--demo=",
                     StringComparison.OrdinalIgnoreCase));
-        if (isDemo)
+        if (demoArgument is not null)
         {
-            DemoSource.Publish(controller);
+            var separator = demoArgument.IndexOf('=');
+            var scenario = separator < 0
+                ? "full"
+                : demoArgument[(separator + 1)..];
+            DemoSource.Publish(controller, scenario);
         }
         else
         {
