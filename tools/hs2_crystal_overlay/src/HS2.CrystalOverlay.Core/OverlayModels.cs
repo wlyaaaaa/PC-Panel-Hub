@@ -37,6 +37,7 @@ public enum OverlaySource
 public enum OverlayVisualTier
 {
     Direct,
+    StackedNotification,
     Crystal,
     Emphasis,
 }
@@ -118,7 +119,8 @@ public sealed record OverlayItem(
 
 public sealed record OverlayFrame(
     IReadOnlyList<OverlayItem> DirectItems,
-    IReadOnlyList<OverlayItem> Cards)
+    IReadOnlyList<OverlayItem> Cards,
+    IReadOnlyList<OverlayItem> NotificationCards)
 {
     public OverlayItem? PrimaryCard => Cards.FirstOrDefault();
 }

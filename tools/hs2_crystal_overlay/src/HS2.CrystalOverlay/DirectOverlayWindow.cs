@@ -76,25 +76,21 @@ internal sealed class DirectOverlayWindow : IDisposable
             graphics.TextRenderingHint =
                 System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
 
-            var top = 8f;
-            foreach (var item in items.Take(2))
+            var battery = items.FirstOrDefault(item =>
+                item.Request.Kind == OverlayKind.PhoneBattery);
+            if (battery is not null)
             {
-                if (item.Request.Kind == OverlayKind.PhoneBattery)
-                {
-                    DrawPhoneBattery(graphics, item, top);
-                    top += 112;
-                }
-                else
-                {
-                    DrawMinimalText(
-                        graphics,
-                        item.Request.Title,
-                        new PointF(12, top),
-                        (float)item.Policy.Typography.TitlePx,
-                        FontStyle.Bold,
-                        Color.White);
-                    top += (float)item.Policy.Typography.TitlePx + 10;
-                }
+                DrawPhoneBattery(graphics, battery, 8);
+            }
+
+            var glance = items.FirstOrDefault(item =>
+                item.Request.Kind == OverlayKind.Glance);
+            if (glance is not null)
+            {
+                DrawGlance(
+                    graphics,
+                    glance,
+                    battery is null ? 12 : 470);
             }
         }
 
@@ -219,6 +215,21 @@ internal sealed class DirectOverlayWindow : IDisposable
             percent is null ? item.Request.Title : $"{percent}%",
             new PointF(164, top),
             78,
+            FontStyle.Bold,
+            accent);
+    }
+
+    private static void DrawGlance(
+        Graphics graphics,
+        OverlayItem item,
+        float left)
+    {
+        var accent = Color.FromArgb(244, 130, 244, 188);
+        DrawMinimalText(
+            graphics,
+            item.Request.Title,
+            new PointF(left, 12),
+            82,
             FontStyle.Bold,
             accent);
     }

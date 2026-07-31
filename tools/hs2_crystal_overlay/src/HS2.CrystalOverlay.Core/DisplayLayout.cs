@@ -61,8 +61,7 @@ public static class OverlayLayoutPlanner
     private const int CardBottomMargin = 56;
     private const int DirectTopMargin = 56;
     private const int DesiredCardHeight = 520;
-    private const int DesiredDirectWidth = 520;
-    private const int DesiredDirectHeight = 176;
+    private const int DesiredDirectHeight = 200;
 
     public static OverlayPlacement Plan(DisplayGeometry display)
     {
@@ -89,15 +88,63 @@ public static class OverlayLayoutPlanner
             cardWidth,
             cardHeight);
 
-        var directWidth = Math.Min(
-            DesiredDirectWidth,
-            frontWidth - HorizontalMargin * 2);
         var direct = new PixelRect(
             display.X + HorizontalMargin,
             display.Y + DirectTopMargin,
-            directWidth,
+            cardWidth,
             DesiredDirectHeight);
 
         return new OverlayPlacement(front, side, card, direct);
+    }
+}
+
+public static class NotificationLayoutPlanner
+{
+    private const int Gap = 20;
+    private const int MinimumHeight = 190;
+    private const int ComfortHeight = 260;
+    private const int MaximumHeight = 480;
+
+    public static int Capacity(PixelRect region, bool blocked)
+    {
+        if (blocked || region.Height < MinimumHeight)
+        {
+            return 0;
+        }
+
+        return region.Height < ComfortHeight ? 1 : 2;
+    }
+
+    public static IReadOnlyList<PixelRect> PlanSlots(
+        PixelRect region,
+        int count)
+    {
+        if (count is < 0 or > 2)
+        {
+            throw new ArgumentOutOfRangeException(nameof(count));
+        }
+
+        if (count == 0 || region.Height < MinimumHeight)
+        {
+            return [];
+        }
+
+        var height = Math.Min(MaximumHeight, region.Height);
+        var y = region.Bottom - height;
+        if (count == 1)
+        {
+            return [new PixelRect(region.X, y, region.Width, height)];
+        }
+
+        var leftWidth = (region.Width - Gap) / 2;
+        return
+        [
+            new PixelRect(region.X, y, leftWidth, height),
+            new PixelRect(
+                region.X + leftWidth + Gap,
+                y,
+                region.Width - leftWidth - Gap,
+                height),
+        ];
     }
 }

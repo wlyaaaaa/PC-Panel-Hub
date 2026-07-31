@@ -24,15 +24,19 @@ public sealed class OverlaySchedulerTests
             "一条新消息",
             dedupKey: "wechat|一条新消息"), Now);
 
-        var frame = scheduler.GetFrame(Now);
+        var frame = scheduler.GetFrame(Now, maxVisibleNotifications: 2);
 
         Assert.Single(frame.DirectItems);
         Assert.Equal(OverlayKind.PhoneBattery, frame.DirectItems[0].Request.Kind);
-        Assert.Equal(OverlayKind.PhoneNotification, frame.PrimaryCard?.Request.Kind);
+        Assert.Null(frame.PrimaryCard);
+        Assert.Single(frame.NotificationCards);
+        Assert.Equal(
+            OverlayKind.PhoneNotification,
+            frame.NotificationCards[0].Request.Kind);
     }
 
     [Fact]
-    public void OrdinaryPhoneNotification_ExpiresAndDoesNotRemainForever()
+    public void OrdinaryPhoneNotification_ExpiresAfterFiveVisibleSeconds()
     {
         var scheduler = new OverlayScheduler();
         scheduler.Publish(OverlayRequest.Timed(
@@ -42,8 +46,130 @@ public sealed class OverlaySchedulerTests
             "短信",
             "验证码 1234"), Now);
 
-        Assert.NotNull(scheduler.GetFrame(Now.AddSeconds(17)).PrimaryCard);
-        Assert.Null(scheduler.GetFrame(Now.AddSeconds(19)).PrimaryCard);
+        Assert.Single(scheduler.GetFrame(
+            Now,
+            maxVisibleNotifications: 1).NotificationCards);
+        Assert.Single(scheduler.GetFrame(
+            Now.AddSeconds(4.9),
+            maxVisibleNotifications: 1).NotificationCards);
+        Assert.Empty(scheduler.GetFrame(
+            Now.AddSeconds(5.1),
+            maxVisibleNotifications: 1).NotificationCards);
+    }
+
+    [Fact]
+    public void MultiplePhoneNotifications_UseTwoVisibleCardsAndQueueTheRest()
+    {
+        var scheduler = new OverlayScheduler();
+        for (var index = 1; index <= 3; index++)
+        {
+            scheduler.Publish(OverlayRequest.Timed(
+                $"phone-toast-{index}",
+                OverlayKind.PhoneNotification,
+                OverlaySource.XiaomiHyperConnect,
+                $"通知 {index}",
+                $"正文 {index}"), Now.AddMilliseconds(index));
+        }
+
+        var firstFrame = scheduler.GetFrame(
+            Now.AddSeconds(1),
+            maxVisibleNotifications: 2);
+        Assert.Equal(2, firstFrame.NotificationCards.Count);
+        Assert.Equal("通知 1", firstFrame.NotificationCards[0].Request.Title);
+        Assert.Equal("通知 2", firstFrame.NotificationCards[1].Request.Title);
+
+        var secondFrame = scheduler.GetFrame(
+            Now.AddSeconds(6.1),
+            maxVisibleNotifications: 2);
+        Assert.Single(secondFrame.NotificationCards);
+        Assert.Equal("通知 3", secondFrame.NotificationCards[0].Request.Title);
+
+        Assert.Single(scheduler.GetFrame(
+            Now.AddSeconds(10.9),
+            maxVisibleNotifications: 2).NotificationCards);
+        Assert.Empty(scheduler.GetFrame(
+            Now.AddSeconds(11.2),
+            maxVisibleNotifications: 2).NotificationCards);
+    }
+
+    [Fact]
+    public void NotificationVisibleTime_PausesWhileNoSlotIsAvailable()
+    {
+        var scheduler = new OverlayScheduler();
+        scheduler.Publish(OverlayRequest.Timed(
+            "phone-toast",
+            OverlayKind.PhoneNotification,
+            OverlaySource.XiaomiHyperConnect,
+            "短信",
+            "请稍后查看"), Now);
+
+        Assert.Single(scheduler.GetFrame(
+            Now,
+            maxVisibleNotifications: 1).NotificationCards);
+        Assert.Empty(scheduler.GetFrame(
+            Now.AddSeconds(2),
+            maxVisibleNotifications: 0).NotificationCards);
+        Assert.Empty(scheduler.GetFrame(
+            Now.AddSeconds(20),
+            maxVisibleNotifications: 0).NotificationCards);
+        Assert.Single(scheduler.GetFrame(
+            Now.AddSeconds(20),
+            maxVisibleNotifications: 1).NotificationCards);
+        Assert.Single(scheduler.GetFrame(
+            Now.AddSeconds(22.9),
+            maxVisibleNotifications: 1).NotificationCards);
+        Assert.Empty(scheduler.GetFrame(
+            Now.AddSeconds(23.1),
+            maxVisibleNotifications: 1).NotificationCards);
+    }
+
+    [Fact]
+    public void NotificationQueuedForMoreThanOneMinute_IsDiscardedAsStale()
+    {
+        var scheduler = new OverlayScheduler();
+        scheduler.Publish(OverlayRequest.Timed(
+            "phone-toast",
+            OverlayKind.PhoneNotification,
+            OverlaySource.PhoneLink,
+            "一条旧通知"), Now);
+
+        Assert.Empty(scheduler.GetFrame(
+            Now,
+            maxVisibleNotifications: 0).NotificationCards);
+        Assert.Empty(scheduler.GetFrame(
+            Now.AddSeconds(59),
+            maxVisibleNotifications: 0).NotificationCards);
+        Assert.Empty(scheduler.GetFrame(
+            Now.AddSeconds(61),
+            maxVisibleNotifications: 1).NotificationCards);
+    }
+
+    [Fact]
+    public void PhoneNotifications_DoNotReplacePersistentMediaCard()
+    {
+        var scheduler = new OverlayScheduler();
+        scheduler.Publish(OverlayRequest.Active(
+            "media",
+            OverlayKind.MediaActive,
+            OverlaySource.NetEase,
+            "Night Current"), Now);
+        scheduler.Publish(OverlayRequest.Timed(
+            "phone-toast-1",
+            OverlayKind.PhoneNotification,
+            OverlaySource.PhoneLink,
+            "通知 1"), Now);
+        scheduler.Publish(OverlayRequest.Timed(
+            "phone-toast-2",
+            OverlayKind.PhoneNotification,
+            OverlaySource.XiaomiHyperConnect,
+            "通知 2"), Now.AddMilliseconds(1));
+
+        var frame = scheduler.GetFrame(
+            Now.AddSeconds(1),
+            maxVisibleNotifications: 2);
+
+        Assert.Equal(OverlayKind.MediaActive, frame.PrimaryCard?.Request.Kind);
+        Assert.Equal(2, frame.NotificationCards.Count);
     }
 
     [Fact]
@@ -70,7 +196,7 @@ public sealed class OverlaySchedulerTests
     }
 
     [Fact]
-    public void DynamicPhoneState_DisappearsWhenSourceEnds()
+    public void DynamicPhoneState_CannotRemainForever()
     {
         var scheduler = new OverlayScheduler();
         scheduler.Publish(OverlayRequest.Active(
@@ -80,16 +206,46 @@ public sealed class OverlaySchedulerTests
             "司机即将到达",
             "距离 300 米"), Now);
 
+        var activeFrame = scheduler.GetFrame(
+            Now,
+            maxVisibleNotifications: 2);
+        Assert.Null(activeFrame.PrimaryCard);
         Assert.Equal(
             OverlayKind.PhoneDynamic,
-            scheduler.GetFrame(Now.AddHours(1)).PrimaryCard?.Request.Kind);
+            activeFrame.NotificationCards.Single().Request.Kind);
 
-        scheduler.Publish(OverlayRequest.End(
-            "ride",
-            OverlayKind.PhoneDynamic,
-            OverlaySource.XiaomiHyperConnect), Now.AddHours(1));
+        Assert.Empty(scheduler.GetFrame(
+            Now.AddSeconds(5.1),
+            maxVisibleNotifications: 2).NotificationCards);
+    }
 
-        Assert.Null(scheduler.GetFrame(Now.AddHours(1)).PrimaryCard);
+    [Fact]
+    public void RepeatedPublish_CannotRestartAVisibleNotificationTimer()
+    {
+        var scheduler = new OverlayScheduler();
+        scheduler.Publish(OverlayRequest.Timed(
+            "phone-toast",
+            OverlayKind.PhoneNotification,
+            OverlaySource.XiaomiHyperConnect,
+            "配送状态",
+            "骑手已取货"), Now);
+        Assert.Single(scheduler.GetFrame(
+            Now,
+            maxVisibleNotifications: 1).NotificationCards);
+
+        scheduler.Publish(OverlayRequest.Timed(
+            "phone-toast",
+            OverlayKind.PhoneNotification,
+            OverlaySource.XiaomiHyperConnect,
+            "配送状态",
+            "骑手距离 300 米"), Now.AddSeconds(4));
+
+        Assert.Single(scheduler.GetFrame(
+            Now.AddSeconds(4.9),
+            maxVisibleNotifications: 1).NotificationCards);
+        Assert.Empty(scheduler.GetFrame(
+            Now.AddSeconds(5.1),
+            maxVisibleNotifications: 1).NotificationCards);
     }
 
     [Fact]
@@ -113,7 +269,9 @@ public sealed class OverlaySchedulerTests
 
         Assert.True(accepted);
         Assert.False(duplicate);
-        Assert.Single(scheduler.GetFrame(Now.AddSeconds(3)).Cards);
+        Assert.Single(scheduler.GetFrame(
+            Now.AddSeconds(3),
+            maxVisibleNotifications: 2).NotificationCards);
     }
 
     [Fact]

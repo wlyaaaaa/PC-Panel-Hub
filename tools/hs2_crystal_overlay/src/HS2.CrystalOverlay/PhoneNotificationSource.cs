@@ -15,6 +15,8 @@ internal sealed class PhoneNotificationSourceCoordinator : IDisposable
 {
     private static readonly TimeSpan PollInterval =
         TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan AccessRetryInterval =
+        TimeSpan.FromMinutes(1);
 
     private readonly IOverlayPublisher publisher;
     private readonly UserNotificationListener listener =
@@ -22,10 +24,12 @@ internal sealed class PhoneNotificationSourceCoordinator : IDisposable
     private readonly CancellationTokenSource cancellation = new();
     private readonly Dictionary<uint, ActivePhoneNotification> active = [];
     private readonly Dictionary<uint, string> fingerprints = [];
+    private readonly HashSet<uint> timedPublished = [];
     private readonly Timer timer;
     private bool baselineCaptured;
     private bool accessRequested;
     private bool accessAllowed;
+    private DateTimeOffset nextAccessAttemptAt = DateTimeOffset.MinValue;
     private int polling;
     private bool disposed;
 
@@ -49,12 +53,21 @@ internal sealed class PhoneNotificationSourceCoordinator : IDisposable
 
         try
         {
-            if (!accessRequested)
+            var now = DateTimeOffset.UtcNow;
+            if (!accessAllowed && now < nextAccessAttemptAt)
+            {
+                return;
+            }
+
+            if (!accessRequested || !accessAllowed)
             {
                 accessRequested = true;
                 var access = await listener.RequestAccessAsync();
                 accessAllowed =
                     access == UserNotificationListenerAccessStatus.Allowed;
+                nextAccessAttemptAt = accessAllowed
+                    ? DateTimeOffset.MinValue
+                    : now + AccessRetryInterval;
                 RuntimeLog.Write(
                     accessAllowed
                         ? "Phone notification access is allowed."
@@ -84,8 +97,9 @@ internal sealed class PhoneNotificationSourceCoordinator : IDisposable
                 currentIds.Add(notification.Id);
                 var category =
                     PhoneNotificationClassifier.Classify(title, body);
-                var isPersistent =
-                    category != PhoneNotificationCategory.Ordinary;
+                var isTimed = category is
+                    PhoneNotificationCategory.Ordinary or
+                    PhoneNotificationCategory.Dynamic;
                 var fingerprint =
                     PhoneNotificationClassifier.DedupKey(
                         appName,
@@ -105,11 +119,13 @@ internal sealed class PhoneNotificationSourceCoordinator : IDisposable
                     continue;
                 }
 
-                if (isPersistent)
+                if (isTimed)
                 {
-                    if (!known || changed)
+                    EndActive(notification.Id);
+                    if ((!known || changed) &&
+                        timedPublished.Add(notification.Id))
                     {
-                        PublishPersistent(
+                        PublishTimed(
                             notification.Id,
                             category,
                             source,
@@ -120,11 +136,11 @@ internal sealed class PhoneNotificationSourceCoordinator : IDisposable
                 }
                 else
                 {
-                    EndActive(notification.Id);
                     if (!known || changed)
                     {
-                        PublishOrdinary(
+                        PublishPersistent(
                             notification.Id,
+                            category,
                             source,
                             appName,
                             title,
@@ -142,6 +158,7 @@ internal sealed class PhoneNotificationSourceCoordinator : IDisposable
             {
                 EndActive(id);
                 fingerprints.Remove(id);
+                timedPublished.Remove(id);
             }
         }
         catch (OperationCanceledException)
@@ -150,11 +167,18 @@ internal sealed class PhoneNotificationSourceCoordinator : IDisposable
         catch (UnauthorizedAccessException)
         {
             accessAllowed = false;
+            accessRequested = false;
+            nextAccessAttemptAt =
+                DateTimeOffset.UtcNow + AccessRetryInterval;
             RuntimeLog.Write(
                 "Phone notification access was revoked.");
         }
         catch (Exception exception)
         {
+            accessAllowed = false;
+            accessRequested = false;
+            nextAccessAttemptAt =
+                DateTimeOffset.UtcNow + AccessRetryInterval;
             RuntimeLog.Write(
                 $"Phone notification probe failed: {exception.GetType().Name}");
         }
@@ -164,8 +188,9 @@ internal sealed class PhoneNotificationSourceCoordinator : IDisposable
         }
     }
 
-    private void PublishOrdinary(
+    private void PublishTimed(
         uint id,
+        PhoneNotificationCategory category,
         OverlaySource source,
         string appName,
         string title,
@@ -173,7 +198,9 @@ internal sealed class PhoneNotificationSourceCoordinator : IDisposable
     {
         _ = publisher.Publish(OverlayRequest.Timed(
             EventId(id),
-            OverlayKind.PhoneNotification,
+            category == PhoneNotificationCategory.Dynamic
+                ? OverlayKind.PhoneDynamic
+                : OverlayKind.PhoneNotification,
             source,
             title,
             body,
@@ -182,9 +209,11 @@ internal sealed class PhoneNotificationSourceCoordinator : IDisposable
                 title,
                 body),
             visual: new OverlayVisualData(
-                Eyebrow: "手机通知 / PHONE",
+                Eyebrow: category == PhoneNotificationCategory.Dynamic
+                    ? "手机动态 / LIVE"
+                    : "手机通知 / PHONE",
                 Subtitle: appName,
-                AccentHex: "#9FE8FF")));
+                AccentHex: "#70F0B2")));
     }
 
     private void PublishPersistent(
@@ -212,7 +241,7 @@ internal sealed class PhoneNotificationSourceCoordinator : IDisposable
         {
             PhoneNotificationCategory.Call => OverlayKind.PhoneCall,
             PhoneNotificationCategory.Transfer => OverlayKind.PhoneTransfer,
-            _ => OverlayKind.PhoneDynamic,
+            _ => throw new ArgumentOutOfRangeException(nameof(category)),
         };
         _ = publisher.Publish(OverlayRequest.End(
             EventId(id),
@@ -229,15 +258,13 @@ internal sealed class PhoneNotificationSourceCoordinator : IDisposable
                 {
                     PhoneNotificationCategory.Call =>
                         "手机来电 / CALL",
-                    PhoneNotificationCategory.Transfer =>
-                        "跨设备传输 / TRANSFER",
-                    _ => "手机动态 / LIVE",
+                    _ => "跨设备传输 / TRANSFER",
                 },
                 Subtitle: appName,
                 AccentHex: category ==
                            PhoneNotificationCategory.Call
                     ? "#FF9EAE"
-                    : "#9FE8FF")));
+                    : "#70F0B2")));
         active[id] = new ActivePhoneNotification(
             kind,
             source,

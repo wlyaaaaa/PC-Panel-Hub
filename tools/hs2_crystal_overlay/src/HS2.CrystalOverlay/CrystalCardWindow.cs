@@ -12,7 +12,7 @@ internal sealed class CrystalCardWindow : IDisposable
     private string? cachedArtworkPath;
     private bool disposed;
 
-    internal CrystalCardWindow()
+    internal CrystalCardWindow(string caption = "HS2 crystal card")
     {
         var exStyle = (uint)(
             NativeMethods.WsExLayered |
@@ -22,7 +22,7 @@ internal sealed class CrystalCardWindow : IDisposable
         hwnd = NativeMethods.CreateWindowEx(
             exStyle,
             "STATIC",
-            "HS2 crystal card",
+            caption,
             NativeMethods.WsPopup,
             0,
             0,
@@ -43,6 +43,14 @@ internal sealed class CrystalCardWindow : IDisposable
         OverlayItem? item,
         OverlayPlacement placement)
     {
+        Render(item, placement.Card, DateTimeOffset.Now);
+    }
+
+    internal void Render(
+        OverlayItem? item,
+        PixelRect maximum,
+        DateTimeOffset now)
+    {
         ObjectDisposedException.ThrowIf(disposed, this);
         if (item is null)
         {
@@ -50,7 +58,7 @@ internal sealed class CrystalCardWindow : IDisposable
             return;
         }
 
-        var target = CardRectFor(item.Request.Kind, placement.Card);
+        var target = ResolveCardRect(item, maximum);
         using var bitmap = new Bitmap(
             target.Width,
             target.Height,
@@ -59,11 +67,26 @@ internal sealed class CrystalCardWindow : IDisposable
         {
             ConfigureGraphics(graphics);
             graphics.Clear(Color.Transparent);
-            DrawCrystalSurface(graphics, target.Width, target.Height);
+            DrawCrystalSurface(
+                graphics,
+                target.Width,
+                target.Height,
+                item.Policy.VisualTier ==
+                OverlayVisualTier.StackedNotification);
             if (item.Request.Kind is
                 OverlayKind.MediaActive or OverlayKind.MediaTrackChange)
             {
                 DrawMedia(graphics, item, target.Width, target.Height);
+            }
+            else if (item.Policy.VisualTier ==
+                     OverlayVisualTier.StackedNotification)
+            {
+                DrawPhoneNotification(
+                    graphics,
+                    item,
+                    target.Width,
+                    target.Height,
+                    now);
             }
             else
             {
@@ -88,33 +111,46 @@ internal sealed class CrystalCardWindow : IDisposable
     private static void DrawCrystalSurface(
         Graphics graphics,
         int width,
-        int height)
+        int height,
+        bool notificationSurface)
     {
         var outer = new RectangleF(1.5f, 1.5f, width - 3, height - 3);
         using var path = RoundedRectangle(outer, 34);
+        var washStart = notificationSurface
+            ? Color.FromArgb(18, 125, 255, 193)
+            : Color.FromArgb(16, 255, 255, 255);
+        var washEnd = notificationSurface
+            ? Color.FromArgb(5, 157, 245, 205)
+            : Color.FromArgb(5, 226, 250, 255);
         using var clearWash = new LinearGradientBrush(
             outer,
-            Color.FromArgb(16, 255, 255, 255),
-            Color.FromArgb(5, 226, 250, 255),
+            washStart,
+            washEnd,
             LinearGradientMode.ForwardDiagonal);
         graphics.FillPath(clearWash, path);
 
         using var edge = new Pen(
-            Color.FromArgb(142, 246, 255, 255),
+            notificationSurface
+                ? Color.FromArgb(152, 186, 255, 222)
+                : Color.FromArgb(142, 246, 255, 255),
             1.35f);
         graphics.DrawPath(edge, path);
 
         var inner = new RectangleF(4, 4, width - 8, height - 8);
         using var innerPath = RoundedRectangle(inner, 31);
         using var innerEdge = new Pen(
-            Color.FromArgb(26, 173, 247, 255),
+            notificationSurface
+                ? Color.FromArgb(34, 98, 244, 178)
+                : Color.FromArgb(26, 173, 247, 255),
             1);
         graphics.DrawPath(innerEdge, innerPath);
 
         using var highlight = new LinearGradientBrush(
             new RectangleF(48, 2, width - 96, 2),
             Color.Transparent,
-            Color.FromArgb(178, 255, 255, 255),
+            notificationSurface
+                ? Color.FromArgb(184, 208, 255, 232)
+                : Color.FromArgb(178, 255, 255, 255),
             LinearGradientMode.Horizontal);
         graphics.FillRectangle(highlight, 48, 2, width - 96, 1.3f);
     }
@@ -283,6 +319,109 @@ internal sealed class CrystalCardWindow : IDisposable
                 Color.FromArgb(220, 230, 244, 247),
                 StringAlignment.Far);
         }
+    }
+
+    private static void DrawPhoneNotification(
+        Graphics graphics,
+        OverlayItem item,
+        int width,
+        int height,
+        DateTimeOffset now)
+    {
+        var visual = item.Request.Visual;
+        var narrow = width < 900;
+        var padding = narrow ? 32f : 42f;
+        var titleSize = narrow ? 47f : 56f;
+        var bodySize = narrow ? 39f : 44f;
+        var headerHeight = narrow ? 58f : 64f;
+        var accent = ParseColor(
+            visual?.AccentHex,
+            Color.FromArgb(244, 112, 240, 178));
+
+        using var dot = new SolidBrush(accent);
+        graphics.FillEllipse(dot, padding, 28, 10, 10);
+        DrawText(
+            graphics,
+            visual?.Eyebrow ?? KindLabel(item.Request.Kind),
+            new RectangleF(
+                padding + 22,
+                12,
+                width * 0.52f,
+                48),
+            narrow ? 21 : 24,
+            FontStyle.Bold,
+            Color.FromArgb(238, 122, 245, 184));
+        DrawFittedText(
+            graphics,
+            visual?.Subtitle ?? SourceName(item.Request.Source),
+            new RectangleF(
+                width * 0.54f,
+                12,
+                width - width * 0.54f - padding,
+                48),
+            narrow ? 20 : 23,
+            17,
+            FontStyle.Regular,
+            Color.FromArgb(220, 169, 238, 204));
+
+        var viewport = new RectangleF(
+            padding,
+            headerHeight,
+            width - padding * 2,
+            height - headerHeight - 24);
+        var titleHeight = MeasureWrappedText(
+            graphics,
+            item.Request.Title,
+            viewport.Width,
+            titleSize,
+            FontStyle.Bold);
+        var bodyHeight = string.IsNullOrWhiteSpace(item.Request.Body)
+            ? 0
+            : MeasureWrappedText(
+                graphics,
+                item.Request.Body!,
+                viewport.Width,
+                bodySize,
+                FontStyle.Regular);
+        var contentHeight = titleHeight +
+            (bodyHeight > 0 ? 14 + bodyHeight : 0);
+        var overflow = Math.Max(0, contentHeight - viewport.Height);
+        var scrollProgress = NotificationScrollProgress(item, now);
+        var offset = overflow <= 0
+            ? 0
+            : overflow * SmoothHeldProgress(scrollProgress);
+
+        var state = graphics.Save();
+        graphics.SetClip(viewport);
+        var y = viewport.Top - offset;
+        DrawWrappedText(
+            graphics,
+            item.Request.Title,
+            new RectangleF(
+                viewport.Left,
+                y,
+                viewport.Width,
+                titleHeight + 4),
+            titleSize,
+            FontStyle.Bold,
+            Color.FromArgb(252, 225, 255, 239));
+        y += titleHeight + 14;
+        if (bodyHeight > 0)
+        {
+            DrawWrappedText(
+                graphics,
+                item.Request.Body!,
+                new RectangleF(
+                    viewport.Left,
+                    y,
+                    viewport.Width,
+                    bodyHeight + 4),
+                bodySize,
+                FontStyle.Regular,
+                Color.FromArgb(242, 174, 247, 211));
+        }
+
+        graphics.Restore(state);
     }
 
     private static void DrawEvent(
@@ -477,6 +616,82 @@ internal sealed class CrystalCardWindow : IDisposable
         graphics.DrawString(text, font, brush, bounds, format);
     }
 
+    private static float MeasureWrappedText(
+        Graphics graphics,
+        string text,
+        float width,
+        float size,
+        FontStyle style)
+    {
+        using var font = UiFont(size, style);
+        using var format = Typographic();
+        format.Trimming = StringTrimming.None;
+        var measured = graphics.MeasureString(
+            text,
+            font,
+            new SizeF(Math.Max(1, width), 10_000),
+            format);
+        return Math.Max(size * 1.22f, measured.Height);
+    }
+
+    private static void DrawWrappedText(
+        Graphics graphics,
+        string text,
+        RectangleF bounds,
+        float size,
+        FontStyle style,
+        Color fill)
+    {
+        using var font = UiFont(size, style);
+        using var shadow = new SolidBrush(Color.FromArgb(112, 0, 13, 8));
+        using var brush = new SolidBrush(fill);
+        using var format = Typographic();
+        format.Trimming = StringTrimming.None;
+        format.LineAlignment = StringAlignment.Near;
+        var shadowBounds = bounds;
+        shadowBounds.Offset(1.6f, 2f);
+        graphics.DrawString(text, font, shadow, shadowBounds, format);
+        graphics.DrawString(text, font, brush, bounds, format);
+    }
+
+    private static double NotificationScrollProgress(
+        OverlayItem item,
+        DateTimeOffset now)
+    {
+        if (item.ExpiresAt is { } expiresAt &&
+            item.Policy.Duration is { } duration &&
+            duration > TimeSpan.Zero)
+        {
+            var remaining = Math.Clamp(
+                (expiresAt - now).TotalMilliseconds,
+                0,
+                duration.TotalMilliseconds);
+            return 1 - remaining / duration.TotalMilliseconds;
+        }
+
+        var elapsed = Math.Max(
+            0,
+            (now - item.PublishedAt).TotalSeconds);
+        return elapsed % 9 / 9;
+    }
+
+    private static float SmoothHeldProgress(double value)
+    {
+        var progress = Math.Clamp(value, 0, 1);
+        if (progress <= 0.16)
+        {
+            return 0;
+        }
+
+        if (progress >= 0.84)
+        {
+            return 1;
+        }
+
+        var normalized = (float)((progress - 0.16) / 0.68);
+        return normalized * normalized * (3 - 2 * normalized);
+    }
+
     private static void DrawFittedText(
         Graphics graphics,
         string text,
@@ -644,11 +859,25 @@ internal sealed class CrystalCardWindow : IDisposable
         _ = NativeMethods.ShowWindow(hwnd, NativeMethods.SwShowNoActivate);
     }
 
-    private static PixelRect CardRectFor(
-        OverlayKind kind,
+    internal static PixelRect ResolveCardRect(
+        OverlayItem item,
         PixelRect maximum)
     {
-        var desired = kind switch
+        if (item.Policy.VisualTier ==
+            OverlayVisualTier.StackedNotification)
+        {
+            var notificationHeight = MeasureNotificationCardHeight(
+                item,
+                maximum.Width,
+                maximum.Height);
+            return new PixelRect(
+                maximum.X,
+                maximum.Bottom - notificationHeight,
+                maximum.Width,
+                notificationHeight);
+        }
+
+        var desired = item.Request.Kind switch
         {
             OverlayKind.MediaActive => (Width: 900, Height: 230),
             OverlayKind.GameActive => (Width: 980, Height: 240),
@@ -660,10 +889,6 @@ internal sealed class CrystalCardWindow : IDisposable
             OverlayKind.MediaTrackChange => (Width: 1050, Height: 300),
             OverlayKind.GameAchievement => (Width: 1180, Height: 380),
             OverlayKind.GameSummary => (Width: 1180, Height: 400),
-            OverlayKind.Glance => (Width: 1240, Height: 440),
-            OverlayKind.PhoneConnection => (Width: 1140, Height: 380),
-            OverlayKind.PhoneNotification => (Width: 1260, Height: 440),
-            OverlayKind.PhoneDynamic => (Width: 1260, Height: 440),
             _ => (Width: maximum.Width, Height: maximum.Height),
         };
         var width = Math.Min(maximum.Width, desired.Width);
@@ -673,6 +898,42 @@ internal sealed class CrystalCardWindow : IDisposable
             maximum.Bottom - height,
             width,
             height);
+    }
+
+    private static int MeasureNotificationCardHeight(
+        OverlayItem item,
+        int width,
+        int maximumHeight)
+    {
+        using var bitmap = new Bitmap(1, 1, PixelFormat.Format32bppArgb);
+        using var graphics = Graphics.FromImage(bitmap);
+        ConfigureGraphics(graphics);
+        var narrow = width < 900;
+        var padding = narrow ? 32f : 42f;
+        var titleSize = narrow ? 47f : 56f;
+        var bodySize = narrow ? 39f : 44f;
+        var contentWidth = Math.Max(1, width - padding * 2);
+        var titleHeight = MeasureWrappedText(
+            graphics,
+            item.Request.Title,
+            contentWidth,
+            titleSize,
+            FontStyle.Bold);
+        var bodyHeight = string.IsNullOrWhiteSpace(item.Request.Body)
+            ? 0
+            : MeasureWrappedText(
+                graphics,
+                item.Request.Body!,
+                contentWidth,
+                bodySize,
+                FontStyle.Regular);
+        var desired = (int)Math.Ceiling(
+            (narrow ? 58 : 64) +
+            titleHeight +
+            (bodyHeight > 0 ? 14 + bodyHeight : 0) +
+            24);
+        var minimum = Math.Min(190, maximumHeight);
+        return Math.Clamp(desired, minimum, maximumHeight);
     }
 
     private static Color ParseColor(string? value, Color fallback)

@@ -14,6 +14,7 @@ internal sealed class OverlayController : IOverlayPublisher, IDisposable
     private readonly object sync = new();
     private readonly OverlayScheduler scheduler = new();
     private readonly CrystalCardWindow cardWindow;
+    private readonly CrystalCardWindow[] notificationWindows;
     private readonly DirectOverlayWindow directWindow;
     private readonly OverlayPlacement placement;
     private readonly DispatcherQueue dispatcher;
@@ -30,6 +31,11 @@ internal sealed class OverlayController : IOverlayPublisher, IDisposable
         OverlayPlacement placement)
     {
         this.cardWindow = cardWindow;
+        notificationWindows =
+        [
+            new CrystalCardWindow("HS2 phone notification 1"),
+            new CrystalCardWindow("HS2 phone notification 2"),
+        ];
         this.directWindow = directWindow;
         this.placement = placement;
         dispatcher = hostWindow.DispatcherQueue;
@@ -71,22 +77,37 @@ internal sealed class OverlayController : IOverlayPublisher, IDisposable
 
         var now = DateTimeOffset.Now;
         OverlayFrame frame;
+        PixelRect notificationRegion;
         lock (sync)
         {
-            frame = scheduler.GetFrame(now);
+            var primary = scheduler.GetPrimaryCard(now);
+            notificationRegion = NotificationRegionFor(primary);
+            frame = scheduler.GetFrame(
+                now,
+                NotificationLayoutPlanner.Capacity(
+                    notificationRegion,
+                    primary?.Policy.VisualTier ==
+                    OverlayVisualTier.Emphasis));
         }
 
         var card = frame.PrimaryCard;
         if (!Equals(card?.Request, lastCardRequest))
         {
             lastCardRequest = card?.Request;
-            cardWindow.Render(card, placement);
+            cardWindow.Render(card, placement.Card, now);
         }
+
+        RenderNotifications(frame.NotificationCards, notificationRegion, now);
 
         var directSignature = string.Join(
             '\u001f',
             frame.DirectItems.Select(item =>
-                $"{item.Request.EventId}\u001e{item.Request.Title}\u001e{item.Request.Body}"));
+                $"{item.Request.EventId}\u001e" +
+                $"{item.Request.Title}\u001e" +
+                $"{item.Request.Body}\u001e" +
+                $"{item.Request.Visual?.Subtitle}\u001e" +
+                $"{item.Request.Visual?.Meta}\u001e" +
+                $"{item.Request.Visual?.IsCharging}"));
         if (!string.Equals(
                 directSignature,
                 lastDirectSignature,
@@ -96,6 +117,49 @@ internal sealed class OverlayController : IOverlayPublisher, IDisposable
             lastDirectSignature = directSignature;
             lastDriftMinute = now.Minute;
             directWindow.Render(frame.DirectItems, placement.Direct, now);
+        }
+    }
+
+    private PixelRect NotificationRegionFor(OverlayItem? primary)
+    {
+        var top = placement.Direct.Bottom + 24;
+        var bottom = primary is null
+            ? placement.Card.Bottom
+            : CrystalCardWindow.ResolveCardRect(
+                    primary,
+                    placement.Card)
+                .Top - 24;
+        return new PixelRect(
+            placement.Card.X,
+            top,
+            placement.Card.Width,
+            Math.Max(0, bottom - top));
+    }
+
+    private void RenderNotifications(
+        IReadOnlyList<OverlayItem> notifications,
+        PixelRect region,
+        DateTimeOffset now)
+    {
+        var visibleCount = Math.Min(
+            notifications.Count,
+            notificationWindows.Length);
+        var slots = NotificationLayoutPlanner.PlanSlots(
+            region,
+            visibleCount);
+        for (var index = 0; index < visibleCount; index++)
+        {
+            notificationWindows[index].Render(
+                notifications[index],
+                slots[index],
+                now);
+        }
+
+        for (var index = visibleCount;
+             index < notificationWindows.Length;
+             index++)
+        {
+            notificationWindows[index].Render(null, placement.Card, now);
         }
     }
 
@@ -109,6 +173,10 @@ internal sealed class OverlayController : IOverlayPublisher, IDisposable
         disposed = true;
         timer.Stop();
         cardWindow.Dispose();
+        foreach (var notificationWindow in notificationWindows)
+        {
+            notificationWindow.Dispose();
+        }
         directWindow.Dispose();
     }
 }

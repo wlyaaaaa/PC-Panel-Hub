@@ -8,14 +8,16 @@ public static class OverlayPolicies
         new(60, 44, 34, 2);
     private static readonly TypographyScale Phone =
         new(64, 48, 36, 2);
+    private static readonly TypographyScale PhoneMessage =
+        new(64, 48, 36, 0);
     private static readonly TypographyScale Critical =
         new(76, 48, 36, 2);
 
     private static readonly IReadOnlyDictionary<OverlayKind, OverlayPresentationPolicy>
         Policies = new Dictionary<OverlayKind, OverlayPresentationPolicy>
         {
-            [OverlayKind.Glance] = Timed(
-                OverlayVisualTier.Crystal, 20, 300, Normal, canPin: true),
+            [OverlayKind.Glance] = Active(
+                OverlayVisualTier.Direct, 300, Normal),
             [OverlayKind.MediaActive] = Active(
                 OverlayVisualTier.Crystal, 200, Normal),
             [OverlayKind.MediaTrackChange] = Timed(
@@ -41,11 +43,14 @@ public static class OverlayPolicies
             [OverlayKind.PhoneBattery] = Active(
                 OverlayVisualTier.Direct, 50, Ambient),
             [OverlayKind.PhoneConnection] = Timed(
-                OverlayVisualTier.Crystal, 20, 750, Phone),
+                OverlayVisualTier.StackedNotification, 5, 750, Phone),
             [OverlayKind.PhoneNotification] = Timed(
-                OverlayVisualTier.Crystal, 18, 800, Phone),
-            [OverlayKind.PhoneDynamic] = Active(
-                OverlayVisualTier.Crystal, 850, Phone),
+                OverlayVisualTier.StackedNotification,
+                5,
+                800,
+                PhoneMessage),
+            [OverlayKind.PhoneDynamic] = Timed(
+                OverlayVisualTier.StackedNotification, 5, 850, Phone),
             [OverlayKind.PhoneCall] = Active(
                 OverlayVisualTier.Emphasis, 950, Critical),
             [OverlayKind.PhoneTransfer] = Active(

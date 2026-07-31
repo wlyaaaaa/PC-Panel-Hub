@@ -90,5 +90,34 @@ public sealed class DisplayLayoutTests
         Assert.True(placement.Card.Width >= 1200);
         Assert.True(placement.Direct.Top >= display.Y);
         Assert.True(placement.Direct.Right <= placement.FrontRegion.Right);
+        Assert.Equal(placement.Card.Width, placement.Direct.Width);
+        Assert.True(placement.Direct.Height >= 190);
+    }
+
+    [Fact]
+    public void NotificationLayout_UsesTwoNonOverlappingWideCards()
+    {
+        var region = new PixelRect(56, 280, 1413, 480);
+
+        Assert.Equal(2, NotificationLayoutPlanner.Capacity(region, false));
+        var slots = NotificationLayoutPlanner.PlanSlots(region, 2);
+
+        Assert.Equal(2, slots.Count);
+        Assert.True(slots[0].Right < slots[1].Left);
+        Assert.Equal(region.Left, slots[0].Left);
+        Assert.Equal(region.Right, slots[1].Right);
+        Assert.Equal(region.Bottom, slots[0].Bottom);
+        Assert.Equal(region.Bottom, slots[1].Bottom);
+    }
+
+    [Fact]
+    public void NotificationLayout_UsesFullWidthForOneAndQueuesDuringAlert()
+    {
+        var region = new PixelRect(56, 280, 1413, 480);
+
+        var slot = Assert.Single(
+            NotificationLayoutPlanner.PlanSlots(region, 1));
+        Assert.Equal(region.Width, slot.Width);
+        Assert.Equal(0, NotificationLayoutPlanner.Capacity(region, true));
     }
 }
