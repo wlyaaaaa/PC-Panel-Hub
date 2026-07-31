@@ -36,7 +36,7 @@ public sealed class OverlaySchedulerTests
     }
 
     [Fact]
-    public void OrdinaryPhoneNotification_ExpiresAfterFiveVisibleSeconds()
+    public void OrdinaryPhoneNotification_ExpiresAfterTenVisibleSeconds()
     {
         var scheduler = new OverlayScheduler();
         scheduler.Publish(OverlayRequest.Timed(
@@ -50,10 +50,10 @@ public sealed class OverlaySchedulerTests
             Now,
             maxVisibleNotifications: 1).NotificationCards);
         Assert.Single(scheduler.GetFrame(
-            Now.AddSeconds(4.9),
+            Now.AddSeconds(9.9),
             maxVisibleNotifications: 1).NotificationCards);
         Assert.Empty(scheduler.GetFrame(
-            Now.AddSeconds(5.1),
+            Now.AddSeconds(10.1),
             maxVisibleNotifications: 1).NotificationCards);
     }
 
@@ -79,16 +79,16 @@ public sealed class OverlaySchedulerTests
         Assert.Equal("通知 2", firstFrame.NotificationCards[1].Request.Title);
 
         var secondFrame = scheduler.GetFrame(
-            Now.AddSeconds(6.1),
+            Now.AddSeconds(11.1),
             maxVisibleNotifications: 2);
         Assert.Single(secondFrame.NotificationCards);
         Assert.Equal("通知 3", secondFrame.NotificationCards[0].Request.Title);
 
         Assert.Single(scheduler.GetFrame(
-            Now.AddSeconds(10.9),
+            Now.AddSeconds(20.9),
             maxVisibleNotifications: 2).NotificationCards);
         Assert.Empty(scheduler.GetFrame(
-            Now.AddSeconds(11.2),
+            Now.AddSeconds(21.2),
             maxVisibleNotifications: 2).NotificationCards);
     }
 
@@ -116,10 +116,10 @@ public sealed class OverlaySchedulerTests
             Now.AddSeconds(20),
             maxVisibleNotifications: 1).NotificationCards);
         Assert.Single(scheduler.GetFrame(
-            Now.AddSeconds(22.9),
+            Now.AddSeconds(27.9),
             maxVisibleNotifications: 1).NotificationCards);
         Assert.Empty(scheduler.GetFrame(
-            Now.AddSeconds(23.1),
+            Now.AddSeconds(28.1),
             maxVisibleNotifications: 1).NotificationCards);
     }
 
@@ -215,7 +215,7 @@ public sealed class OverlaySchedulerTests
             activeFrame.NotificationCards.Single().Request.Kind);
 
         Assert.Empty(scheduler.GetFrame(
-            Now.AddSeconds(5.1),
+            Now.AddSeconds(10.1),
             maxVisibleNotifications: 2).NotificationCards);
     }
 
@@ -241,10 +241,10 @@ public sealed class OverlaySchedulerTests
             "骑手距离 300 米"), Now.AddSeconds(4));
 
         Assert.Single(scheduler.GetFrame(
-            Now.AddSeconds(4.9),
+            Now.AddSeconds(9.9),
             maxVisibleNotifications: 1).NotificationCards);
         Assert.Empty(scheduler.GetFrame(
-            Now.AddSeconds(5.1),
+            Now.AddSeconds(10.1),
             maxVisibleNotifications: 1).NotificationCards);
     }
 

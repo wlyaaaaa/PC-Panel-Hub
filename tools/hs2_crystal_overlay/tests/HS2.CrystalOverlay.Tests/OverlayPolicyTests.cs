@@ -16,13 +16,13 @@ public sealed class OverlayPolicyTests
     }
 
     [Fact]
-    public void OrdinaryPhoneNotification_IsStackedAndVisibleForFiveSeconds()
+    public void OrdinaryPhoneNotification_IsStackedAndVisibleForTenSeconds()
     {
         var policy = OverlayPolicies.For(OverlayKind.PhoneNotification);
 
         Assert.Equal(OverlayVisualTier.StackedNotification, policy.VisualTier);
         Assert.Equal(OverlayLifetime.Timed, policy.Lifetime);
-        Assert.Equal(TimeSpan.FromSeconds(5), policy.Duration);
+        Assert.Equal(TimeSpan.FromSeconds(10), policy.Duration);
         Assert.True(policy.Typography.TitlePx >= 56);
         Assert.True(policy.Typography.BodyPx >= 42);
         Assert.Equal(0, policy.Typography.MaxBodyLines);
@@ -47,7 +47,7 @@ public sealed class OverlayPolicyTests
     [InlineData(OverlayKind.ImportantTaskComplete, 15)]
     [InlineData(OverlayKind.HardwareResolved, 10)]
     [InlineData(OverlayKind.PhoneConnection, 5)]
-    [InlineData(OverlayKind.PhoneDynamic, 5)]
+    [InlineData(OverlayKind.PhoneDynamic, 10)]
     public void TimedPolicies_HaveApprovedDurations(OverlayKind kind, int seconds)
     {
         var policy = OverlayPolicies.For(kind);
