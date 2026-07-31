@@ -75,6 +75,7 @@ public partial class App : Application
                 argument.StartsWith(
                     "--demo=",
                     StringComparison.OrdinalIgnoreCase));
+        glance = new GlanceSourceCoordinator(controller);
         if (demoArgument is not null)
         {
             var separator = demoArgument.IndexOf('=');
@@ -89,7 +90,6 @@ public partial class App : Application
             media = new MediaSessionSource(controller);
             hardwareAlerts =
                 new HardwareAlertSourceCoordinator(controller);
-            glance = new GlanceSourceCoordinator(controller);
             steamGames = new SteamGameSourceCoordinator(controller);
             audioOperations =
                 new AudioOperationSourceCoordinator(controller);

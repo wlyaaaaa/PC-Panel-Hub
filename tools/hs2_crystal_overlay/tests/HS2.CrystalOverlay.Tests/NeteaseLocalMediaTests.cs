@@ -103,6 +103,129 @@ public sealed class NeteaseLocalMediaTests
     }
 
     [Fact]
+    public void PlayingList_MatchesTheExactPlayerWindowTitle()
+    {
+        const string json = """
+            {
+              "list": [
+                {
+                  "id": "101",
+                  "track": {
+                    "name": "Signal - Live",
+                    "duration": 240000,
+                    "artists": [{ "name": "Example Artist" }]
+                  }
+                },
+                {
+                  "id": "102",
+                  "track": {
+                    "name": "Signal",
+                    "duration": 180000,
+                    "artists": [{ "name": "Another Artist" }]
+                  }
+                }
+              ]
+            }
+            """;
+
+        var track = NeteasePlayingList
+            .Parse(json)
+            .FindByWindowTitle("Signal - Live - Example Artist");
+
+        Assert.NotNull(track);
+        Assert.Equal("101", track.Id);
+    }
+
+    [Fact]
+    public void PlayingList_DoesNotGuessFromAnUnrelatedWindowTitle()
+    {
+        const string json = """
+            {
+              "list": [
+                {
+                  "id": "101",
+                  "track": {
+                    "name": "Signal",
+                    "duration": 240000,
+                    "artists": [{ "name": "Example Artist" }]
+                  }
+                }
+              ]
+            }
+            """;
+
+        var catalog = NeteasePlayingList.Parse(json);
+
+        Assert.Null(catalog.FindByWindowTitle("Desktop Lyrics"));
+        Assert.Null(catalog.FindByWindowTitle("Signal - Other Artist"));
+    }
+
+    [Fact]
+    public void PlayingList_NormalizesOnlyArtistSlashSpacing()
+    {
+        const string json = """
+            {
+              "list": [
+                {
+                  "id": "101",
+                  "track": {
+                    "name": "Signal",
+                    "duration": 240000,
+                    "artists": [
+                      { "name": "First Artist" },
+                      { "name": "Second Artist" }
+                    ]
+                  }
+                }
+              ]
+            }
+            """;
+
+        var track = NeteasePlayingList
+            .Parse(json)
+            .FindByWindowTitle(
+                "Signal - First Artist/Second Artist");
+
+        Assert.NotNull(track);
+        Assert.Equal("101", track.Id);
+    }
+
+    [Fact]
+    public void PlayingList_PreservesExactDuplicateCandidatesForDisambiguation()
+    {
+        const string json = """
+            {
+              "list": [
+                {
+                  "id": "101",
+                  "track": {
+                    "name": "Signal",
+                    "duration": 240000,
+                    "artists": [{ "name": "Example Artist" }]
+                  }
+                },
+                {
+                  "id": "102",
+                  "track": {
+                    "name": "Signal",
+                    "duration": 240000,
+                    "artists": [{ "name": "Example Artist" }]
+                  }
+                }
+              ]
+            }
+            """;
+
+        var catalog = NeteasePlayingList.Parse(json);
+        var candidates = catalog.FindAllByWindowTitle(
+            "Signal - Example Artist");
+
+        Assert.Equal(2, candidates.Count);
+        Assert.Null(catalog.FindByWindowTitle(
+            "Signal - Example Artist"));
+    }
+
+    [Fact]
     public void DecodedAudioSnapshot_ProducesLivePlaybackPosition()
     {
         var snapshot = new byte[

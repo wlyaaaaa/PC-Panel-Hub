@@ -10,24 +10,16 @@ namespace HS2_CrystalOverlay;
 
 internal sealed record NeteaseLocalMediaObservation(
     NeteaseTrackMetadata Track,
-    NeteaseLyricDocument Lyrics,
-    TimeSpan Position,
     string TrackInstance,
     bool IsPlaying,
-    bool AudioStateIsAuthoritative,
-    bool UsesPlaybackBridge);
+    bool AudioStateIsAuthoritative);
 
-internal sealed class NeteaseLocalMediaProbe : IDisposable
+internal sealed class NeteaseLocalMediaProbe
 {
     private readonly NeteaseLyricCacheReader lyricCache = new();
     private readonly NeteasePlayingListReader playingList = new();
-    private readonly NeteasePlaybackMemoryReader playback = new();
-    private readonly NeteasePlaybackBridgeReader playbackBridge = new();
+    private readonly NeteaseWindowTitleReader windowTitle = new();
     private readonly NeteaseAudioSessionProbe audio = new();
-    private string? lastTrackInstance;
-    private TimeSpan lastPosition;
-    private DateTimeOffset lastPositionAt;
-    private DateTimeOffset preferBridgeUntil;
     private IReadOnlySet<int> cachedProcessIds = new HashSet<int>();
     private DateTimeOffset processIdsReadAt = DateTimeOffset.MinValue;
 
@@ -42,94 +34,73 @@ internal sealed class NeteaseLocalMediaProbe : IDisposable
             return null;
         }
 
-        var lyric = lyricCache.ReadCurrent(now);
-        if (lyric is null)
+        var catalog = playingList.Read();
+        if (catalog is null)
         {
-            LastReadState = "no-current-lyric-cache";
+            LastReadState = "no-playing-list";
             return null;
         }
 
-        var track = playingList.Read()?.FindByCacheKey(lyric.CacheKey);
-        if (track is null)
+        var trackCandidates = windowTitle.ReadTracks(
+            processIds,
+            catalog);
+        if (trackCandidates.Count == 0)
         {
-            LastReadState = "lyric-not-in-playing-list";
+            LastReadState = "current-track-window-unmatched";
             return null;
         }
 
-        var usesPlaybackBridge = false;
-        NeteasePlaybackMemorySample? playbackSample;
-        if (now < preferBridgeUntil)
+        var selectedTrack = SelectTrack(trackCandidates);
+        if (selectedTrack is null)
         {
-            playbackSample = playbackBridge.Read(processIds, now);
-            usesPlaybackBridge = playbackSample is not null;
-            playbackSample ??= playback.Read(processIds);
-        }
-        else
-        {
-            playbackSample = playback.Read(processIds);
-            if (playbackSample is null)
-            {
-                playbackSample = playbackBridge.Read(processIds, now);
-                usesPlaybackBridge = playbackSample is not null;
-                if (usesPlaybackBridge)
-                {
-                    preferBridgeUntil = now.AddMinutes(5);
-                }
-            }
-        }
-
-        if (playbackSample is null)
-        {
-            LastReadState = "playback-position-unavailable";
+            LastReadState = "current-track-cache-ambiguous";
             return null;
         }
 
-        if (track.Duration > TimeSpan.Zero &&
-            playbackSample.Position >
-            track.Duration + TimeSpan.FromSeconds(3))
-        {
-            LastReadState = "playback-position-out-of-range";
-            return null;
-        }
+        var track = selectedTrack;
 
-        var instance = string.Create(
-            System.Globalization.CultureInfo.InvariantCulture,
-            $"{lyric.CacheKey}@{lyric.WrittenAt.UtcTicks}");
+        var instance = track.CacheKey;
         var audioState = audio.Read(processIds);
-        var positionAdvanced =
-            string.Equals(
-                instance,
-                lastTrackInstance,
-                StringComparison.Ordinal) &&
-            now > lastPositionAt &&
-            playbackSample.Position >
-            lastPosition + TimeSpan.FromMilliseconds(80);
-        var isPlaying = audioState switch
+        var isPlaying = audioState == NeteaseAudioState.Playing;
+        LastReadState = audioState switch
         {
-            NeteaseAudioState.Playing => true,
-            NeteaseAudioState.Inactive => false,
-            _ => positionAdvanced,
+            NeteaseAudioState.Playing => "ready-audio",
+            NeteaseAudioState.Inactive => "audio-inactive",
+            _ => "audio-state-unavailable",
         };
-        lastTrackInstance = instance;
-        lastPosition = playbackSample.Position;
-        lastPositionAt = now;
-        LastReadState = usesPlaybackBridge
-            ? "ready-via-bridge"
-            : "ready-direct";
         return new NeteaseLocalMediaObservation(
             track,
-            lyric.Lyrics,
-            playbackSample.Position,
             instance,
             isPlaying,
-            audioState != NeteaseAudioState.Unknown ||
-            positionAdvanced,
-            usesPlaybackBridge);
+            audioState != NeteaseAudioState.Unknown);
     }
 
-    public void Dispose()
+    private NeteaseTrackMetadata? SelectTrack(
+        IReadOnlyList<NeteaseTrackMetadata> candidates)
     {
-        playbackBridge.Dispose();
+        if (candidates.Count == 1)
+        {
+            return candidates[0];
+        }
+
+        var withLyrics = candidates
+            .Select(track => new
+            {
+                Track = track,
+                Lyrics = lyricCache.Read(track.CacheKey),
+            })
+            .Where(candidate => candidate.Lyrics is not null)
+            .OrderByDescending(candidate => candidate.Lyrics!.WrittenAt)
+            .ToArray();
+        if (withLyrics.Length == 0 ||
+            withLyrics.Length > 1 &&
+            withLyrics[0].Lyrics!.WrittenAt ==
+            withLyrics[1].Lyrics!.WrittenAt)
+        {
+            return null;
+        }
+
+        return withLyrics[0].Track;
     }
 
     private IReadOnlySet<int> ReadCloudMusicProcessIds(

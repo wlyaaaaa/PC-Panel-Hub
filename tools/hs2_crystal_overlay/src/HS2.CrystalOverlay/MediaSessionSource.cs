@@ -56,26 +56,18 @@ internal sealed class MediaSessionSource : IDisposable
                 return;
             }
 
-            var position = observation.Position;
             if (!observation.IsPlaying)
             {
                 LogState(
                     observation.AudioStateIsAuthoritative
                         ? "audio-inactive"
-                        : "position-inactive");
+                        : "audio-state-unavailable");
                 HideAfterInactiveSamples(resetTrack: false);
                 return;
             }
 
             inactiveSamples = 0;
-            LogState(
-                observation.UsesPlaybackBridge
-                    ? observation.AudioStateIsAuthoritative
-                        ? "playing-bridge-audio"
-                        : "playing-bridge-position-fallback"
-                    : observation.AudioStateIsAuthoritative
-                        ? "playing-local-audio"
-                        : "playing-position-fallback");
+            LogState("playing-audio");
             var trackChanged = !string.Equals(
                 observation.TrackInstance,
                 lastTrackInstance,
@@ -89,7 +81,6 @@ internal sealed class MediaSessionSource : IDisposable
 
             PublishPlaying(
                 observation,
-                position,
                 trackChanged);
             lastTrackInstance = observation.TrackInstance;
         }
@@ -110,45 +101,24 @@ internal sealed class MediaSessionSource : IDisposable
 
     private void PublishPlaying(
         NeteaseLocalMediaObservation observation,
-        TimeSpan position,
         bool trackChanged)
     {
         var track = observation.Track;
-        var duration = track.Duration;
-        var ratio = PlaybackProgress.Calculate(position, duration);
-        var lyricFrame = observation.Lyrics.At(position);
-        var lyric = lyricFrame.Original?.Text;
-        var translatedLyric = lyricFrame.Translation?.Text;
-        if (string.IsNullOrWhiteSpace(lyric))
-        {
-            lyric = string.IsNullOrWhiteSpace(track.Album)
-                ? null
-                : track.Album;
-        }
-
         var visual = new OverlayVisualData(
             Subtitle: track.Artist,
-            Meta: duration > TimeSpan.Zero
-                ? $"{Format(position)} / {Format(duration)}"
-                : Format(position),
-            Progress: ratio,
             ArtworkPath: currentArtworkPath,
             AccentHex: "#89F7FF",
-            MarqueeProgress: lyricFrame.Original?.LineProgress,
-            TranslatedTitle: track.TranslatedTitle,
-            SecondaryBody: translatedLyric);
+            TranslatedTitle: track.TranslatedTitle);
         _ = publisher.Publish(OverlayRequest.Active(
             "media-active",
             OverlayKind.MediaActive,
             OverlaySource.NetEase,
             track.Title,
-            lyric,
+            body: null,
             visual: visual));
         activePublished = true;
 
-        if (!trackChanged ||
-            position < TimeSpan.Zero ||
-            position > TimeSpan.FromSeconds(20))
+        if (!trackChanged)
         {
             return;
         }
@@ -158,7 +128,7 @@ internal sealed class MediaSessionSource : IDisposable
             OverlayKind.MediaTrackChange,
             OverlaySource.NetEase,
             track.Title,
-            lyric,
+            body: null,
             dedupKey: $"netease:{observation.TrackInstance}",
             visual: visual with
             {
@@ -199,14 +169,6 @@ internal sealed class MediaSessionSource : IDisposable
 
         lastTrackInstance = null;
         currentArtworkPath = null;
-    }
-
-    private static string Format(TimeSpan value)
-    {
-        value = value < TimeSpan.Zero ? TimeSpan.Zero : value;
-        return value.TotalHours >= 1
-            ? $"{(int)value.TotalHours}:{value.Minutes:00}:{value.Seconds:00}"
-            : $"{(int)value.TotalMinutes:00}:{value.Seconds:00}";
     }
 
     private static async Task<string?> CacheArtworkAsync(
@@ -323,7 +285,6 @@ internal sealed class MediaSessionSource : IDisposable
         disposed = true;
         cancellation.Cancel();
         timer.Dispose();
-        local.Dispose();
         cancellation.Dispose();
     }
 }

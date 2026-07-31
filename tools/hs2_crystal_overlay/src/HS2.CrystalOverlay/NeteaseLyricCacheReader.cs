@@ -11,10 +11,10 @@ internal sealed record NeteaseLyricCacheSnapshot(
 
 internal sealed class NeteaseLyricCacheReader
 {
-    private static readonly TimeSpan ScanInterval =
-        TimeSpan.FromSeconds(1);
-    private static readonly TimeSpan MaximumFileAge =
-        TimeSpan.FromHours(2);
+    private sealed record CachedLyricFile(
+        DateTime LastWriteTimeUtc,
+        long Length,
+        NeteaseLyricCacheSnapshot Snapshot);
 
     private readonly string folder = Path.Combine(
         Environment.GetFolderPath(
@@ -22,69 +22,65 @@ internal sealed class NeteaseLyricCacheReader
         "NetEase",
         "CloudMusic",
         "Temp");
-    private DateTimeOffset lastScan = DateTimeOffset.MinValue;
-    private string? cachedPath;
-    private DateTime cachedWriteTimeUtc;
-    private NeteaseLyricCacheSnapshot? cachedSnapshot;
+    private readonly Dictionary<string, CachedLyricFile> cached = new(
+        StringComparer.OrdinalIgnoreCase);
 
-    internal NeteaseLyricCacheSnapshot? ReadCurrent(DateTimeOffset now)
+    internal NeteaseLyricCacheSnapshot? Read(string? cacheKey)
     {
-        if (now - lastScan < ScanInterval)
+        if (!IsCacheKey(cacheKey))
         {
-            return cachedSnapshot;
+            return null;
         }
 
-        lastScan = now;
+        var normalizedCacheKey = cacheKey!.ToLowerInvariant();
+        var path = Path.Combine(folder, normalizedCacheKey);
+        _ = cached.TryGetValue(path, out var previous);
         try
         {
-            var candidates = new DirectoryInfo(folder)
-                .EnumerateFiles()
-                .Where(file =>
-                    file.Length is > 64 and < 2_000_000 &&
-                    now - new DateTimeOffset(file.LastWriteTime) <=
-                    MaximumFileAge)
-                .OrderByDescending(file => file.LastWriteTimeUtc)
-                .Take(24);
-            foreach (var candidate in candidates)
+            var file = new FileInfo(path);
+            if (!file.Exists || file.Length is <= 64 or >= 2_000_000)
             {
-                if (string.Equals(
-                        candidate.FullName,
-                        cachedPath,
-                        StringComparison.OrdinalIgnoreCase) &&
-                    candidate.LastWriteTimeUtc == cachedWriteTimeUtc)
-                {
-                    return cachedSnapshot;
-                }
-
-                var lyrics = TryRead(candidate.FullName);
-                if (lyrics is null)
-                {
-                    continue;
-                }
-
-                cachedPath = candidate.FullName;
-                cachedWriteTimeUtc = candidate.LastWriteTimeUtc;
-                cachedSnapshot = new NeteaseLyricCacheSnapshot(
-                    candidate.Name,
-                    candidate.FullName,
-                    new DateTimeOffset(candidate.LastWriteTimeUtc, TimeSpan.Zero),
-                    lyrics);
-                return cachedSnapshot;
+                return null;
             }
-        }
-        catch (DirectoryNotFoundException)
-        {
+
+            if (previous is not null &&
+                file.LastWriteTimeUtc == previous.LastWriteTimeUtc &&
+                file.Length == previous.Length)
+            {
+                return previous.Snapshot;
+            }
+
+            var lyrics = TryRead(file.FullName);
+            if (lyrics is null)
+            {
+                return previous?.Snapshot;
+            }
+
+            var snapshot = new NeteaseLyricCacheSnapshot(
+                normalizedCacheKey,
+                file.FullName,
+                new DateTimeOffset(file.LastWriteTimeUtc, TimeSpan.Zero),
+                lyrics);
+            cached[path] = new CachedLyricFile(
+                file.LastWriteTimeUtc,
+                file.Length,
+                snapshot);
+            return snapshot;
         }
         catch (IOException)
         {
+            return previous?.Snapshot;
         }
         catch (UnauthorizedAccessException)
         {
+            return previous?.Snapshot;
         }
 
-        cachedPath = null;
-        cachedSnapshot = null;
-        return null;
+        static bool IsCacheKey(string? value)
+        {
+            return value is { Length: 32 } &&
+                   value.All(Uri.IsHexDigit);
+        }
     }
 
     private static NeteaseLyricDocument? TryRead(string path)

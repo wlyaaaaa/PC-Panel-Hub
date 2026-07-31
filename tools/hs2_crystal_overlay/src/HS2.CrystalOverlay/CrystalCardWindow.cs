@@ -163,7 +163,13 @@ internal sealed class CrystalCardWindow : IDisposable
     {
         var visual = item.Request.Visual;
         var expanded = item.Request.Kind == OverlayKind.MediaTrackChange;
-        var padding = expanded ? 42f : 32f;
+        var identityOnly =
+            string.IsNullOrWhiteSpace(item.Request.Body) &&
+            visual?.Progress is null &&
+            string.IsNullOrWhiteSpace(visual?.Meta);
+        var padding = identityOnly
+            ? expanded ? 30f : 24f
+            : expanded ? 42f : 32f;
         var contentX = padding;
         var artworkSize = height - padding * 2;
         if (TryDrawArtwork(
@@ -178,12 +184,16 @@ internal sealed class CrystalCardWindow : IDisposable
         var accent = ParseColor(
             visual?.AccentHex,
             Color.FromArgb(244, 137, 247, 255));
-        var titleTop = expanded ? 18f : 12f;
+        var titleTop = identityOnly
+            ? expanded ? 38f : 34f
+            : expanded ? 18f : 12f;
         using var dot = new SolidBrush(accent);
         graphics.FillEllipse(
             dot,
             contentX,
-            expanded ? 36 : 27,
+            identityOnly
+                ? titleTop + (expanded ? 16 : 12)
+                : expanded ? 36 : 27,
             expanded ? 11 : 9,
             expanded ? 11 : 9);
         contentX += expanded ? 23 : 20;
@@ -233,7 +243,9 @@ internal sealed class CrystalCardWindow : IDisposable
                 subtitle,
                 new RectangleF(
                     contentX,
-                    expanded ? 68 : 48,
+                    identityOnly
+                        ? titleTop + (expanded ? 58 : 46)
+                        : expanded ? 68 : 48,
                     right - contentX,
                     expanded ? 35 : 28),
                 expanded ? 24 : 20,
@@ -277,47 +289,63 @@ internal sealed class CrystalCardWindow : IDisposable
             }
         }
 
-        var progressY = height - (expanded ? 39 : 36);
-        var metaWidth = string.IsNullOrWhiteSpace(visual?.Meta)
-            ? 0f
-            : Math.Min(300, width * 0.31f);
-        var progressRight = right - metaWidth - (metaWidth > 0 ? 24 : 0);
-        using var track = new Pen(Color.FromArgb(54, 224, 252, 255), 2.2f)
+        var hasTimeline = visual?.Progress is not null ||
+                          !string.IsNullOrWhiteSpace(visual?.Meta);
+        if (hasTimeline)
         {
-            StartCap = LineCap.Round,
-            EndCap = LineCap.Round,
-        };
-        graphics.DrawLine(track, contentX, progressY, progressRight, progressY);
-        if (visual?.Progress is not null)
-        {
-            var ratio = (float)Math.Clamp(visual.Progress.Value, 0, 1);
-            using var progress = new Pen(accent, 3.1f)
+            var progressY = height - (expanded ? 39 : 36);
+            var metaWidth = string.IsNullOrWhiteSpace(visual?.Meta)
+                ? 0f
+                : Math.Min(300, width * 0.31f);
+            var progressRight =
+                right - metaWidth - (metaWidth > 0 ? 24 : 0);
+            using var timeline = new Pen(
+                Color.FromArgb(54, 224, 252, 255),
+                2.2f)
             {
                 StartCap = LineCap.Round,
                 EndCap = LineCap.Round,
             };
             graphics.DrawLine(
-                progress,
+                timeline,
                 contentX,
                 progressY,
-                contentX + (progressRight - contentX) * ratio,
+                progressRight,
                 progressY);
-        }
+            if (visual?.Progress is not null)
+            {
+                var ratio = (float)Math.Clamp(
+                    visual.Progress.Value,
+                    0,
+                    1);
+                using var progress = new Pen(accent, 3.1f)
+                {
+                    StartCap = LineCap.Round,
+                    EndCap = LineCap.Round,
+                };
+                graphics.DrawLine(
+                    progress,
+                    contentX,
+                    progressY,
+                    contentX + (progressRight - contentX) * ratio,
+                    progressY);
+            }
 
-        if (metaWidth > 0)
-        {
-            DrawText(
-                graphics,
-                visual!.Meta!,
-                new RectangleF(
-                    right - metaWidth,
-                    progressY - 22,
-                    metaWidth,
-                    38),
-                expanded ? 21 : 19,
-                FontStyle.Regular,
-                Color.FromArgb(220, 230, 244, 247),
-                StringAlignment.Far);
+            if (metaWidth > 0)
+            {
+                DrawText(
+                    graphics,
+                    visual!.Meta!,
+                    new RectangleF(
+                        right - metaWidth,
+                        progressY - 22,
+                        metaWidth,
+                        38),
+                    expanded ? 21 : 19,
+                    FontStyle.Regular,
+                    Color.FromArgb(220, 230, 244, 247),
+                    StringAlignment.Far);
+            }
         }
     }
 
@@ -879,14 +907,14 @@ internal sealed class CrystalCardWindow : IDisposable
 
         var desired = item.Request.Kind switch
         {
-            OverlayKind.MediaActive => (Width: 900, Height: 230),
+            OverlayKind.MediaActive => (Width: 820, Height: 176),
             OverlayKind.GameActive => (Width: 980, Height: 240),
             OverlayKind.ImportantTask => (Width: 980, Height: 290),
             OverlayKind.ImportantTaskComplete => (Width: 980, Height: 290),
             OverlayKind.HardwareResolved => (Width: 980, Height: 240),
             OverlayKind.SystemOperation => (Width: 820, Height: 220),
             OverlayKind.DeviceOrNetwork => (Width: 940, Height: 260),
-            OverlayKind.MediaTrackChange => (Width: 1050, Height: 300),
+            OverlayKind.MediaTrackChange => (Width: 940, Height: 210),
             OverlayKind.GameAchievement => (Width: 1180, Height: 380),
             OverlayKind.GameSummary => (Width: 1180, Height: 400),
             _ => (Width: maximum.Width, Height: maximum.Height),

@@ -19,12 +19,15 @@ public sealed class NeteasePlayingList
 {
     private readonly IReadOnlyDictionary<string, NeteaseTrackMetadata>
         tracksByCacheKey;
+    private readonly IReadOnlyList<NeteaseTrackMetadata> tracks;
 
     private NeteasePlayingList(
         IReadOnlyDictionary<string, NeteaseTrackMetadata>
-            tracksByCacheKey)
+            tracksByCacheKey,
+        IReadOnlyList<NeteaseTrackMetadata> tracks)
     {
         this.tracksByCacheKey = tracksByCacheKey;
+        this.tracks = tracks;
     }
 
     public static NeteasePlayingList Parse(string json)
@@ -38,7 +41,7 @@ public sealed class NeteasePlayingList
                 out var list) ||
             list.ValueKind != JsonValueKind.Array)
         {
-            return new NeteasePlayingList(tracks);
+            return new NeteasePlayingList(tracks, []);
         }
 
         foreach (var entry in list.EnumerateArray())
@@ -51,7 +54,9 @@ public sealed class NeteasePlayingList
             tracks[track.CacheKey] = track;
         }
 
-        return new NeteasePlayingList(tracks);
+        return new NeteasePlayingList(
+            tracks,
+            tracks.Values.ToArray());
     }
 
     public NeteaseTrackMetadata? FindByCacheKey(string? cacheKey)
@@ -65,6 +70,50 @@ public sealed class NeteasePlayingList
             ? track
             : null;
     }
+
+    public NeteaseTrackMetadata? FindByWindowTitle(string? windowTitle)
+    {
+        var matches = FindAllByWindowTitle(windowTitle);
+        return matches.Count == 1
+            ? matches[0]
+            : null;
+    }
+
+    public IReadOnlyList<NeteaseTrackMetadata> FindAllByWindowTitle(
+        string? windowTitle)
+    {
+        if (string.IsNullOrWhiteSpace(windowTitle))
+        {
+            return [];
+        }
+
+        var normalizedTitle = NormalizeWindowTitle(windowTitle);
+        var matches = new List<NeteaseTrackMetadata>();
+        foreach (var track in tracks)
+        {
+            var candidate = NormalizeWindowTitle(
+                $"{track.Title} - {track.Artist}");
+            if (!string.Equals(
+                    candidate,
+                    normalizedTitle,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            matches.Add(track);
+        }
+
+        return matches;
+    }
+
+    private static string NormalizeWindowTitle(string value) =>
+        string.Join(
+            "/",
+            value
+                .Trim()
+                .Split('/')
+                .Select(part => part.Trim()));
 
     private static bool TryReadTrack(
         JsonElement entry,

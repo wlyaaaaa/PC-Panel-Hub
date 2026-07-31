@@ -54,12 +54,6 @@ internal static class DemoSource
             "97%",
             body: null,
             visual: new OverlayVisualData(IsCharging: true)));
-
-        _ = publisher.Publish(OverlayRequest.Active(
-            "demo-glance",
-            OverlayKind.Glance,
-            OverlaySource.System,
-            GlanceClock.FormatChinaTime(DateTimeOffset.UtcNow)));
     }
 
     private static void PublishMedia(IOverlayPublisher publisher)
@@ -69,12 +63,14 @@ internal static class DemoSource
             OverlayKind.MediaActive,
             OverlaySource.NetEase,
             "The Green River",
-            "河流穿过光影，也穿过屏幕转角",
+            body: null,
             visual: new OverlayVisualData(
-                Eyebrow: "正在播放",
                 Subtitle: "Ambient Session",
-                Meta: "01:42 / 04:18  ·  网易云音乐",
-                Progress: 0.395,
+                TranslatedTitle: "绿色河流",
+                ArtworkPath: Path.Combine(
+                    AppContext.BaseDirectory,
+                    "Assets",
+                    "Square150x150Logo.scale-200.png"),
                 AccentHex: "#8FF8FF")));
     }
 

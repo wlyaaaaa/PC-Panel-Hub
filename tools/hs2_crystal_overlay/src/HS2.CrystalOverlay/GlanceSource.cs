@@ -7,8 +7,6 @@ namespace HS2_CrystalOverlay;
 internal sealed class GlanceSourceCoordinator : IDisposable
 {
     private const string VisibilitySetting = "GlanceVisible";
-    private static readonly TimeSpan RefreshInterval =
-        TimeSpan.FromMinutes(1);
 
     private readonly IOverlayPublisher publisher;
     private readonly GlanceHotkeyWindow hotkey;
@@ -30,7 +28,7 @@ internal sealed class GlanceSourceCoordinator : IDisposable
         visible = ReadVisibilitySetting();
         if (visible)
         {
-            refreshTimer.Change(TimeSpan.Zero, RefreshInterval);
+            Refresh();
         }
     }
 
@@ -45,7 +43,7 @@ internal sealed class GlanceSourceCoordinator : IDisposable
         WriteVisibilitySetting(visible);
         if (visible)
         {
-            refreshTimer.Change(TimeSpan.Zero, RefreshInterval);
+            Refresh();
             return;
         }
 
@@ -72,16 +70,40 @@ internal sealed class GlanceSourceCoordinator : IDisposable
                 return;
             }
 
+            var now = DateTimeOffset.UtcNow;
             _ = publisher.Publish(OverlayRequest.Active(
                 "glance",
                 OverlayKind.Glance,
                 OverlaySource.System,
-                GlanceClock.FormatChinaTime(DateTimeOffset.UtcNow)));
+                GlanceClock.FormatChinaTime(now)));
         }
         catch (Exception exception)
         {
             RuntimeLog.Write(
                 $"Glance source failed: {exception.GetType().Name}");
+        }
+        finally
+        {
+            ScheduleNextRefresh();
+        }
+    }
+
+    private void ScheduleNextRefresh()
+    {
+        if (disposed || !visible)
+        {
+            return;
+        }
+
+        try
+        {
+            refreshTimer.Change(
+                GlanceClock.DelayUntilNextMinute(
+                    DateTimeOffset.UtcNow),
+                Timeout.InfiniteTimeSpan);
+        }
+        catch (ObjectDisposedException)
+        {
         }
     }
 

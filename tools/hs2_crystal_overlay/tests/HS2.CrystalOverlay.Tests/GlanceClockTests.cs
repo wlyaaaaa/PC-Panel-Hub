@@ -33,4 +33,39 @@ public sealed class GlanceClockTests
 
         Assert.Equal("17:45", GlanceClock.FormatChinaTime(utc));
     }
+
+    [Fact]
+    public void DelayUntilNextMinute_AlignsToTheClockBoundary()
+    {
+        var utc = new DateTimeOffset(
+            2026,
+            7,
+            31,
+            9,
+            45,
+            36,
+            250,
+            TimeSpan.Zero);
+
+        Assert.Equal(
+            TimeSpan.FromMilliseconds(23_800),
+            GlanceClock.DelayUntilNextMinute(utc));
+    }
+
+    [Fact]
+    public void DelayUntilNextMinute_DoesNotImmediatelyRepeatAtBoundary()
+    {
+        var utc = new DateTimeOffset(
+            2026,
+            7,
+            31,
+            9,
+            46,
+            0,
+            TimeSpan.Zero);
+
+        Assert.Equal(
+            TimeSpan.FromMilliseconds(60_050),
+            GlanceClock.DelayUntilNextMinute(utc));
+    }
 }
