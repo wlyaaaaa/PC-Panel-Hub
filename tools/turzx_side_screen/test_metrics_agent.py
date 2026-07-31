@@ -635,6 +635,11 @@ class MetricsAgentTests(unittest.TestCase):
                 "windDir": "北",
                 "windScale": "2",
             },
+            "daily": {
+                "temperature_max": 34.2,
+                "temperature_min": 25.8,
+                "precipitation_probability_max": 45,
+            },
         }
 
         weather = metrics_agent._weather_from_qweather_payload("北京", payload)
@@ -646,6 +651,9 @@ class MetricsAgentTests(unittest.TestCase):
         self.assertEqual(75, weather["aqi"])
         self.assertEqual(38.0, weather["humidity_percent"])
         self.assertEqual("北 2级", weather["wind_text"])
+        self.assertEqual(34.2, weather["high_temperature_celsius"])
+        self.assertEqual(25.8, weather["low_temperature_celsius"])
+        self.assertEqual(45.0, weather["rain_probability_percent"])
         self.assertEqual("weather_shim", weather["source"])
 
     def test_weather_cold_refresh_is_non_blocking_when_shim_is_slow(self):

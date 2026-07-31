@@ -115,6 +115,8 @@ def rounded_text(value):
 
 def build_now_payload(location_id, open_meteo_payload, lang="zh"):
     current = open_meteo_payload["current"]
+    daily = open_meteo_payload.get("daily")
+    daily = daily if isinstance(daily, dict) else {}
     now_time = current.get("time") or datetime.now(timezone.utc).isoformat()
     wind_degrees = current.get("wind_direction_10m", 0)
     wind_speed = current.get("wind_speed_10m", 0)
@@ -142,8 +144,25 @@ def build_now_payload(location_id, open_meteo_payload, lang="zh"):
             "cloud": "",
             "dew": "",
         },
+        "daily": {
+            "temperature_max": first_value(
+                daily.get("temperature_2m_max")
+            ),
+            "temperature_min": first_value(
+                daily.get("temperature_2m_min")
+            ),
+            "precipitation_probability_max": first_value(
+                daily.get("precipitation_probability_max")
+            ),
+        },
         "refer": {"sources": ["open-meteo"], "license": ["CC BY 4.0"]},
     }
+
+
+def first_value(value):
+    if isinstance(value, list) and value:
+        return value[0]
+    return None
 
 
 def build_city_lookup_payload(query):
@@ -186,6 +205,14 @@ def fetch_open_meteo(location):
                 "pressure_msl",
             ]
         ),
+        "daily": ",".join(
+            [
+                "temperature_2m_max",
+                "temperature_2m_min",
+                "precipitation_probability_max",
+            ]
+        ),
+        "forecast_days": 1,
         "wind_speed_unit": "kmh",
         "timezone": "auto",
     }

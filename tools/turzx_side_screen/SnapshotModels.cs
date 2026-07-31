@@ -92,6 +92,15 @@ namespace TURZX.SideScreen
         [DataMember(Name = "temperature_text")]
         public string TemperatureText { get; set; }
 
+        [DataMember(Name = "high_temperature_celsius")]
+        public double? HighTemperatureCelsius { get; set; }
+
+        [DataMember(Name = "low_temperature_celsius")]
+        public double? LowTemperatureCelsius { get; set; }
+
+        [DataMember(Name = "rain_probability_percent")]
+        public double? RainProbabilityPercent { get; set; }
+
         [DataMember(Name = "condition")]
         public string Condition { get; set; }
 

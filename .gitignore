@@ -28,8 +28,12 @@ tools/*
 !tools/turzx_side_screen/**
 !tools/turzx_weather_shim/
 !tools/turzx_weather_shim/**
+!tools/hs2_crystal_overlay/
+!tools/hs2_crystal_overlay/**
 tools/**/out/
 tools/**/__pycache__/
+tools/**/bin/
+tools/**/obj/
 
 # Vendor / original TURZX binaries and media
 *.exe
@@ -53,6 +57,7 @@ visual/
 !README.md
 !LICENSE
 !docs/**
+!tools/hs2_crystal_overlay/src/HS2.CrystalOverlay/Assets/*.png
 docs/superpowers/
 !scripts/**
 !start-side-screen.cmd

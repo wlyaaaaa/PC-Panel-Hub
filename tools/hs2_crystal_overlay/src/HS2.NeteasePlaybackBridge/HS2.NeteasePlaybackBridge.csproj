@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>HS2.NeteasePlaybackBridge</AssemblyName>
+    <RootNamespace>HS2.NeteasePlaybackBridge</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\HS2.CrystalOverlay.Core\HS2.CrystalOverlay.Core.csproj" />
+  </ItemGroup>
+</Project>

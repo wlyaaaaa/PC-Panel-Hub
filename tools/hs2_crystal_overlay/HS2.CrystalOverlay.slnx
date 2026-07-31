@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/HS2.CrystalOverlay.Core/HS2.CrystalOverlay.Core.csproj" />
+    <Project Path="src/HS2.CrystalOverlay/HS2.CrystalOverlay.csproj" />
+    <Project Path="src/HS2.NeteasePlaybackBridge/HS2.NeteasePlaybackBridge.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/HS2.CrystalOverlay.Tests/HS2.CrystalOverlay.Tests.csproj" />
+  </Folder>
+</Solution>

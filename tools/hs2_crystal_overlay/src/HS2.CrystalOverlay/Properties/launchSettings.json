@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "HS2.CrystalOverlay (Package)": {
+      "commandName": "MsixPackage"
+    },
+    "HS2.CrystalOverlay (Unpackaged)": {
+      "commandName": "Project"
+    }
+  }
+}

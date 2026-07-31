@@ -184,6 +184,9 @@ def empty_snapshot() -> dict[str, Any]:
             "temperature_celsius": None,
             "temperature_c": None,
             "temperature_text": None,
+            "high_temperature_celsius": None,
+            "low_temperature_celsius": None,
+            "rain_probability_percent": None,
             "aqi": None,
             "humidity_percent": None,
             "wind_text": None,
@@ -900,6 +903,8 @@ def _weather_from_qweather_payload(city: str | None, payload: dict[str, Any]) ->
         wind_text = f"{wind_dir} {wind_scale}级"
     elif wind_dir:
         wind_text = wind_dir
+    daily = payload.get("daily")
+    daily = daily if isinstance(daily, dict) else {}
 
     return {
         "city": _weather_display_city(city),
@@ -908,6 +913,15 @@ def _weather_from_qweather_payload(city: str | None, payload: dict[str, Any]) ->
         "temperature_celsius": temp,
         "temperature_c": temp,
         "temperature_text": f"{int(round(temp))}°C" if temp is not None else None,
+        "high_temperature_celsius": _round_float_or_none(
+            daily.get("temperature_max")
+        ),
+        "low_temperature_celsius": _round_float_or_none(
+            daily.get("temperature_min")
+        ),
+        "rain_probability_percent": _round_float_or_none(
+            daily.get("precipitation_probability_max")
+        ),
         "aqi": int(round(aqi)) if aqi is not None else None,
         "humidity_percent": humidity,
         "wind_text": wind_text,

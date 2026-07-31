@@ -1,6 +1,7 @@
 # TURZX SideScreen
 
-Self-hosted realtime dashboard for 480x1920 TURZX USB side screens.
+Self-hosted realtime dashboard for 480x1920 TURZX USB side screens, plus an
+optional event-driven overlay for the LIAN LI HS2 2288x1048 curved OLED.
 
 This project replaces the stock TURZX monitoring page with a custom local stack:
 
@@ -9,6 +10,12 @@ This project replaces the stock TURZX monitoring page with a custom local stack:
 - COM7 differential frame streaming for low-interference 1s updates, with stale-data fallback so slow metrics reads do not stall the clock.
 - Bounded JSONL diagnostics and explicit source/error states.
 - Windows Scheduled Task startup support with highest privilege.
+- A separate click-through HS2 crystal overlay for glance, media lyrics,
+  Steam sessions, phone status, operations, tasks, and actionable alerts.
+
+The HS2 overlay is intentionally not another dense telemetry dashboard. Its
+design, supported sources, setup, and explicit limitations are documented in
+[docs/hs2-crystal-overlay.md](docs/hs2-crystal-overlay.md).
 
 ## Current Status
 
@@ -115,6 +122,7 @@ scripts/                       public install/start/test/release wrappers
 docs/                          public documentation
 tools/turzx_side_screen/       metrics agent, renderer, streamer, tests
 tools/turzx_weather_shim/      weather shim used by local weather requests
+tools/hs2_crystal_overlay/     HS2 overlay, NetEase bridge, and tests
 ```
 
 The original TURZX vendor binaries and local runtime folders are intentionally excluded from git.
