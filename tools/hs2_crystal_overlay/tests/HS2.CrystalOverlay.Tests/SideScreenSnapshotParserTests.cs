@@ -102,4 +102,40 @@ public sealed class SideScreenSnapshotParserTests
             [1726],
             SideScreenSnapshotParser.ParsePumpRpms(lhm));
     }
+
+    [Fact]
+    public void HardwareParserTreatsNullOrTextSensorValuesAsUnavailable()
+    {
+        const string snapshot = """
+            {
+              "cpu": { "temperature_celsius": null },
+              "gpu": {
+                "temperature_celsius": "unavailable",
+                "hotspot_temperature_celsius": null
+              },
+              "memory": {
+                "module_temperatures_celsius": [null, "offline", 63.5]
+              },
+              "physical_disks": [
+                {
+                  "model": "Example SSD",
+                  "temperature_celsius": null,
+                  "free_gb": "unknown",
+                  "capacity_gb": 1000
+                }
+              ]
+            }
+            """;
+
+        var hardware = SideScreenSnapshotParser.ParseHardware(snapshot);
+
+        Assert.Null(hardware.CpuTemperatureCelsius);
+        Assert.Null(hardware.GpuTemperatureCelsius);
+        Assert.Null(hardware.GpuHotspotTemperatureCelsius);
+        Assert.Equal([63.5], hardware.MemoryModuleTemperaturesCelsius);
+        Assert.Single(hardware.Disks);
+        Assert.Null(hardware.Disks[0].TemperatureCelsius);
+        Assert.Null(hardware.Disks[0].FreeGigabytes);
+        Assert.Equal(1000, hardware.Disks[0].CapacityGigabytes);
+    }
 }

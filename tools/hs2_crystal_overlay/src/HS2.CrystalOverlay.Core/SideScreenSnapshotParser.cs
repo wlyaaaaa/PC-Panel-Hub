@@ -53,7 +53,8 @@ public static class SideScreenSnapshotParser
         {
             foreach (var temperature in modules.EnumerateArray())
             {
-                if (temperature.TryGetDouble(out var value) &&
+                if (temperature.ValueKind == JsonValueKind.Number &&
+                    temperature.TryGetDouble(out var value) &&
                     value is >= 0 and <= 150)
                 {
                     memoryTemperatures.Add(value);
@@ -258,6 +259,7 @@ public static class SideScreenSnapshotParser
         params string[] path)
     {
         return TryPath(root, out var value, path) &&
+               value.ValueKind == JsonValueKind.Number &&
                value.TryGetDouble(out var number)
             ? number
             : null;
