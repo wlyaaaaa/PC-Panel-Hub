@@ -33,16 +33,29 @@ public sealed class PhoneNotificationClassificationTests
     }
 
     [Fact]
-    public void DedupKeyIgnoresCaseAndWhitespace()
+    public void DedupKeyUsesPayloadAndIgnoresRelaySourceCaseAndWhitespace()
     {
         Assert.Equal(
             PhoneNotificationClassifier.DedupKey(
-                "Phone Link",
                 "New Message",
                 "Hello world"),
             PhoneNotificationClassifier.DedupKey(
-                " phone link ",
                 "NEW   MESSAGE",
                 "hello  world"));
+    }
+
+    [Theory]
+    [InlineData("Phone Link", OverlaySource.PhoneLink)]
+    [InlineData("手机连接", OverlaySource.PhoneLink)]
+    [InlineData("Cross Device Experience Host", OverlaySource.PhoneLink)]
+    [InlineData("小米妙享", OverlaySource.XiaomiHyperConnect)]
+    [InlineData("MiSmartShare", OverlaySource.XiaomiHyperConnect)]
+    public void RelayApplicationNamesMapToBothIndependentSources(
+        string appName,
+        OverlaySource expected)
+    {
+        Assert.Equal(
+            expected,
+            PhoneNotificationClassifier.SourceForRelayApp(appName));
     }
 }

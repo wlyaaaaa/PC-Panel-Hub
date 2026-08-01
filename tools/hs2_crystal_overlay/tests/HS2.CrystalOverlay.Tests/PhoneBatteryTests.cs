@@ -58,6 +58,48 @@ public sealed class PhoneBatteryTests
     }
 
     [Fact]
+    public void PhoneLinkCompanion_ProvidesBackgroundBatteryAndConnection()
+    {
+        const string json = """
+            {
+              "speak": "Android 手机 - 已连接到你的电脑",
+              "body": [
+                {
+                  "tooltip": "电池电量剩余 82%，正在充电",
+                  "altText": "你的移动设备正在充电，当前电池电量为 82%"
+                }
+              ]
+            }
+            """;
+
+        var snapshot = PhoneLinkCompanionParser.Parse(json);
+
+        Assert.NotNull(snapshot);
+        Assert.True(snapshot.IsConnected);
+        Assert.Equal(82, snapshot.Percentage);
+        Assert.True(snapshot.IsCharging);
+    }
+
+    [Fact]
+    public void PhoneLinkCompanion_DoesNotTreatDisconnectedCacheAsLive()
+    {
+        const string json = """
+            {
+              "speak": "Android 手机 - 未连接",
+              "body": [
+                { "tooltip": "电池电量剩余 74%" }
+              ]
+            }
+            """;
+
+        var snapshot = PhoneLinkCompanionParser.Parse(json);
+
+        Assert.NotNull(snapshot);
+        Assert.False(snapshot.IsConnected);
+        Assert.Equal(74, snapshot.Percentage);
+    }
+
+    [Fact]
     public void MissingDisconnectedOrStaleProviders_HideBattery()
     {
         var stale = new PhoneBatteryReading(

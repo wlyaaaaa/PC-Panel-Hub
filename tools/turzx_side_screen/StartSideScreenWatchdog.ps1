@@ -12,7 +12,7 @@ param(
     [int]$QuickBlankTimeoutMs = 2500,
     [int]$PollSeconds = 2,
     [int]$HeartbeatStaleSeconds = 15,
-    [int]$HeartbeatStartupGraceSeconds = 30,
+    [int]$HeartbeatStartupGraceSeconds = 60,
     [int]$ShutdownStartupGraceSeconds = 180,
     [int]$MaxConsecutiveHeartbeatFailures = 3,
     [int]$MaxConsecutiveFailures = 3,

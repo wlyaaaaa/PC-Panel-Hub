@@ -22,7 +22,16 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $outDir = Join-Path $scriptDir "out"
 $hasExplicitExecutablePath = -not [string]::IsNullOrWhiteSpace($ExecutablePath)
 $exePath = if ($hasExplicitExecutablePath) { $ExecutablePath } else { Join-Path $outDir "TURZX.SideScreen.Stream.exe" }
-$metricsUrl = "http://127.0.0.1:18765/snapshot"
+$metricsHost = "127.0.0.1"
+$metricsPort = 18765
+$metricsUrl = "http://${metricsHost}:${metricsPort}/snapshot"
+$metricsLaunchTag = "{0}-{1}" -f `
+    [DateTime]::UtcNow.ToString("yyyyMMdd-HHmmssfff"), `
+    $PID
+$metricsStdoutPath = Join-Path $outDir `
+    "metrics-agent.$metricsLaunchTag.stdout.log"
+$metricsStderrPath = Join-Path $outDir `
+    "metrics-agent.$metricsLaunchTag.stderr.log"
 
 if ([string]::IsNullOrWhiteSpace($PreviewDir)) {
     $PreviewDir = Join-Path $outDir "stream"
@@ -100,13 +109,60 @@ function Test-MetricsEndpointReady {
     }
 }
 
+function Test-MetricsPortAvailable {
+    $listener = $null
+    try {
+        $listener = [System.Net.Sockets.TcpListener]::new(
+            [System.Net.IPAddress]::Parse($metricsHost),
+            $metricsPort
+        )
+        $listener.Server.ExclusiveAddressUse = $true
+        $listener.Start()
+        return $true
+    }
+    catch {
+        return $false
+    }
+    finally {
+        if ($null -ne $listener) {
+            $listener.Stop()
+        }
+    }
+}
+
+function Wait-MetricsEndpointOrPortAvailable {
+    param([int]$TimeoutSeconds = 30)
+
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    do {
+        if (Test-MetricsEndpointReady) {
+            return "ready"
+        }
+        if (Test-MetricsPortAvailable) {
+            return "available"
+        }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTime]::UtcNow -lt $deadline)
+
+    throw "metrics endpoint is unhealthy and port $metricsPort did not release within $TimeoutSeconds seconds"
+}
+
 function Wait-MetricsEndpointReady {
-    param([int]$TimeoutSeconds = 10)
+    param(
+        [int]$TimeoutSeconds = 15,
+        [System.Diagnostics.Process]$Process
+    )
 
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     do {
         if (Test-MetricsEndpointReady) {
             return
+        }
+        if ($null -ne $Process) {
+            $Process.Refresh()
+            if ($Process.HasExited) {
+                throw "metrics agent exited with code $($Process.ExitCode); see $metricsStderrPath"
+            }
         }
         Start-Sleep -Milliseconds 250
     } while ([DateTime]::UtcNow -lt $deadline)
@@ -156,15 +212,18 @@ if (!$Sample -and !$DryRun) {
     }
 
     $agent = Join-Path $scriptDir "metrics_agent.py"
-    $existingAgent = Get-CimInstance Win32_Process |
-        Where-Object { $_.Name -like "python*" -and $_.CommandLine -like "*$agent*" } |
-        Select-Object -First 1
-
-    if (!(Test-MetricsEndpointReady) -and !$existingAgent) {
-        $agentProcess = Start-Process -FilePath $PythonPath -ArgumentList @($agent, "--host", "127.0.0.1", "--port", "18765") -WindowStyle Hidden -PassThru
+    $metricsState = Wait-MetricsEndpointOrPortAvailable
+    if ($metricsState -eq "available") {
+        $agentProcess = Start-Process `
+            -FilePath $PythonPath `
+            -ArgumentList @($agent, "--host", $metricsHost, "--port", [string]$metricsPort) `
+            -WindowStyle Hidden `
+            -RedirectStandardOutput $metricsStdoutPath `
+            -RedirectStandardError $metricsStderrPath `
+            -PassThru
     }
 
-    Wait-MetricsEndpointReady
+    Wait-MetricsEndpointReady -Process $agentProcess
 }
 
 try {

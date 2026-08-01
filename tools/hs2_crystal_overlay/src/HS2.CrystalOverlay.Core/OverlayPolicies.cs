@@ -46,11 +46,11 @@ public static class OverlayPolicies
                 OverlayVisualTier.StackedNotification, 5, 750, Phone),
             [OverlayKind.PhoneNotification] = Timed(
                 OverlayVisualTier.StackedNotification,
-                10,
+                60,
                 800,
                 PhoneMessage),
             [OverlayKind.PhoneDynamic] = Timed(
-                OverlayVisualTier.StackedNotification, 10, 850, Phone),
+                OverlayVisualTier.StackedNotification, 60, 850, Phone),
             [OverlayKind.PhoneCall] = Active(
                 OverlayVisualTier.Emphasis, 950, Critical),
             [OverlayKind.PhoneTransfer] = Active(

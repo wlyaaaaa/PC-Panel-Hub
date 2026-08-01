@@ -29,6 +29,7 @@ internal sealed class PhoneNotificationSourceCoordinator : IDisposable
     private bool baselineCaptured;
     private bool accessRequested;
     private bool accessAllowed;
+    private string? lastInventoryState;
     private DateTimeOffset nextAccessAttemptAt = DateTimeOffset.MinValue;
     private int polling;
     private bool disposed;
@@ -82,6 +83,8 @@ internal sealed class PhoneNotificationSourceCoordinator : IDisposable
             var notifications = await listener.GetNotificationsAsync(
                 NotificationKinds.Toast);
             var currentIds = new HashSet<uint>();
+            var xiaomiCount = 0;
+            var phoneLinkCount = 0;
             foreach (var notification in notifications)
             {
                 if (!TryRead(
@@ -94,6 +97,15 @@ internal sealed class PhoneNotificationSourceCoordinator : IDisposable
                     continue;
                 }
 
+                if (source == OverlaySource.XiaomiHyperConnect)
+                {
+                    xiaomiCount++;
+                }
+                else if (source == OverlaySource.PhoneLink)
+                {
+                    phoneLinkCount++;
+                }
+
                 currentIds.Add(notification.Id);
                 var category =
                     PhoneNotificationClassifier.Classify(title, body);
@@ -102,7 +114,6 @@ internal sealed class PhoneNotificationSourceCoordinator : IDisposable
                     PhoneNotificationCategory.Dynamic;
                 var fingerprint =
                     PhoneNotificationClassifier.DedupKey(
-                        appName,
                         title,
                         body);
                 var known = fingerprints.TryGetValue(
@@ -151,6 +162,7 @@ internal sealed class PhoneNotificationSourceCoordinator : IDisposable
                 fingerprints[notification.Id] = fingerprint;
             }
 
+            LogInventory(xiaomiCount, phoneLinkCount);
             baselineCaptured = true;
             foreach (var id in fingerprints.Keys
                          .Where(id => !currentIds.Contains(id))
@@ -196,7 +208,7 @@ internal sealed class PhoneNotificationSourceCoordinator : IDisposable
         string title,
         string? body)
     {
-        _ = publisher.Publish(OverlayRequest.Timed(
+        var accepted = publisher.Publish(OverlayRequest.Timed(
             EventId(id),
             category == PhoneNotificationCategory.Dynamic
                 ? OverlayKind.PhoneDynamic
@@ -205,7 +217,6 @@ internal sealed class PhoneNotificationSourceCoordinator : IDisposable
             title,
             body,
             dedupKey: PhoneNotificationClassifier.DedupKey(
-                appName,
                 title,
                 body),
             visual: new OverlayVisualData(
@@ -214,6 +225,9 @@ internal sealed class PhoneNotificationSourceCoordinator : IDisposable
                     : "手机通知 / PHONE",
                 Subtitle: appName,
                 AccentHex: "#70F0B2")));
+        RuntimeLog.Write(
+            $"Phone notification event: source={SourceLabel(source)}, " +
+            $"result={(accepted ? "published" : "deduplicated")}.");
     }
 
     private void PublishPersistent(
@@ -225,7 +239,6 @@ internal sealed class PhoneNotificationSourceCoordinator : IDisposable
         string? body)
     {
         var dedupKey = PhoneNotificationClassifier.DedupKey(
-            appName,
             title,
             body);
         if (active.TryGetValue(id, out var previous) &&
@@ -303,7 +316,7 @@ internal sealed class PhoneNotificationSourceCoordinator : IDisposable
         appName =
             notification.AppInfo.DisplayInfo.DisplayName?.Trim() ??
             string.Empty;
-        source = SourceFor(appName);
+        source = PhoneNotificationClassifier.SourceForRelayApp(appName);
         if (source == OverlaySource.System)
         {
             title = string.Empty;
@@ -340,39 +353,27 @@ internal sealed class PhoneNotificationSourceCoordinator : IDisposable
         return true;
     }
 
-    private static OverlaySource SourceFor(string appName)
+    private void LogInventory(int xiaomiCount, int phoneLinkCount)
     {
-        if (appName.Contains(
-                "Phone Link",
-                StringComparison.OrdinalIgnoreCase) ||
-            appName.Contains(
-                "手机连接",
-                StringComparison.OrdinalIgnoreCase) ||
-            appName.Contains(
-                "Link to Windows",
-                StringComparison.OrdinalIgnoreCase))
+        var state = $"xiaomi={xiaomiCount}; phone-link={phoneLinkCount}";
+        if (string.Equals(
+                state,
+                lastInventoryState,
+                StringComparison.Ordinal))
         {
-            return OverlaySource.PhoneLink;
+            return;
         }
 
-        if (appName.Contains(
-                "Xiaomi",
-                StringComparison.OrdinalIgnoreCase) ||
-            appName.Contains(
-                "小米",
-                StringComparison.OrdinalIgnoreCase) ||
-            appName.Contains(
-                "妙享",
-                StringComparison.OrdinalIgnoreCase) ||
-            appName.Contains(
-                "MiSmartShare",
-                StringComparison.OrdinalIgnoreCase))
-        {
-            return OverlaySource.XiaomiHyperConnect;
-        }
-
-        return OverlaySource.System;
+        lastInventoryState = state;
+        RuntimeLog.Write($"Phone notification inventory: {state}.");
     }
+
+    private static string SourceLabel(OverlaySource source) => source switch
+    {
+        OverlaySource.XiaomiHyperConnect => "xiaomi",
+        OverlaySource.PhoneLink => "phone-link",
+        _ => "unknown",
+    };
 
     private static string EventId(uint id) =>
         $"phone-notification:{id}";

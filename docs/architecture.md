@@ -9,6 +9,9 @@ TURZX SideScreen is intentionally split into small local processes:
 2. `metrics_agent.py`
    - Serves `GET http://127.0.0.1:18765/snapshot`.
    - Collects hardware, network, disk, weather, FPS, foreground app, and health data.
+   - Reports CPU load from PDH `% Processor Time`, which is ordinary busy time and
+     matches the user-facing Task Manager interpretation. Frequency-scaled
+     `% Processor Utility` is intentionally not used as CPU load.
    - Adds `trust` scoring to every snapshot.
    - Writes data trust diagnostics to `out\data-trust.jsonl`.
 
@@ -25,6 +28,8 @@ TURZX SideScreen is intentionally split into small local processes:
 5. `StartSideScreenStack.ps1`
    - Starts/stops the full stack.
    - Used by both manual launch and the Windows startup task.
+   - Treats a real HTTP response as metrics health. A stale process-table entry
+     cannot suppress replacement; startup waits for port `18765` to release.
 
 ## Data Freshness
 

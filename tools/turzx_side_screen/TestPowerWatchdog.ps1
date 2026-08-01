@@ -51,6 +51,7 @@ foreach ($pattern in @(
     "restart request detected"
     "Get-TurzxShutdownEventDecision"
     "ShutdownStartupGraceSeconds"
+    "HeartbeatStartupGraceSeconds = 60"
 )) {
     if ($watchdogText -notmatch [regex]::Escape($pattern)) {
         throw "Watchdog missing expected pattern: $pattern"
@@ -229,10 +230,19 @@ foreach ($pattern in @("schtasks.exe", "TURZX SideScreen", "StartSideScreenWatch
 
 $streamStart = Join-Path $side "StartVideoStream.ps1"
 $streamStartText = Get-Content -Raw -LiteralPath $streamStart
-foreach ($pattern in @("Wait-MetricsEndpointReady", "metrics endpoint did not become ready")) {
+foreach ($pattern in @(
+    "Wait-MetricsEndpointReady",
+    "Wait-MetricsEndpointOrPortAvailable",
+    "Test-MetricsPortAvailable",
+    'if ($metricsState -eq "available")',
+    "metrics endpoint did not become ready"
+)) {
     if ($streamStartText -notmatch [regex]::Escape($pattern)) {
         throw "Stream startup must wait for a real metrics response before sending the first full frame; missing: $pattern"
     }
+}
+if ($streamStartText -match [regex]::Escape('$existingAgent')) {
+    throw "Stream startup must not confuse a stale process-table entry with a healthy metrics endpoint."
 }
 
 $stopText = Get-Content -Raw -LiteralPath $stop

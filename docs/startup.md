@@ -13,6 +13,11 @@ This is not a `SYSTEM` account task. It runs as the current interactive user wit
 
 The watchdog starts the render stack, listens for `Win32_PowerManagementEvent`, sends a black frame when Windows enters suspend, and restarts the stack after resume. It also listens for `Win32_ComputerShutdownEvent` and blanks the panel when Windows is shutting down or restarting. The black frame is a best-effort screen blanking fallback; the current public protocol path does not expose a real panel power-off command.
 
+Metrics startup is health-based rather than process-name-based. If an old Python
+process is still visible while its HTTP endpoint is already dead, the launcher
+waits for port `18765` to release and starts a replacement. The watchdog allows
+60 seconds for this startup recovery before evaluating stream heartbeats.
+
 Install:
 
 ```powershell

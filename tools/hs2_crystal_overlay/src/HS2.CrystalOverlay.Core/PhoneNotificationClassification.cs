@@ -42,15 +42,55 @@ public static partial class PhoneNotificationClassifier
     }
 
     public static string DedupKey(
-        string? app,
         string? title,
         string? body)
     {
         return string.Join(
             '\u001f',
-            new[] { app, title, body }
+            new[] { title, body }
                 .Select(value => Normalize(value))
                 .Where(value => value.Length > 0));
+    }
+
+    public static OverlaySource SourceForRelayApp(string? appName)
+    {
+        var value = appName ?? string.Empty;
+        if (value.Contains(
+                "Phone Link",
+                StringComparison.OrdinalIgnoreCase) ||
+            value.Contains(
+                "手机连接",
+                StringComparison.OrdinalIgnoreCase) ||
+            value.Contains(
+                "Link to Windows",
+                StringComparison.OrdinalIgnoreCase) ||
+            value.Contains(
+                "Cross Device Experience Host",
+                StringComparison.OrdinalIgnoreCase) ||
+            value.Contains(
+                "跨设备体验主机",
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return OverlaySource.PhoneLink;
+        }
+
+        if (value.Contains(
+                "Xiaomi",
+                StringComparison.OrdinalIgnoreCase) ||
+            value.Contains(
+                "小米",
+                StringComparison.OrdinalIgnoreCase) ||
+            value.Contains(
+                "妙享",
+                StringComparison.OrdinalIgnoreCase) ||
+            value.Contains(
+                "MiSmartShare",
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return OverlaySource.XiaomiHyperConnect;
+        }
+
+        return OverlaySource.System;
     }
 
     private static string Normalize(string? value) =>

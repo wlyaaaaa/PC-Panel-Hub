@@ -104,7 +104,7 @@ internal static class DemoSource
             OverlayKind.PhoneNotification,
             OverlaySource.XiaomiHyperConnect,
             "外卖已放入智能柜",
-            "取餐码 6821；前两条通知显示五秒后，本条才从队列进入画面。",
+            "取餐码 6821；前两条通知显示满 60 秒后，本条才从队列进入画面。",
             visual: new OverlayVisualData(
                 Eyebrow: "手机通知 / PHONE",
                 Subtitle: "小米妙享",

@@ -1530,25 +1530,25 @@ class WindowsDpcTimeSampler(WindowsPdhPercentSampler):
     COUNTER_PATH = r"\Processor Information(_Total)\% DPC Time"
 
 
-class WindowsProcessorUtilitySampler(WindowsPdhPercentSampler):
-    COUNTER_PATH = r"\Processor Information(_Total)\% Processor Utility"
+class WindowsProcessorTimeSampler(WindowsPdhPercentSampler):
+    COUNTER_PATH = r"\Processor Information(_Total)\% Processor Time"
 
 
 _DPC_TIME_SAMPLER = WindowsDpcTimeSampler()
-_CPU_UTILITY_SAMPLER = WindowsProcessorUtilitySampler()
+_CPU_ACTIVITY_SAMPLER = WindowsProcessorTimeSampler()
 
 
 def read_cpu_snapshot() -> dict[str, Any]:
     try:
-        utility_percent = _CPU_UTILITY_SAMPLER.sample()
+        activity_percent = _CPU_ACTIVITY_SAMPLER.sample()
     except Exception:
-        utility_percent = None
+        activity_percent = None
 
-    if utility_percent is not None:
-        _append_history(_cpu_history, utility_percent)
+    if activity_percent is not None:
+        _append_history(_cpu_history, activity_percent)
         return _cpu_snapshot(
-            source="pdh_processor_utility",
-            usage_percent=utility_percent,
+            source="pdh_processor_time",
+            usage_percent=activity_percent,
             clock_mhz=None,
         )
 

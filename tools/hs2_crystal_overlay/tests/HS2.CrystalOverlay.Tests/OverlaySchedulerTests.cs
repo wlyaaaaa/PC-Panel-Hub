@@ -36,7 +36,7 @@ public sealed class OverlaySchedulerTests
     }
 
     [Fact]
-    public void OrdinaryPhoneNotification_ExpiresAfterTenVisibleSeconds()
+    public void OrdinaryPhoneNotification_ExpiresAfterSixtyVisibleSeconds()
     {
         var scheduler = new OverlayScheduler();
         scheduler.Publish(OverlayRequest.Timed(
@@ -50,10 +50,10 @@ public sealed class OverlaySchedulerTests
             Now,
             maxVisibleNotifications: 1).NotificationCards);
         Assert.Single(scheduler.GetFrame(
-            Now.AddSeconds(9.9),
+            Now.AddSeconds(59.9),
             maxVisibleNotifications: 1).NotificationCards);
         Assert.Empty(scheduler.GetFrame(
-            Now.AddSeconds(10.1),
+            Now.AddSeconds(60.1),
             maxVisibleNotifications: 1).NotificationCards);
     }
 
@@ -79,16 +79,16 @@ public sealed class OverlaySchedulerTests
         Assert.Equal("通知 2", firstFrame.NotificationCards[1].Request.Title);
 
         var secondFrame = scheduler.GetFrame(
-            Now.AddSeconds(11.1),
+            Now.AddSeconds(61.1),
             maxVisibleNotifications: 2);
         Assert.Single(secondFrame.NotificationCards);
         Assert.Equal("通知 3", secondFrame.NotificationCards[0].Request.Title);
 
         Assert.Single(scheduler.GetFrame(
-            Now.AddSeconds(20.9),
+            Now.AddSeconds(120.9),
             maxVisibleNotifications: 2).NotificationCards);
         Assert.Empty(scheduler.GetFrame(
-            Now.AddSeconds(21.2),
+            Now.AddSeconds(121.2),
             maxVisibleNotifications: 2).NotificationCards);
     }
 
@@ -116,15 +116,15 @@ public sealed class OverlaySchedulerTests
             Now.AddSeconds(20),
             maxVisibleNotifications: 1).NotificationCards);
         Assert.Single(scheduler.GetFrame(
-            Now.AddSeconds(27.9),
+            Now.AddSeconds(77.9),
             maxVisibleNotifications: 1).NotificationCards);
         Assert.Empty(scheduler.GetFrame(
-            Now.AddSeconds(28.1),
+            Now.AddSeconds(78.1),
             maxVisibleNotifications: 1).NotificationCards);
     }
 
     [Fact]
-    public void NotificationQueuedForMoreThanOneMinute_IsDiscardedAsStale()
+    public void NotificationQueuedForMoreThanThreeMinutes_IsDiscardedAsStale()
     {
         var scheduler = new OverlayScheduler();
         scheduler.Publish(OverlayRequest.Timed(
@@ -136,11 +136,21 @@ public sealed class OverlaySchedulerTests
         Assert.Empty(scheduler.GetFrame(
             Now,
             maxVisibleNotifications: 0).NotificationCards);
-        Assert.Empty(scheduler.GetFrame(
-            Now.AddSeconds(59),
-            maxVisibleNotifications: 0).NotificationCards);
-        Assert.Empty(scheduler.GetFrame(
+        Assert.Single(scheduler.GetFrame(
             Now.AddSeconds(61),
+            maxVisibleNotifications: 1).NotificationCards);
+
+        var staleScheduler = new OverlayScheduler();
+        staleScheduler.Publish(OverlayRequest.Timed(
+            "stale-phone-toast",
+            OverlayKind.PhoneNotification,
+            OverlaySource.PhoneLink,
+            "另一条旧通知"), Now);
+        Assert.Empty(staleScheduler.GetFrame(
+            Now.AddSeconds(179),
+            maxVisibleNotifications: 0).NotificationCards);
+        Assert.Empty(staleScheduler.GetFrame(
+            Now.AddSeconds(181),
             maxVisibleNotifications: 1).NotificationCards);
     }
 
@@ -215,7 +225,7 @@ public sealed class OverlaySchedulerTests
             activeFrame.NotificationCards.Single().Request.Kind);
 
         Assert.Empty(scheduler.GetFrame(
-            Now.AddSeconds(10.1),
+            Now.AddSeconds(60.1),
             maxVisibleNotifications: 2).NotificationCards);
     }
 
@@ -241,10 +251,10 @@ public sealed class OverlaySchedulerTests
             "骑手距离 300 米"), Now.AddSeconds(4));
 
         Assert.Single(scheduler.GetFrame(
-            Now.AddSeconds(9.9),
+            Now.AddSeconds(59.9),
             maxVisibleNotifications: 1).NotificationCards);
         Assert.Empty(scheduler.GetFrame(
-            Now.AddSeconds(10.1),
+            Now.AddSeconds(60.1),
             maxVisibleNotifications: 1).NotificationCards);
     }
 
@@ -258,20 +268,94 @@ public sealed class OverlaySchedulerTests
             OverlaySource.XiaomiHyperConnect,
             "微信",
             "午饭见",
-            dedupKey: "wechat|午饭见"), Now);
+            dedupKey: PhoneNotificationClassifier.DedupKey(
+                "微信",
+                "午饭见")), Now);
         var duplicate = scheduler.Publish(OverlayRequest.Timed(
             "phone-link-toast",
             OverlayKind.PhoneNotification,
             OverlaySource.PhoneLink,
             "微信",
             "午饭见",
-            dedupKey: "wechat|午饭见"), Now.AddSeconds(3));
+            dedupKey: PhoneNotificationClassifier.DedupKey(
+                "微信",
+                "午饭见")), Now.AddSeconds(3));
 
         Assert.True(accepted);
         Assert.False(duplicate);
         Assert.Single(scheduler.GetFrame(
             Now.AddSeconds(3),
             maxVisibleNotifications: 2).NotificationCards);
+    }
+
+    [Fact]
+    public void CrossSourceDuplicate_IsStillSuppressedAfterRelayDelay()
+    {
+        var scheduler = new OverlayScheduler();
+        var dedupKey = PhoneNotificationClassifier.DedupKey(
+            "微信",
+            "同一条跨设备消息");
+        Assert.True(scheduler.Publish(OverlayRequest.Timed(
+            "xiaomi-delayed-toast",
+            OverlayKind.PhoneNotification,
+            OverlaySource.XiaomiHyperConnect,
+            "微信",
+            "同一条跨设备消息",
+            dedupKey: dedupKey), Now));
+
+        Assert.False(scheduler.Publish(OverlayRequest.Timed(
+            "phone-link-delayed-toast",
+            OverlayKind.PhoneNotification,
+            OverlaySource.PhoneLink,
+            "微信",
+            "同一条跨设备消息",
+            dedupKey: dedupKey), Now.AddSeconds(90)));
+    }
+
+    [Fact]
+    public void SameSourceIdenticalPayloads_RemainSeparateNotifications()
+    {
+        var scheduler = new OverlayScheduler();
+        var dedupKey = PhoneNotificationClassifier.DedupKey(
+            "微信",
+            "收到一条消息");
+        Assert.True(scheduler.Publish(OverlayRequest.Timed(
+            "xiaomi-toast-one",
+            OverlayKind.PhoneNotification,
+            OverlaySource.XiaomiHyperConnect,
+            "微信",
+            "收到一条消息",
+            dedupKey: dedupKey), Now));
+
+        Assert.True(scheduler.Publish(OverlayRequest.Timed(
+            "xiaomi-toast-two",
+            OverlayKind.PhoneNotification,
+            OverlaySource.XiaomiHyperConnect,
+            "微信",
+            "收到一条消息",
+            dedupKey: dedupKey), Now.AddSeconds(3)));
+        Assert.Equal(2, scheduler.GetFrame(
+            Now.AddSeconds(3),
+            maxVisibleNotifications: 2).NotificationCards.Count);
+    }
+
+    [Fact]
+    public void NonPhoneDuplicateFromSameSource_RetainsGenericDeduplication()
+    {
+        var scheduler = new OverlayScheduler();
+        Assert.True(scheduler.Publish(OverlayRequest.Timed(
+            "network-event-one",
+            OverlayKind.DeviceOrNetwork,
+            OverlaySource.System,
+            "网络已恢复",
+            dedupKey: "network-restored"), Now));
+
+        Assert.False(scheduler.Publish(OverlayRequest.Timed(
+            "network-event-two",
+            OverlayKind.DeviceOrNetwork,
+            OverlaySource.System,
+            "网络已恢复",
+            dedupKey: "network-restored"), Now.AddSeconds(3)));
     }
 
     [Fact]

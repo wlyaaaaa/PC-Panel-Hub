@@ -2,15 +2,18 @@ namespace HS2.CrystalOverlay.Core;
 
 public sealed class OverlayScheduler
 {
-    private static readonly TimeSpan DeduplicationWindow = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan GenericDeduplicationWindow =
+        TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan CrossSourceDeduplicationWindow =
+        TimeSpan.FromMinutes(3);
     private static readonly TimeSpan MaximumQueuedNotificationAge =
-        TimeSpan.FromMinutes(1);
+        TimeSpan.FromMinutes(3);
 
     private readonly Dictionary<string, OverlayItem> items =
         new(StringComparer.Ordinal);
     private readonly Dictionary<string, NotificationTimerState>
         notificationTimers = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, DateTimeOffset> recentDedupKeys =
+    private readonly Dictionary<string, DeduplicationState> recentDedupKeys =
         new(StringComparer.OrdinalIgnoreCase);
 
     public bool Publish(OverlayRequest request, DateTimeOffset now)
@@ -28,12 +31,7 @@ public sealed class OverlayScheduler
         var normalizedDedupKey = NormalizeDedupKey(request.DedupKey);
         if (normalizedDedupKey is not null &&
             recentDedupKeys.TryGetValue(normalizedDedupKey, out var previous) &&
-            now - previous < DeduplicationWindow &&
-            (!items.TryGetValue(request.EventId, out var sameItem) ||
-             !string.Equals(
-                 NormalizeDedupKey(sameItem.Request.DedupKey),
-                 normalizedDedupKey,
-                 StringComparison.OrdinalIgnoreCase)))
+            IsDuplicate(request, previous, now))
         {
             return false;
         }
@@ -88,7 +86,10 @@ public sealed class OverlayScheduler
 
         if (normalizedDedupKey is not null)
         {
-            recentDedupKeys[normalizedDedupKey] = now;
+            recentDedupKeys[normalizedDedupKey] = new(
+                now,
+                request.Source,
+                request.EventId);
         }
 
         return true;
@@ -238,7 +239,9 @@ public sealed class OverlayScheduler
         }
 
         foreach (var key in recentDedupKeys
-                     .Where(pair => now - pair.Value >= DeduplicationWindow)
+                     .Where(pair =>
+                         now - pair.Value.ObservedAt >=
+                         CrossSourceDeduplicationWindow)
                      .Select(pair => pair.Key)
                      .ToArray())
         {
@@ -257,8 +260,33 @@ public sealed class OverlayScheduler
             ' ',
             value.Trim().Split(
                 (char[]?)null,
-                StringSplitOptions.RemoveEmptyEntries));
+             StringSplitOptions.RemoveEmptyEntries));
     }
+
+    private static bool IsDuplicate(
+        OverlayRequest request,
+        DeduplicationState previous,
+        DateTimeOffset now)
+    {
+        var age = now - previous.ObservedAt;
+        var bothPhoneRelaySources =
+            IsPhoneRelaySource(previous.Source) &&
+            IsPhoneRelaySource(request.Source);
+        if (bothPhoneRelaySources)
+        {
+            return previous.Source != request.Source &&
+                   age < CrossSourceDeduplicationWindow;
+        }
+
+        return !string.Equals(
+                   previous.EventId,
+                   request.EventId,
+                   StringComparison.Ordinal) &&
+               age < GenericDeduplicationWindow;
+    }
+
+    private static bool IsPhoneRelaySource(OverlaySource source) =>
+        source is OverlaySource.XiaomiHyperConnect or OverlaySource.PhoneLink;
 
     private sealed class NotificationTimerState(
         TimeSpan? remaining,
@@ -272,4 +300,9 @@ public sealed class OverlayScheduler
 
         internal bool HasBeenVisible { get; set; }
     }
+
+    private sealed record DeduplicationState(
+        DateTimeOffset ObservedAt,
+        OverlaySource Source,
+        string EventId);
 }

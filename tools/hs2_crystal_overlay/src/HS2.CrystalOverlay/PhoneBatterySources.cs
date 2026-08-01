@@ -86,7 +86,10 @@ internal sealed partial class XiaomiHyperConnectBatteryProbe :
             percentage.Value,
             charging,
             true,
-            now);
+            now,
+            currentPercentage is not null
+                ? "xiaomi-ui"
+                : "xiaomi-log");
     }
 
     private static int? TryReadConnectedPercentage(int processId)
@@ -202,16 +205,35 @@ internal sealed partial class XiaomiHyperConnectBatteryProbe :
 internal sealed partial class PhoneLinkBatteryProbe :
     IPhoneBatteryProbe
 {
+    private const int MaximumCompanionBytes = 2 * 1024 * 1024;
+    private static readonly TimeSpan CompanionMaximumAge =
+        TimeSpan.FromMinutes(5);
+
+    private readonly string companionPath = Path.Combine(
+        Environment.GetFolderPath(
+            Environment.SpecialFolder.LocalApplicationData),
+        "Packages",
+        "Microsoft.YourPhone_8wekyb3d8bbwe",
+        "LocalState",
+        "StartMenu",
+        "StartMenuCompanion.json");
+
     public Task<PhoneBatteryReading?> ReadAsync(
         DateTimeOffset now,
         CancellationToken cancellationToken) =>
         Task.Run(() => Read(now, cancellationToken), cancellationToken);
 
-    private static PhoneBatteryReading? Read(
+    private PhoneBatteryReading? Read(
         DateTimeOffset now,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        var companion = TryReadCompanion(now);
+        if (companion is not null)
+        {
+            return companion;
+        }
+
         using var process = Process
             .GetProcessesByName("PhoneExperienceHost")
             .OrderByDescending(candidate => candidate.StartTime)
@@ -260,7 +282,8 @@ internal sealed partial class PhoneLinkBatteryProbe :
                         percentage.Value,
                         charging ? true : null,
                         true,
-                        now);
+                        now,
+                        "phone-link-ui");
                 }
             }
         }
@@ -272,6 +295,62 @@ internal sealed partial class PhoneLinkBatteryProbe :
         }
 
         return null;
+    }
+
+    private PhoneBatteryReading? TryReadCompanion(DateTimeOffset now)
+    {
+        try
+        {
+            var info = new FileInfo(companionPath);
+            if (!info.Exists ||
+                info.Length <= 0 ||
+                info.Length > MaximumCompanionBytes)
+            {
+                return null;
+            }
+
+            var observedAt = new DateTimeOffset(
+                info.LastWriteTimeUtc,
+                TimeSpan.Zero);
+            var age = now.ToUniversalTime() - observedAt;
+            if (age < TimeSpan.FromMinutes(-1) ||
+                age > CompanionMaximumAge)
+            {
+                return null;
+            }
+
+            using var stream = new FileStream(
+                companionPath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete);
+            using var reader = new StreamReader(
+                stream,
+                Encoding.UTF8,
+                detectEncodingFromByteOrderMarks: true);
+            var snapshot = PhoneLinkCompanionParser.Parse(
+                reader.ReadToEnd());
+            if (snapshot is null || !snapshot.IsConnected)
+            {
+                return null;
+            }
+
+            return new PhoneBatteryReading(
+                PhoneBatteryProvider.PhoneLink,
+                snapshot.Percentage,
+                snapshot.IsCharging,
+                true,
+                now,
+                "phone-link-companion");
+        }
+        catch (IOException)
+        {
+            return null;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return null;
+        }
     }
 
     [GeneratedRegex(@"\b(?<value>\d{1,3})%\b")]
@@ -294,6 +373,7 @@ internal sealed class PhoneBatterySourceCoordinator : IDisposable
     private readonly CancellationTokenSource cancellation = new();
     private readonly Timer timer;
     private PhoneBatteryReading? published;
+    private string? lastSourceState;
     private bool baselineCaptured;
     private int polling;
     private bool disposed;
@@ -332,18 +412,29 @@ internal sealed class PhoneBatterySourceCoordinator : IDisposable
         {
             var now = DateTimeOffset.Now;
             var token = cancellation.Token;
-            var xiaomiReading = await xiaomi.ReadAsync(now, token);
-            PhoneBatteryReading? phoneLinkReading = null;
-            if (xiaomiReading is null)
-            {
-                phoneLinkReading = await phoneLink.ReadAsync(now, token);
-            }
+            var xiaomiTask = ReadSourceAsync(
+                xiaomi,
+                "xiaomi",
+                now,
+                token);
+            var phoneLinkTask = ReadSourceAsync(
+                phoneLink,
+                "phone-link",
+                now,
+                token);
+            await Task.WhenAll(xiaomiTask, phoneLinkTask);
+            var xiaomiReading = await xiaomiTask;
+            var phoneLinkReading = await phoneLinkTask;
 
             var selected = PhoneBatteryArbitration.Select(
                 xiaomiReading,
                 phoneLinkReading,
                 now,
                 MaximumReadingAge);
+            LogSourceState(
+                xiaomiReading,
+                phoneLinkReading,
+                selected);
             PublishSelection(selected);
         }
         catch (OperationCanceledException)
@@ -360,6 +451,57 @@ internal sealed class PhoneBatterySourceCoordinator : IDisposable
             Interlocked.Exchange(ref polling, 0);
         }
     }
+
+    private static async Task<PhoneBatteryReading?> ReadSourceAsync(
+        IPhoneBatteryProbe probe,
+        string sourceName,
+        DateTimeOffset now,
+        CancellationToken token)
+    {
+        try
+        {
+            return await probe.ReadAsync(now, token);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            RuntimeLog.Write(
+                $"Phone battery source failed: " +
+                $"source={sourceName}, error={exception.GetType().Name}.");
+            return null;
+        }
+    }
+
+    private void LogSourceState(
+        PhoneBatteryReading? xiaomiReading,
+        PhoneBatteryReading? phoneLinkReading,
+        PhoneBatteryReading? selected)
+    {
+        var state =
+            $"xiaomi={DescribeReading(xiaomiReading)}; " +
+            $"phone-link={DescribeReading(phoneLinkReading)}; " +
+            $"selected={selected?.Provider.ToString() ?? "none"}";
+        if (string.Equals(
+                state,
+                lastSourceState,
+                StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        lastSourceState = state;
+        RuntimeLog.Write($"Phone battery sources: {state}.");
+    }
+
+    private static string DescribeReading(PhoneBatteryReading? reading) =>
+        reading is null
+            ? "none"
+            : $"{reading.Percentage}%/" +
+              $"{reading.Evidence ?? "unknown"}/" +
+              $"charging={reading.IsCharging?.ToString() ?? "unknown"}";
 
     private void PublishSelection(PhoneBatteryReading? selected)
     {
