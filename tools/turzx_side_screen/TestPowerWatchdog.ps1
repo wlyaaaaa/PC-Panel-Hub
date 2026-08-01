@@ -12,16 +12,119 @@ $watchdogLauncher = Join-Path $side "StartSideScreenWatchdog-Hidden.vbs"
 $stack = Join-Path $side "StartSideScreenStack.ps1"
 $stop = Join-Path $side "StopSideScreenStack.ps1"
 $blank = Join-Path $side "SendBlankFrame.ps1"
+$displayPowerPolicy = Join-Path $side "SideScreenDisplayPowerPolicy.ps1"
+$brightness = Join-Path $side "SetTurzxBrightness.ps1"
+$powerProgram = Join-Path $side "TURZX.SideScreen.Power.cs"
 $resume = Join-Path $side "RestartSideScreenAfterResume.ps1"
 $resumeLauncher = Join-Path $side "RestartSideScreenAfterResume-Hidden.vbs"
 $installer = Join-Path $Root "scripts\install-startup-admin.ps1"
 $installerCmd = Join-Path $Root "scripts\install-startup-admin.cmd"
 $start = Join-Path $Root "scripts\start.ps1"
 
-foreach ($path in @($watchdog, $shutdownPolicy, $watchdogLauncher, $stop, $blank)) {
+foreach ($path in @($watchdog, $shutdownPolicy, $displayPowerPolicy, $brightness, $powerProgram, $watchdogLauncher, $stop, $blank)) {
     if (!(Test-Path -LiteralPath $path)) {
         throw "Missing power management script: $path"
     }
+}
+
+. $displayPowerPolicy
+
+function Assert-HS2Plan {
+    param(
+        [string]$State,
+        [bool]$OfflineClock,
+        [bool]$ScreenOn
+    )
+
+    $plan = @(Get-HS2PowerStatePlan -State $State)
+    if ($plan.Count -ne 2) {
+        throw "HS2 $State plan must contain exactly two ordered operations."
+    }
+    if ($plan[0].Type -ne "SetOfflineModeClock" -or [bool]$plan[0].Value -ne $OfflineClock) {
+        throw "HS2 $State plan must set offline clock first to $OfflineClock."
+    }
+    if ($plan[0].ReadType -ne "GetOfflineModeClock") {
+        throw "HS2 $State plan must read the offline clock state before writing."
+    }
+    if ($plan[1].Type -ne "SetIsScreenOn" -or [bool]$plan[1].Value -ne $ScreenOn) {
+        throw "HS2 $State plan must set screen state second to $ScreenOn."
+    }
+    if ($plan[1].ReadType -ne "GetIsScreenOn") {
+        throw "HS2 $State plan must read the screen state before writing."
+    }
+}
+
+Assert-HS2Plan -State Active -OfflineClock $true -ScreenOn $true
+Assert-HS2Plan -State Sleep -OfflineClock $true -ScreenOn $false
+Assert-HS2Plan -State Shutdown -OfflineClock $false -ScreenOn $false
+
+$script:mockHS2State = @{
+    GetOfflineModeClock = $true
+    GetIsScreenOn = $true
+}
+$script:mockHS2Secondary = $true
+$script:mockHS2Writes = New-Object "System.Collections.Generic.List[string]"
+function Get-HS2Controller {
+    $type = if ($script:mockHS2Secondary) { 17104897 } else { 17104896 }
+    [pscustomobject]@{
+        DevicePath = "mock-hs2"
+        ControllerType = $type
+        IsSecondaryScreen = $script:mockHS2Secondary
+    }
+}
+function Invoke-HS2DeviceRequest {
+    param(
+        [string]$DevicePath,
+        [string]$Type,
+        [object]$Body,
+        [int]$ServicePort,
+        [int]$TimeoutSec
+    )
+
+    if ($Type -like "Get*") {
+        return [pscustomobject]@{ Success = $true; Data = [bool]$script:mockHS2State[$Type] }
+    }
+
+    [void]$script:mockHS2Writes.Add(("{0}={1}" -f $Type, [bool]$Body))
+    if ($Type -eq "SetOfflineModeClock") {
+        $script:mockHS2State.GetOfflineModeClock = [bool]$Body
+    }
+    elseif ($Type -eq "SetIsScreenOn") {
+        $script:mockHS2State.GetIsScreenOn = [bool]$Body
+    }
+    elseif ($Type -eq "SetSecondaryScreen") {
+        $script:mockHS2Secondary = [bool]$Body
+    }
+    return [pscustomobject]@{ Success = $true }
+}
+
+Invoke-HS2PowerState -State Active | Out-Null
+if ($script:mockHS2Writes.Count -ne 0) {
+    throw "HS2 Active must not rewrite values that already match the requested state."
+}
+
+$transitionStarted = Start-HS2MonitorModeTransition
+if (-not $transitionStarted) {
+    throw "HS2 Sleep must initiate the monitor-mode transition from Windows display mode."
+}
+Invoke-HS2PowerState -State Sleep -MonitorModeAlreadyRequested -SkipVerification | Out-Null
+if (($script:mockHS2Writes -join ",") -ne "SetSecondaryScreen=False,SetIsScreenOn=False") {
+    throw "HS2 Sleep must leave Windows display mode before turning the panel off."
+}
+
+Invoke-HS2PowerState -State Sleep -SkipVerification | Out-Null
+if ($script:mockHS2Writes.Count -ne 2) {
+    throw "Repeating HS2 Sleep must be idempotent."
+}
+
+Invoke-HS2PowerState -State Shutdown -SkipVerification | Out-Null
+if (($script:mockHS2Writes -join ",") -ne "SetSecondaryScreen=False,SetIsScreenOn=False,SetOfflineModeClock=False") {
+    throw "HS2 Shutdown must disable the offline clock while preserving an already-off screen."
+}
+
+Invoke-HS2PowerState -State Active | Out-Null
+if (($script:mockHS2Writes -join ",") -ne "SetSecondaryScreen=False,SetIsScreenOn=False,SetOfflineModeClock=False,SetOfflineModeClock=True,SetIsScreenOn=True,SetSecondaryScreen=True") {
+    throw "HS2 Active must restore screen state before returning the device to Windows display mode."
 }
 
 $watchdogText = Get-Content -Raw -LiteralPath $watchdog
@@ -36,6 +139,14 @@ foreach ($pattern in @(
     "EventType = 18",
     "MaxConsecutiveFailures",
     "SendBlankFrame.ps1",
+    "SideScreenDisplayPowerPolicy.ps1",
+    "SetTurzxBrightness.ps1",
+    "ActiveBrightness = 170",
+    "Enter-SleepDisplayState",
+    "Enter-ShutdownDisplayState",
+    "Set-ActiveDisplayState",
+    "fallback=black-frame",
+    "display power policy=hs2-transition-first/turzx-brightness-123",
     "StopSideScreenStack.ps1",
     "StartSideScreenStack.ps1",
     "-Worker",
@@ -59,10 +170,10 @@ foreach ($pattern in @(
 }
 
 foreach ($pattern in @(
-    'Send-Blank -Reason "shutdown"'
+    'Enter-ShutdownDisplayState'
 )) {
     if ($watchdogText -notmatch [regex]::Escape($pattern)) {
-        throw "Watchdog must blank the panel during confirmed shutdown; missing: $pattern"
+        throw "Watchdog must enter the confirmed shutdown display state; missing: $pattern"
     }
 }
 
@@ -133,17 +244,38 @@ function Assert-OrderAfter {
 
 Assert-OrderAfter `
     -Text $watchdogText `
-    -Anchor 'if ($eventType -eq 4)' `
-    -First 'Send-Blank -Reason "suspend"' `
+    -Anchor 'function Enter-SleepDisplayState' `
+    -First 'Start-HS2MonitorModeTransition' `
     -Second 'Stop-Stack -Reason "suspend"' `
-    -Message "Suspend handling must send the blank frame before stopping the stack."
+    -Message "Suspend handling must request HS2 monitor mode before stopping the TURZX stack."
 
 Assert-OrderAfter `
     -Text $watchdogText `
-    -Anchor 'if ($shutdownDecision.Action -eq "Shutdown")' `
-    -First 'Send-Blank -Reason "shutdown"' `
+    -Anchor 'function Enter-ShutdownDisplayState' `
+    -First 'Start-HS2MonitorModeTransition' `
     -Second 'Stop-Stack -Reason "shutdown"' `
-    -Message "Shutdown/sleep fallback handling must send the blank frame before stopping the stack."
+    -Message "Shutdown handling must request HS2 monitor mode before stopping the TURZX stack."
+
+Assert-OrderAfter `
+    -Text $watchdogText `
+    -Anchor 'function Enter-SleepDisplayState' `
+    -First 'Stop-Stack -Reason "suspend"' `
+    -Second 'Set-TurzxPanelBrightness -Brightness 0' `
+    -Message "Suspend handling must release COM before sending the verified TURZX brightness-off command."
+
+Assert-OrderAfter `
+    -Text $watchdogText `
+    -Anchor 'function Enter-SleepDisplayState' `
+    -First 'Set-TurzxPanelBrightness -Brightness 0' `
+    -Second 'Invoke-HS2PowerState -State Sleep' `
+    -Message "Suspend handling must turn TURZX off before waiting for the slow HS2 mode re-enumeration."
+
+Assert-OrderAfter `
+    -Text $watchdogText `
+    -Anchor 'function Start-Stack' `
+    -First 'Stop-Stack -Reason ("pre-start/{0}" -f $Reason)' `
+    -Second 'Set-TurzxPanelBrightness -Brightness $ActiveBrightness' `
+    -Message "Stack startup must restore the configured TURZX brightness after releasing stale COM owners."
 
 Assert-OrderAfter `
     -Text $watchdogText `

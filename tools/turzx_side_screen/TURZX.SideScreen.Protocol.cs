@@ -28,6 +28,7 @@ namespace TURZX.SideScreen
         public const byte FullFrameCommand = 200;
         public const byte AlternateFullFrameCommand = 202;
         public const byte DifferentialFrameCommand = 204;
+        public const byte BrightnessCommand = 123;
 
         private const byte CommandMagicHigh = 0xEF;
         private const byte CommandMagicLow = 0x69;
@@ -134,6 +135,27 @@ namespace TURZX.SideScreen
             }
 
             return packet;
+        }
+
+        public static byte[] BuildBrightnessPacket(byte brightness)
+        {
+            return BuildCommandPacket(
+                BrightnessCommand,
+                1,
+                new byte[] { brightness },
+                0);
+        }
+
+        public static void WriteBrightness(Stream stream, byte brightness)
+        {
+            if (stream == null)
+            {
+                throw new ArgumentNullException("stream");
+            }
+
+            byte[] packet = BuildBrightnessPacket(brightness);
+            stream.Write(packet, 0, packet.Length);
+            stream.Flush();
         }
 
         public static void WriteFullFrame(Stream stream, byte[] frame, bool alternateFrame)
@@ -246,6 +268,14 @@ namespace TURZX.SideScreen
             using (Stream stream = OpenRjcpSerialStream(comPort, rjcpDllPath))
             {
                 WriteFullFrame(stream, frame, alternateFrame, DeviceInterChunkDelayMilliseconds);
+            }
+        }
+
+        public static void SendBrightness(string comPort, byte brightness, string rjcpDllPath)
+        {
+            using (Stream stream = OpenRjcpSerialStream(comPort, rjcpDllPath))
+            {
+                WriteBrightness(stream, brightness);
             }
         }
 

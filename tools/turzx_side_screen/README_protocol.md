@@ -17,6 +17,11 @@ Verified from `tools\turzx_protocol_probe\TurzxProtocolProbe.cs` and local black
     - `[10..]`: optional command payload, max 240 bytes.
   - Then write raw frame bytes in chunks of up to `24900` bytes.
 - Alternate full-frame command `202` exists in the vendor driver path, but v1 defaults to command `200`.
+- Panel brightness uses the vendor command `123`:
+  - declared payload length: `1`;
+  - extra byte: `0`;
+  - payload byte `[10]`: brightness `0..255`;
+  - brightness `0` turns the panel/backlight off, and the watchdog restores the configured active value before streaming resumes.
 - `RJCP.SerialPortStream` is required for COM open/write. The ordinary `.NET SerialPort` probe path timed out.
 
 Not implemented in v1:
@@ -30,3 +35,12 @@ powershell -ExecutionPolicy Bypass -File tools\turzx_side_screen\TestProtocolEnc
 ```
 
 The test compiles and runs pure logic only; it does not open `COM7` or any serial port.
+
+Build and inspect a brightness packet without opening the serial port:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\turzx_side_screen\SetTurzxBrightness.ps1 -Brightness 0 -DryRun
+```
+
+The live form opens the configured COM port, so the frame stream must be stopped
+first. The watchdog performs that ownership handoff automatically.

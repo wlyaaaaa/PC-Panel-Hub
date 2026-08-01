@@ -16,6 +16,8 @@ param(
     [int]$ShutdownStartupGraceSeconds = 180,
     [int]$MaxConsecutiveHeartbeatFailures = 3,
     [int]$MaxConsecutiveFailures = 3,
+    [ValidateRange(0, 255)][int]$ActiveBrightness = 170,
+    [ValidateRange(1, 65535)][int]$LConnectServicePort = 11021,
     [switch]$NoPowerEvents
 )
 
@@ -39,13 +41,16 @@ $restartFlag = Join-Path $outDir "restart-on-start.flag"
 $stackScript = Join-Path $scriptDir "StartSideScreenStack.ps1"
 $stopScript = Join-Path $scriptDir "StopSideScreenStack.ps1"
 $blankScript = Join-Path $scriptDir "SendBlankFrame.ps1"
+$brightnessScript = Join-Path $scriptDir "SetTurzxBrightness.ps1"
 $shutdownPolicy = Join-Path $scriptDir "SideScreenWatchdogPolicy.ps1"
+$displayPowerPolicy = Join-Path $scriptDir "SideScreenDisplayPowerPolicy.ps1"
 $powerSourceId = "TURZXSideScreenPower"
 $shutdownSourceId = "TURZXSideScreenShutdown"
 $watchdogStartedUtc = [DateTime]::UtcNow
 
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 . $shutdownPolicy
+. $displayPowerPolicy
 
 function Write-BoundedLogLine {
     param(
@@ -99,9 +104,104 @@ function Stop-Stack {
     powershell -NoProfile -ExecutionPolicy Bypass -File $stopScript -Root $Root -Quiet | Out-Null
 }
 
+function Set-TurzxPanelBrightness {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(0, 255)]
+        [int]$Brightness
+    )
+
+    try {
+        $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $brightnessScript `
+            -Root $Root `
+            -Port $Port `
+            -Brightness $Brightness 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw ($output -join " ")
+        }
+        Write-WatchdogLog ("TURZX brightness applied brightness={0}" -f $Brightness)
+        return $true
+    }
+    catch {
+        Write-WatchdogLog ("TURZX brightness failed brightness={0}: {1}" -f $Brightness, $_.Exception.Message)
+        return $false
+    }
+}
+
+function Set-ActiveDisplayState {
+    param([string]$Reason)
+
+    try {
+        Invoke-HS2PowerState -State Active -ServicePort $LConnectServicePort | Out-Null
+        Write-WatchdogLog ("HS2 power state=Active reason={0} verified=true" -f $Reason)
+    }
+    catch {
+        Write-WatchdogLog ("HS2 power state=Active reason={0} failed: {1}" -f $Reason, $_.Exception.Message)
+    }
+}
+
+function Enter-SleepDisplayState {
+    $hs2TransitionStarted = $false
+    try {
+        $hs2TransitionStarted = Start-HS2MonitorModeTransition -ServicePort $LConnectServicePort
+        Write-WatchdogLog ("HS2 monitor-mode transition requested state=Sleep started={0}" -f $hs2TransitionStarted)
+    }
+    catch {
+        Write-WatchdogLog ("HS2 monitor-mode request state=Sleep failed: {0}" -f $_.Exception.Message)
+    }
+
+    Stop-Stack -Reason "suspend"
+    if (-not (Set-TurzxPanelBrightness -Brightness 0)) {
+        Write-WatchdogLog "TURZX power-off reason=suspend fallback=black-frame"
+        Send-Blank -Reason "power-off-fallback/suspend" -TimeoutMs $QuickBlankTimeoutMs
+    }
+
+    try {
+        Invoke-HS2PowerState -State Sleep `
+            -ServicePort $LConnectServicePort `
+            -MonitorModeAlreadyRequested:$hs2TransitionStarted `
+            -SkipVerification | Out-Null
+        Write-WatchdogLog "HS2 power state=Sleep offline-clock=true screen-on=false"
+    }
+    catch {
+        Write-WatchdogLog ("HS2 power state=Sleep failed: {0}" -f $_.Exception.Message)
+    }
+}
+
+function Enter-ShutdownDisplayState {
+    $hs2TransitionStarted = $false
+    try {
+        $hs2TransitionStarted = Start-HS2MonitorModeTransition -ServicePort $LConnectServicePort
+        Write-WatchdogLog ("HS2 monitor-mode transition requested state=Shutdown started={0}" -f $hs2TransitionStarted)
+    }
+    catch {
+        Write-WatchdogLog ("HS2 monitor-mode request state=Shutdown failed: {0}" -f $_.Exception.Message)
+    }
+
+    Stop-Stack -Reason "shutdown"
+    if (-not (Set-TurzxPanelBrightness -Brightness 0)) {
+        Write-WatchdogLog "TURZX power-off reason=shutdown fallback=black-frame"
+        Send-Blank -Reason "power-off-fallback/shutdown" -TimeoutMs $QuickBlankTimeoutMs
+    }
+
+    try {
+        Invoke-HS2PowerState -State Shutdown `
+            -ServicePort $LConnectServicePort `
+            -MonitorModeAlreadyRequested:$hs2TransitionStarted `
+            -SkipVerification | Out-Null
+        Write-WatchdogLog "HS2 power state=Shutdown offline-clock=false screen-on=false"
+    }
+    catch {
+        Write-WatchdogLog ("HS2 power state=Shutdown failed: {0}" -f $_.Exception.Message)
+    }
+}
+
 function Start-Stack {
     param([string]$Reason)
     Stop-Stack -Reason ("pre-start/{0}" -f $Reason)
+    if (-not (Set-TurzxPanelBrightness -Brightness $ActiveBrightness)) {
+        Write-WatchdogLog ("TURZX brightness restore failed reason={0}; starting stream for recovery" -f $Reason)
+    }
     Remove-Item -LiteralPath $restartFlag -Force -ErrorAction SilentlyContinue
     foreach ($candidatePath in $heartbeatPaths) {
         Remove-Item -LiteralPath $candidatePath -Force -ErrorAction SilentlyContinue
@@ -253,12 +353,15 @@ if (-not $NoPowerEvents) {
     $shutdownSubscription = Register-WmiEvent -Query "SELECT * FROM Win32_ComputerShutdownEvent" -SourceIdentifier $shutdownSourceId
     Write-WatchdogLog "registered Win32_ComputerShutdownEvent watcher for shutdown/restart blanking"
 }
+Write-WatchdogLog ("display power policy=hs2-transition-first/turzx-brightness-123 activeBrightness={0} lconnectPort={1}" -f `
+    $ActiveBrightness, $LConnectServicePort)
 
 $child = $null
 $consecutiveFailures = 0
 $heartbeatFailures = 0
 $childStartedUtc = [DateTime]::UtcNow
 try {
+    Set-ActiveDisplayState -Reason "watchdog-start"
     $child = Start-Stack -Reason "watchdog-start"
     $childStartedUtc = [DateTime]::UtcNow
     while ($true) {
@@ -276,8 +379,7 @@ try {
                     $eventType = [int]$event.SourceEventArgs.NewEvent.EventType
                     Write-WatchdogLog ("power event type={0}" -f $eventType)
                     if ($eventType -eq 4) {
-                        Send-Blank -Reason "suspend" -TimeoutMs $QuickBlankTimeoutMs
-                        Stop-Stack -Reason "suspend"
+                        Enter-SleepDisplayState
                         $child = $null
                         $heartbeatFailures = 0
                     }
@@ -286,6 +388,7 @@ try {
                         Remove-Item -LiteralPath $pausedPath -Force -ErrorAction SilentlyContinue
                         Stop-Stack -Reason "resume"
                         Start-Sleep -Seconds $ResumeDelaySeconds
+                        Set-ActiveDisplayState -Reason ("resume-event-{0}" -f $eventType)
                         $child = Start-Stack -Reason ("resume-event-{0}" -f $eventType)
                         $childStartedUtc = [DateTime]::UtcNow
                         $heartbeatFailures = 0
@@ -302,8 +405,7 @@ try {
                     Write-WatchdogLog ("computer shutdown event type={0} action={1} reason={2} watchdogAgeSeconds={3:N1}" -f `
                         $shutdownDecision.Type, $shutdownDecision.Action, $shutdownDecision.Reason, $shutdownDecision.AgeSeconds)
                     if ($shutdownDecision.Action -eq "Shutdown") {
-                        Send-Blank -Reason "shutdown" -TimeoutMs $QuickBlankTimeoutMs
-                        Stop-Stack -Reason "shutdown"
+                        Enter-ShutdownDisplayState
                         break
                     }
                 }

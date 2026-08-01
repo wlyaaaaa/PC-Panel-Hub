@@ -8,6 +8,7 @@ This project replaces the stock TURZX monitoring page with a custom local stack:
 - Python metrics agents for CPU/GPU thermals, live average core clocks and voltages, FPS, weather, physical-disk I/O, network quality, foreground app, and process ranking.
 - C# / GDI+ renderer for a dense 480x1920 dashboard.
 - COM7 differential frame streaming for low-interference 1s updates, with stale-data fallback so slow metrics reads do not stall the clock.
+- Coordinated sleep/shutdown handling: HS2 uses its native offline clock during sleep, while the TURZX panel uses the verified hardware brightness-off command; both panels turn off for shutdown/restart.
 - Bounded JSONL diagnostics and explicit source/error states.
 - Windows Scheduled Task startup support with highest privilege.
 - A separate click-through HS2 crystal overlay for glance, media lyrics,

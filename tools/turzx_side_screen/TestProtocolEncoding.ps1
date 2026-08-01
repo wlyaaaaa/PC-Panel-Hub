@@ -49,6 +49,7 @@ internal static class Program
     {
         TestConstants();
         TestCommandPacketHeader();
+        TestBrightnessCommandPacket();
         TestCommandPacketPayloadValidation();
         TestRawRgbEncoding();
         TestBitmapEncoding();
@@ -67,6 +68,30 @@ internal static class Program
         Equal("full frame bytes", 3686400, TurzxSideScreenProtocol.FullFrameByteCount);
         Equal("command packet bytes", 250, TurzxSideScreenProtocol.CommandPacketByteCount);
         Equal("raw chunk bytes", 24900, TurzxSideScreenProtocol.RawFrameChunkByteCount);
+        Equal("brightness command", 123, TurzxSideScreenProtocol.BrightnessCommand);
+    }
+
+    private static void TestBrightnessCommandPacket()
+    {
+        byte[] packet = TurzxSideScreenProtocol.BuildBrightnessPacket(170);
+
+        Equal("brightness packet length", 250, packet.Length);
+        Equal("brightness packet command", 123, packet[0]);
+        Equal("brightness packet magic high", 0xEF, packet[1]);
+        Equal("brightness packet magic low", 0x69, packet[2]);
+        Equal("brightness packet declared length", 1, packet[6]);
+        Equal("brightness packet extra", 0, packet[7]);
+        Equal("brightness packet payload", 170, packet[10]);
+        Equal("brightness packet trailing zero", 0, packet[11]);
+
+        using (MemoryStream stream = new MemoryStream())
+        {
+            TurzxSideScreenProtocol.WriteBrightness(stream, 0);
+            byte[] written = stream.ToArray();
+            Equal("brightness write length", 250, written.Length);
+            Equal("brightness off command", 123, written[0]);
+            Equal("brightness off payload", 0, written[10]);
+        }
     }
 
     private static void TestCommandPacketHeader()

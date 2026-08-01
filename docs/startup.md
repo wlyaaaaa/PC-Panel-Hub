@@ -11,7 +11,31 @@ The recommended startup path is a Windows Scheduled Task:
 
 This is not a `SYSTEM` account task. It runs as the current interactive user with `Highest` run level, which is usually safer for COM ports, user-profile Python installs, RTSS/Afterburner, and other desktop telemetry tools.
 
-The watchdog starts the render stack, listens for `Win32_PowerManagementEvent`, sends a black frame when Windows enters suspend, and restarts the stack after resume. It also listens for `Win32_ComputerShutdownEvent` and blanks the panel when Windows is shutting down or restarting. The black frame is a best-effort screen blanking fallback; the current public protocol path does not expose a real panel power-off command.
+The watchdog starts the render stack and coordinates both auxiliary displays across
+Windows power transitions:
+
+| Windows state | LIAN LI HS2 curved OLED | TURZX case panel |
+| --- | --- | --- |
+| Active | Windows secondary-display mode, screen on, offline clock armed | stream running at the configured brightness (`170` by default) |
+| Suspend | monitor mode, native offline clock enabled, normal screen output off | stream stopped, verified command `123` sets brightness to `0` |
+| Shutdown/restart | monitor mode, offline clock disabled, screen output off | stream stopped, verified command `123` sets brightness to `0` |
+
+On resume, the HS2 screen is turned on before it is returned to Windows
+secondary-display mode, and the TURZX brightness is restored before streaming
+starts. Moving HS2 out of the Windows display topology before suspend also keeps
+desktop windows from being stranded on the small display when the main monitor
+disconnects or powers down.
+
+HS2 transitions use the local L-Connect service on `127.0.0.1:11021`. The
+service can take several seconds to re-enumerate the controller while switching
+between desktop and monitor modes, so the watchdog polls for the new controller
+mode instead of assuming the switch is immediate. L-Connect failures are logged
+and isolated so they do not prevent the TURZX panel from being turned off.
+
+TURZX brightness control uses the same RJCP serial path as frame streaming.
+The watchdog releases the stream's COM-port ownership before sending the power
+command. A black frame remains as an explicit fallback only when the hardware
+brightness command fails; it is not the normal sleep/shutdown path.
 
 Metrics startup is health-based rather than process-name-based. If an old Python
 process is still visible while its HTTP endpoint is already dead, the launcher

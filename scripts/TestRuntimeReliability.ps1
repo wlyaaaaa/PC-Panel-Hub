@@ -48,7 +48,8 @@ foreach ($pattern in @(
     '[string]$PythonPath',
     '"TURZX.SideScreen.Stream.*.exe"',
     '$staleBuildCutoff',
-    'Start-Process -FilePath $PythonPath'
+    'Start-Process',
+    '-FilePath $PythonPath'
 )) {
     if ($streamStart -notmatch [regex]::Escape($pattern)) {
         throw "StartVideoStream missing reliability contract: $pattern"
