@@ -13,6 +13,7 @@ $stack = Join-Path $side "StartSideScreenStack.ps1"
 $stop = Join-Path $side "StopSideScreenStack.ps1"
 $blank = Join-Path $side "SendBlankFrame.ps1"
 $displayPowerPolicy = Join-Path $side "SideScreenDisplayPowerPolicy.ps1"
+$windowPreservationPolicy = Join-Path $side "WindowsDisplayWindowPolicy.ps1"
 $overlayWatchdogPolicy = Join-Path $side "HS2OverlayWatchdogPolicy.ps1"
 $brightness = Join-Path $side "SetTurzxBrightness.ps1"
 $powerProgram = Join-Path $side "TURZX.SideScreen.Power.cs"
@@ -25,14 +26,46 @@ $overlayManifest = Join-Path $Root "tools\hs2_crystal_overlay\src\HS2.CrystalOve
 $overlayController = Join-Path $Root "tools\hs2_crystal_overlay\src\HS2.CrystalOverlay\OverlayController.cs"
 $crystalCardWindow = Join-Path $Root "tools\hs2_crystal_overlay\src\HS2.CrystalOverlay\CrystalCardWindow.cs"
 
-foreach ($path in @($watchdog, $shutdownPolicy, $displayPowerPolicy, $overlayWatchdogPolicy, $brightness, $powerProgram, $watchdogLauncher, $stop, $blank, $overlayManifest, $overlayController, $crystalCardWindow)) {
+foreach ($path in @($watchdog, $shutdownPolicy, $displayPowerPolicy, $windowPreservationPolicy, $overlayWatchdogPolicy, $brightness, $powerProgram, $watchdogLauncher, $stop, $blank, $overlayManifest, $overlayController, $crystalCardWindow)) {
     if (!(Test-Path -LiteralPath $path)) {
         throw "Missing power management script: $path"
     }
 }
 
 . $displayPowerPolicy
+. $windowPreservationPolicy
 . $overlayWatchdogPolicy
+
+$windowPreservationPlan = @(Get-WindowsDisplayWindowPreservationPlan)
+if ($windowPreservationPlan.Count -ne 2) {
+    throw "Windows display preservation must configure exactly two native policies."
+}
+$expectedWindowPolicies = @{
+    MonitorRemovalRecalcBehavior = "minimize-windows-when-monitor-disconnects"
+    RestorePreviousStateRecalcBehavior = "remember-window-locations-by-monitor-connection"
+}
+foreach ($operation in $windowPreservationPlan) {
+    if (-not $expectedWindowPolicies.ContainsKey([string]$operation.Name)) {
+        throw "Unexpected Windows display preservation setting: $($operation.Name)"
+    }
+    if ([int]$operation.DesiredValue -ne 0) {
+        throw "Windows display preservation settings must use the native enabled value 0."
+    }
+    if ([string]$operation.Purpose -cne [string]$expectedWindowPolicies[[string]$operation.Name]) {
+        throw "Windows display preservation purpose mismatch for $($operation.Name)."
+    }
+}
+
+$windowPolicyNativeType = Initialize-WindowsDesktopSettingChangeNativeMethods
+if ($null -eq $windowPolicyNativeType -or -not $windowPolicyNativeType.IsPublic) {
+    throw "Windows display preservation broadcast type must be public to PowerShell."
+}
+$windowPolicyBroadcastMethod = $windowPolicyNativeType.GetMethod(
+    "SendMessageTimeout",
+    [Reflection.BindingFlags]::Public -bor [Reflection.BindingFlags]::Static)
+if ($null -eq $windowPolicyBroadcastMethod) {
+    throw "Windows display preservation broadcast method must be publicly callable."
+}
 
 $decisionNow = [DateTime]::Parse("2026-08-02T06:00:00Z").ToUniversalTime()
 $healthyOverlay = Get-HS2OverlayWatchdogDecision `
@@ -205,7 +238,10 @@ foreach ($pattern in @(
     "MaxConsecutiveFailures",
     "SendBlankFrame.ps1",
     "SideScreenDisplayPowerPolicy.ps1",
+    "WindowsDisplayWindowPolicy.ps1",
     "HS2OverlayWatchdogPolicy.ps1",
+    "Enable-DesktopWindowPreservation",
+    "Windows display window preservation compliant=",
     "Invoke-HS2OverlayHealthCheck",
     'hs2DisplayStateActive = $false',
     "HS2 overlay watchdog=enabled",

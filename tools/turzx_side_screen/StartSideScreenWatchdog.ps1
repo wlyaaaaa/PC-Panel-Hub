@@ -19,6 +19,7 @@ param(
     [ValidateRange(5, 3600)][int]$HS2OverlayRetrySeconds = 30,
     [ValidateRange(0, 255)][int]$ActiveBrightness = 170,
     [ValidateRange(1, 65535)][int]$LConnectServicePort = 11021,
+    [switch]$NoWindowPreservationPolicy,
     [switch]$NoPowerEvents
 )
 
@@ -45,6 +46,7 @@ $blankScript = Join-Path $scriptDir "SendBlankFrame.ps1"
 $brightnessScript = Join-Path $scriptDir "SetTurzxBrightness.ps1"
 $shutdownPolicy = Join-Path $scriptDir "SideScreenWatchdogPolicy.ps1"
 $displayPowerPolicy = Join-Path $scriptDir "SideScreenDisplayPowerPolicy.ps1"
+$windowPreservationPolicy = Join-Path $scriptDir "WindowsDisplayWindowPolicy.ps1"
 $overlayWatchdogPolicy = Join-Path $scriptDir "HS2OverlayWatchdogPolicy.ps1"
 $powerSourceId = "TURZXSideScreenPower"
 $shutdownSourceId = "TURZXSideScreenShutdown"
@@ -56,6 +58,7 @@ $script:hs2DisplayStateActive = $false
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 . $shutdownPolicy
 . $displayPowerPolicy
+. $windowPreservationPolicy
 . $overlayWatchdogPolicy
 
 function Write-BoundedLogLine {
@@ -144,6 +147,32 @@ function Set-ActiveDisplayState {
     }
     catch {
         Write-WatchdogLog ("HS2 power state=Active reason={0} failed: {1}" -f $Reason, $_.Exception.Message)
+    }
+}
+
+function Enable-DesktopWindowPreservation {
+    if ($NoWindowPreservationPolicy) {
+        Write-WatchdogLog "Windows display window preservation disabled by parameter"
+        return
+    }
+
+    try {
+        $result = Enable-WindowsDisplayWindowPreservation
+        $changed = if ($result.ChangedSettings.Count -eq 0) {
+            "none"
+        }
+        else {
+            $result.ChangedSettings -join ","
+        }
+        Write-WatchdogLog (
+            "Windows display window preservation compliant={0} changed={1} broadcast={2}" -f `
+                $result.Compliant,
+                $changed,
+                $result.Broadcasted)
+    }
+    catch {
+        Write-WatchdogLog (
+            "Windows display window preservation failed: {0}" -f $_.Exception.Message)
     }
 }
 
@@ -415,6 +444,7 @@ $consecutiveFailures = 0
 $heartbeatFailures = 0
 $childStartedUtc = [DateTime]::UtcNow
 try {
+    Enable-DesktopWindowPreservation
     Set-ActiveDisplayState -Reason "watchdog-start"
     Invoke-HS2OverlayHealthCheck
     $child = Start-Stack -Reason "watchdog-start"

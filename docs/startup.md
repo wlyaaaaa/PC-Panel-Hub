@@ -16,13 +16,21 @@ restart/stop behavior attached to the real long-running process instead of an
 intermediate script host that can leave an orphaned watchdog behind.
 
 The watchdog starts the render stack and coordinates both auxiliary displays across
-Windows power transitions:
+Windows power transitions. At startup it also enables the Windows multi-monitor
+policies that remember window locations and minimize windows when a monitor is
+disconnected:
 
 | Windows state | LIAN LI HS2 curved OLED | TURZX case panel |
 | --- | --- | --- |
 | Active | Windows secondary-display mode, screen on, offline clock armed | stream running at the configured brightness (`170` by default) |
 | Suspend | monitor mode, native offline clock enabled, normal screen output off | stream stopped, verified command `123` sets brightness to `0` |
 | Shutdown/restart | monitor mode, offline clock disabled, screen output off | stream stopped, verified command `123` sets brightness to `0` |
+
+The native Windows window-preservation policies also cover the separate case where
+the PC remains awake but the main monitor powers down and leaves the display
+topology. Applications are minimized in place instead of being rearranged onto the
+small HS2 display, and Windows restores their remembered monitor locations when the
+main display reconnects.
 
 On resume, the HS2 screen is turned on before it is returned to Windows
 secondary-display mode, and the TURZX brightness is restored before streaming
