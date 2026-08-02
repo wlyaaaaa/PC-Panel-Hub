@@ -22,6 +22,8 @@ internal sealed class OverlayController : IOverlayPublisher, IDisposable
     private OverlayRequest? lastCardRequest;
     private string? lastDirectSignature;
     private int lastDriftMinute = -1;
+    private int consecutiveRenderFailures;
+    private DateTimeOffset lastRenderFailureLog = DateTimeOffset.MinValue;
     private bool disposed;
 
     internal OverlayController(
@@ -75,6 +77,28 @@ internal sealed class OverlayController : IOverlayPublisher, IDisposable
             return;
         }
 
+        try
+        {
+            RenderCore();
+            if (consecutiveRenderFailures > 0)
+            {
+                RuntimeLog.Write(
+                    $"Render recovered after " +
+                    $"{consecutiveRenderFailures} failed frame(s).");
+                consecutiveRenderFailures = 0;
+            }
+        }
+        catch (Exception exception)
+        {
+            lastCardRequest = null;
+            lastDirectSignature = null;
+            lastDriftMinute = -1;
+            RecordRenderFailure(exception);
+        }
+    }
+
+    private void RenderCore()
+    {
         var now = DateTimeOffset.Now;
         OverlayFrame frame;
         PixelRect notificationRegion;
@@ -118,6 +142,22 @@ internal sealed class OverlayController : IOverlayPublisher, IDisposable
             lastDriftMinute = now.Minute;
             directWindow.Render(frame.DirectItems, placement.Direct, now);
         }
+    }
+
+    private void RecordRenderFailure(Exception exception)
+    {
+        consecutiveRenderFailures++;
+        var now = DateTimeOffset.Now;
+        if (consecutiveRenderFailures > 1 &&
+            now - lastRenderFailureLog < TimeSpan.FromSeconds(30))
+        {
+            return;
+        }
+
+        lastRenderFailureLog = now;
+        RuntimeLog.Write(
+            $"Render failed (consecutive={consecutiveRenderFailures}): " +
+            exception);
     }
 
     private PixelRect NotificationRegionFor(OverlayItem? primary)

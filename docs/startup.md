@@ -5,11 +5,15 @@ The recommended startup path is a Windows Scheduled Task:
 - Task name: `TURZX SideScreen`
 - Run level: `Highest`
 - Trigger: user logon
-- Action: `wscript.exe` -> `tools\turzx_side_screen\StartSideScreenWatchdog-Hidden.vbs`
+- Action: hidden `powershell.exe` -> `tools\turzx_side_screen\StartSideScreenWatchdog.ps1`
 - Default port: `COM7`
 - Default refresh: `1000ms`
 
 This is not a `SYSTEM` account task. It runs as the current interactive user with `Highest` run level, which is usually safer for COM ports, user-profile Python installs, RTSS/Afterburner, and other desktop telemetry tools.
+
+Task Scheduler launches the watchdog process directly. This keeps task state and
+restart/stop behavior attached to the real long-running process instead of an
+intermediate script host that can leave an orphaned watchdog behind.
 
 The watchdog starts the render stack and coordinates both auxiliary displays across
 Windows power transitions:

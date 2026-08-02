@@ -591,8 +591,10 @@ internal sealed class CrystalCardWindow : IDisposable
                     cachedArtworkPath,
                     StringComparison.OrdinalIgnoreCase))
             {
+                using var source = Image.FromFile(path);
+                var replacement = new Bitmap(source);
                 cachedArtwork?.Dispose();
-                cachedArtwork = Image.FromFile(path);
+                cachedArtwork = replacement;
                 cachedArtworkPath = path;
             }
 

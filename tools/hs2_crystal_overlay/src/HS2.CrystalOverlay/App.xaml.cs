@@ -28,7 +28,7 @@ public partial class App : Application
         RequestedTheme = ApplicationTheme.Dark;
         UnhandledException += (_, args) =>
         {
-            RuntimeLog.Write($"Unhandled: {args.Exception.Message}");
+            RuntimeLog.Write($"Unhandled: {args.Exception}");
         };
     }
 

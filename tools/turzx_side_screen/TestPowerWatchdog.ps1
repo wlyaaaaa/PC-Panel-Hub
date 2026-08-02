@@ -13,6 +13,7 @@ $stack = Join-Path $side "StartSideScreenStack.ps1"
 $stop = Join-Path $side "StopSideScreenStack.ps1"
 $blank = Join-Path $side "SendBlankFrame.ps1"
 $displayPowerPolicy = Join-Path $side "SideScreenDisplayPowerPolicy.ps1"
+$overlayWatchdogPolicy = Join-Path $side "HS2OverlayWatchdogPolicy.ps1"
 $brightness = Join-Path $side "SetTurzxBrightness.ps1"
 $powerProgram = Join-Path $side "TURZX.SideScreen.Power.cs"
 $resume = Join-Path $side "RestartSideScreenAfterResume.ps1"
@@ -20,14 +21,78 @@ $resumeLauncher = Join-Path $side "RestartSideScreenAfterResume-Hidden.vbs"
 $installer = Join-Path $Root "scripts\install-startup-admin.ps1"
 $installerCmd = Join-Path $Root "scripts\install-startup-admin.cmd"
 $start = Join-Path $Root "scripts\start.ps1"
+$overlayManifest = Join-Path $Root "tools\hs2_crystal_overlay\src\HS2.CrystalOverlay\Package.appxmanifest"
+$overlayController = Join-Path $Root "tools\hs2_crystal_overlay\src\HS2.CrystalOverlay\OverlayController.cs"
+$crystalCardWindow = Join-Path $Root "tools\hs2_crystal_overlay\src\HS2.CrystalOverlay\CrystalCardWindow.cs"
 
-foreach ($path in @($watchdog, $shutdownPolicy, $displayPowerPolicy, $brightness, $powerProgram, $watchdogLauncher, $stop, $blank)) {
+foreach ($path in @($watchdog, $shutdownPolicy, $displayPowerPolicy, $overlayWatchdogPolicy, $brightness, $powerProgram, $watchdogLauncher, $stop, $blank, $overlayManifest, $overlayController, $crystalCardWindow)) {
     if (!(Test-Path -LiteralPath $path)) {
         throw "Missing power management script: $path"
     }
 }
 
 . $displayPowerPolicy
+. $overlayWatchdogPolicy
+
+$decisionNow = [DateTime]::Parse("2026-08-02T06:00:00Z").ToUniversalTime()
+$healthyOverlay = Get-HS2OverlayWatchdogDecision `
+    -IsRunning $true `
+    -LastAttemptUtc ([DateTime]::MinValue) `
+    -NowUtc $decisionNow `
+    -RetrySeconds 30
+if ($healthyOverlay.Action -ne "Healthy") {
+    throw "A running HS2 overlay must be considered healthy."
+}
+
+$initialOverlay = Get-HS2OverlayWatchdogDecision `
+    -IsRunning $false `
+    -LastAttemptUtc ([DateTime]::MinValue) `
+    -NowUtc $decisionNow `
+    -RetrySeconds 30
+if ($initialOverlay.Action -ne "Activate") {
+    throw "A missing HS2 overlay must be activated immediately on first check."
+}
+
+$waitingOverlay = Get-HS2OverlayWatchdogDecision `
+    -IsRunning $false `
+    -LastAttemptUtc $decisionNow.AddSeconds(-10) `
+    -NowUtc $decisionNow `
+    -RetrySeconds 30
+if ($waitingOverlay.Action -ne "Wait" -or $waitingOverlay.RetryAfterSeconds -ne 20) {
+    throw "HS2 overlay retries must be rate limited without losing the remaining delay."
+}
+
+$retryOverlay = Get-HS2OverlayWatchdogDecision `
+    -IsRunning $false `
+    -LastAttemptUtc $decisionNow.AddSeconds(-30) `
+    -NowUtc $decisionNow `
+    -RetrySeconds 30
+if ($retryOverlay.Action -ne "Activate") {
+    throw "A missing HS2 overlay must be retried after the retry interval."
+}
+
+[xml]$manifestXml = Get-Content -Raw -LiteralPath $overlayManifest
+$manifestNamespaces = New-Object System.Xml.XmlNamespaceManager($manifestXml.NameTable)
+$manifestNamespaces.AddNamespace("desktop", "http://schemas.microsoft.com/appx/manifest/desktop/windows10")
+$startupExtension = $manifestXml.SelectSingleNode(
+    "//desktop:Extension[@Category='windows.startupTask']",
+    $manifestNamespaces)
+if ($null -eq $startupExtension -or
+    [string]$startupExtension.Executable -cne "HS2.CrystalOverlay.exe") {
+    throw "HS2 startupTask must name the real executable instead of leaving an unresolved build token."
+}
+
+$overlayControllerText = Get-Content -Raw -LiteralPath $overlayController
+foreach ($pattern in @("RenderCore", "RecordRenderFailure", "Render recovered")) {
+    if ($overlayControllerText -notmatch [regex]::Escape($pattern)) {
+        throw "HS2 overlay controller is missing render-failure containment: $pattern"
+    }
+}
+
+$crystalCardWindowText = Get-Content -Raw -LiteralPath $crystalCardWindow
+if ($crystalCardWindowText -notmatch [regex]::Escape("new Bitmap(source)")) {
+    throw "HS2 artwork cache must detach decoded images from replaceable source files."
+}
 
 function Assert-HS2Plan {
     param(
@@ -140,6 +205,11 @@ foreach ($pattern in @(
     "MaxConsecutiveFailures",
     "SendBlankFrame.ps1",
     "SideScreenDisplayPowerPolicy.ps1",
+    "HS2OverlayWatchdogPolicy.ps1",
+    "Invoke-HS2OverlayHealthCheck",
+    'hs2DisplayStateActive = $false',
+    "HS2 overlay watchdog=enabled",
+    "HS2OverlayRetrySeconds = 30",
     "SetTurzxBrightness.ps1",
     "ActiveBrightness = 170",
     "Enter-SleepDisplayState",
@@ -293,8 +363,9 @@ foreach ($pattern in @("StartSideScreenWatchdog.ps1", '[switch]$Worker')) {
 
 $installerText = Get-Content -Raw -LiteralPath $installer
 foreach ($pattern in @(
-    "wscript.exe",
-    "StartSideScreenWatchdog-Hidden.vbs",
+    'Execute "powershell.exe"',
+    "-WindowStyle Hidden",
+    "StartSideScreenWatchdog.ps1",
     "TURZX SideScreen Resume",
     "RestartSideScreenAfterResume.ps1",
     "RestartSideScreenAfterResume-Hidden.vbs",
@@ -302,7 +373,7 @@ foreach ($pattern in @(
     "StopIfGoingOnBatteries"
 )) {
     if ($installerText -notmatch [regex]::Escape($pattern)) {
-        throw "Startup installer must point the scheduled task at hidden watchdog launcher; missing: $pattern"
+        throw "Startup installer must make Task Scheduler own the hidden watchdog process; missing: $pattern"
     }
 }
 

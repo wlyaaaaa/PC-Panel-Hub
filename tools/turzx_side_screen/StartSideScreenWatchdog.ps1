@@ -16,6 +16,7 @@ param(
     [int]$ShutdownStartupGraceSeconds = 180,
     [int]$MaxConsecutiveHeartbeatFailures = 3,
     [int]$MaxConsecutiveFailures = 3,
+    [ValidateRange(5, 3600)][int]$HS2OverlayRetrySeconds = 30,
     [ValidateRange(0, 255)][int]$ActiveBrightness = 170,
     [ValidateRange(1, 65535)][int]$LConnectServicePort = 11021,
     [switch]$NoPowerEvents
@@ -44,13 +45,18 @@ $blankScript = Join-Path $scriptDir "SendBlankFrame.ps1"
 $brightnessScript = Join-Path $scriptDir "SetTurzxBrightness.ps1"
 $shutdownPolicy = Join-Path $scriptDir "SideScreenWatchdogPolicy.ps1"
 $displayPowerPolicy = Join-Path $scriptDir "SideScreenDisplayPowerPolicy.ps1"
+$overlayWatchdogPolicy = Join-Path $scriptDir "HS2OverlayWatchdogPolicy.ps1"
 $powerSourceId = "TURZXSideScreenPower"
 $shutdownSourceId = "TURZXSideScreenShutdown"
 $watchdogStartedUtc = [DateTime]::UtcNow
+$script:hs2OverlayLastAttemptUtc = [DateTime]::MinValue
+$script:hs2OverlayWasRunning = $false
+$script:hs2DisplayStateActive = $false
 
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 . $shutdownPolicy
 . $displayPowerPolicy
+. $overlayWatchdogPolicy
 
 function Write-BoundedLogLine {
     param(
@@ -131,6 +137,7 @@ function Set-TurzxPanelBrightness {
 function Set-ActiveDisplayState {
     param([string]$Reason)
 
+    $script:hs2DisplayStateActive = $true
     try {
         Invoke-HS2PowerState -State Active -ServicePort $LConnectServicePort | Out-Null
         Write-WatchdogLog ("HS2 power state=Active reason={0} verified=true" -f $Reason)
@@ -140,7 +147,52 @@ function Set-ActiveDisplayState {
     }
 }
 
+function Invoke-HS2OverlayHealthCheck {
+    if (-not $script:hs2DisplayStateActive) {
+        return
+    }
+
+    $nowUtc = [DateTime]::UtcNow
+    $overlayProcess = Get-HS2OverlayProcess
+    $decision = Get-HS2OverlayWatchdogDecision `
+        -IsRunning ($null -ne $overlayProcess) `
+        -LastAttemptUtc $script:hs2OverlayLastAttemptUtc `
+        -NowUtc $nowUtc `
+        -RetrySeconds $HS2OverlayRetrySeconds
+
+    if ($decision.Action -eq "Healthy") {
+        if (-not $script:hs2OverlayWasRunning) {
+            Write-WatchdogLog (
+                "HS2 overlay healthy pid={0} session={1}" -f `
+                    $overlayProcess.Id,
+                    $overlayProcess.SessionId)
+        }
+        $script:hs2OverlayWasRunning = $true
+        return
+    }
+
+    if ($script:hs2OverlayWasRunning) {
+        Write-WatchdogLog "HS2 overlay process disappeared; recovery scheduled"
+        $script:hs2OverlayWasRunning = $false
+    }
+    if ($decision.Action -ne "Activate") {
+        return
+    }
+
+    $script:hs2OverlayLastAttemptUtc = $nowUtc
+    try {
+        $activation = Start-HS2OverlayActivation
+        Write-WatchdogLog (
+            "HS2 overlay activation status={0}" -f $activation.Status)
+    }
+    catch {
+        Write-WatchdogLog (
+            "HS2 overlay activation failed: {0}" -f $_.Exception.Message)
+    }
+}
+
 function Enter-SleepDisplayState {
+    $script:hs2DisplayStateActive = $false
     $hs2TransitionStarted = $false
     try {
         $hs2TransitionStarted = Start-HS2MonitorModeTransition -ServicePort $LConnectServicePort
@@ -169,6 +221,7 @@ function Enter-SleepDisplayState {
 }
 
 function Enter-ShutdownDisplayState {
+    $script:hs2DisplayStateActive = $false
     $hs2TransitionStarted = $false
     try {
         $hs2TransitionStarted = Start-HS2MonitorModeTransition -ServicePort $LConnectServicePort
@@ -355,6 +408,7 @@ if (-not $NoPowerEvents) {
 }
 Write-WatchdogLog ("display power policy=hs2-transition-first/turzx-brightness-123 activeBrightness={0} lconnectPort={1}" -f `
     $ActiveBrightness, $LConnectServicePort)
+Write-WatchdogLog ("HS2 overlay watchdog=enabled retrySeconds={0}" -f $HS2OverlayRetrySeconds)
 
 $child = $null
 $consecutiveFailures = 0
@@ -362,6 +416,7 @@ $heartbeatFailures = 0
 $childStartedUtc = [DateTime]::UtcNow
 try {
     Set-ActiveDisplayState -Reason "watchdog-start"
+    Invoke-HS2OverlayHealthCheck
     $child = Start-Stack -Reason "watchdog-start"
     $childStartedUtc = [DateTime]::UtcNow
     while ($true) {
@@ -426,6 +481,8 @@ try {
             $childStartedUtc = [DateTime]::UtcNow
             continue
         }
+
+        Invoke-HS2OverlayHealthCheck
 
         if ($child -and $child.HasExited) {
             $consecutiveFailures++

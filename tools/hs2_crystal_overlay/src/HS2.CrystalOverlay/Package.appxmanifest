@@ -47,7 +47,7 @@
       <Extensions>
         <desktop:Extension
           Category="windows.startupTask"
-          Executable="$targetnametoken$.exe"
+          Executable="HS2.CrystalOverlay.exe"
           EntryPoint="Windows.FullTrustApplication">
           <desktop:StartupTask
             TaskId="HS2CrystalOverlay"

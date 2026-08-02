@@ -44,8 +44,8 @@ if (Test-Path -LiteralPath $checker) {
 
 $workingDir = Split-Path -Parent $script
 $action = New-ScheduledTaskAction `
-    -Execute "wscript.exe" `
-    -Argument ('"{0}" -Root "{1}" -Port {2} -IntervalMs {3}' -f $launcher, $Root, $Port, $IntervalMs) `
+    -Execute "powershell.exe" `
+    -Argument ('-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -Root "{1}" -Port "{2}" -IntervalMs {3}' -f $script, $Root, $Port, $IntervalMs) `
     -WorkingDirectory $workingDir
 
 $trigger = New-ScheduledTaskTrigger -AtLogOn
