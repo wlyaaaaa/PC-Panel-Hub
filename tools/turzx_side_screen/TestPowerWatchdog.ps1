@@ -67,6 +67,151 @@ if ($null -eq $windowPolicyBroadcastMethod) {
     throw "Windows display preservation broadcast method must be publicly callable."
 }
 
+$windowGuardNativeType = Initialize-HS2ExclusiveWindowGuardNativeMethods
+foreach ($methodName in @(
+        "CaptureMonitors",
+        "CaptureWindows",
+        "MoveWindowPlacement",
+        "MinimizeWindow")) {
+    if ($null -eq $windowGuardNativeType.GetMethod(
+            $methodName,
+            [Reflection.BindingFlags]::Public -bor
+            [Reflection.BindingFlags]::Static)) {
+        throw "HS2 exclusive-window guard is missing native method: $methodName"
+    }
+}
+
+$primaryMonitor = [pscustomobject]@{
+    DeviceName = "\\.\DISPLAY1"
+    IsPrimary = $true
+    Left = 0
+    Top = 0
+    Right = 2560
+    Bottom = 1440
+    WorkLeft = 0
+    WorkTop = 0
+    WorkRight = 2560
+    WorkBottom = 1400
+}
+$hs2Monitor = [pscustomobject]@{
+    DeviceName = "\\.\DISPLAY20"
+    IsPrimary = $false
+    Left = 3840
+    Top = -1048
+    Right = 6128
+    Bottom = 0
+    WorkLeft = 3840
+    WorkTop = -1048
+    WorkRight = 6128
+    WorkBottom = 0
+}
+function New-GuardWindow {
+    param(
+        [int64]$Hwnd,
+        [int]$ProcessId,
+        [string]$ProcessName,
+        [string]$ClassName,
+        [string]$MonitorDevice,
+        [bool]$Minimized = $false
+    )
+
+    return [pscustomobject]@{
+        Hwnd = $Hwnd
+        ProcessId = $ProcessId
+        ProcessName = $ProcessName
+        Title = $ProcessName
+        ClassName = $ClassName
+        MonitorDevice = $MonitorDevice
+        IsVisible = $true
+        IsMinimized = $Minimized
+        IsCloaked = $false
+        PlacementLeft = 4000
+        PlacementTop = -900
+        PlacementRight = 5200
+        PlacementBottom = -100
+    }
+}
+
+$guardWindows = @(
+    New-GuardWindow `
+        -Hwnd 1 `
+        -ProcessId 900 `
+        -ProcessName "HS2.CrystalOverlay" `
+        -ClassName "Static" `
+        -MonitorDevice $hs2Monitor.DeviceName
+    New-GuardWindow `
+        -Hwnd 2 `
+        -ProcessId 901 `
+        -ProcessName "notepad" `
+        -ClassName "Notepad" `
+        -MonitorDevice $hs2Monitor.DeviceName
+    New-GuardWindow `
+        -Hwnd 3 `
+        -ProcessId 902 `
+        -ProcessName "wallpaper64" `
+        -ClassName "Wallpaper" `
+        -MonitorDevice $hs2Monitor.DeviceName
+    New-GuardWindow `
+        -Hwnd 4 `
+        -ProcessId 903 `
+        -ProcessName "explorer" `
+        -ClassName "WorkerW" `
+        -MonitorDevice $hs2Monitor.DeviceName
+    New-GuardWindow `
+        -Hwnd 5 `
+        -ProcessId 904 `
+        -ProcessName "chrome" `
+        -ClassName "Chrome_WidgetWin_1" `
+        -MonitorDevice $primaryMonitor.DeviceName
+)
+$guardPlan = Get-HS2ExclusiveWindowGuardPlan `
+    -Monitors @($primaryMonitor, $hs2Monitor) `
+    -Windows $guardWindows `
+    -OverlayProcessIds @(900)
+if ($guardPlan.Status -cne "active" -or
+    $guardPlan.TargetMonitorDevice -cne $hs2Monitor.DeviceName -or
+    $guardPlan.SafeMonitorDevice -cne $primaryMonitor.DeviceName) {
+    throw "HS2 exclusive-window guard failed to identify the overlay and safe monitor."
+}
+if ($guardPlan.Actions.Count -ne 1 -or
+    $guardPlan.Actions[0].Action -cne "Move" -or
+    $guardPlan.Actions[0].ProcessId -ne 901 -or
+    $guardPlan.Actions[0].Left -lt $primaryMonitor.WorkLeft -or
+    $guardPlan.Actions[0].Right -gt $primaryMonitor.WorkRight -or
+    $guardPlan.Actions[0].Top -lt $primaryMonitor.WorkTop -or
+    $guardPlan.Actions[0].Bottom -gt $primaryMonitor.WorkBottom) {
+    throw "HS2 exclusive-window guard must move only ordinary apps into the primary work area."
+}
+
+$misplacedOverlay = New-GuardWindow `
+    -Hwnd 6 `
+    -ProcessId 900 `
+    -ProcessName "HS2.CrystalOverlay" `
+    -ClassName "Static" `
+    -MonitorDevice $primaryMonitor.DeviceName
+$geometryGuardPlan = Get-HS2ExclusiveWindowGuardPlan `
+    -Monitors @($primaryMonitor, $hs2Monitor) `
+    -Windows @($misplacedOverlay, $guardWindows[1]) `
+    -OverlayProcessIds @(900)
+if ($geometryGuardPlan.TargetMonitorDevice -cne $hs2Monitor.DeviceName -or
+    $geometryGuardPlan.SafeMonitorDevice -cne $primaryMonitor.DeviceName -or
+    $geometryGuardPlan.Actions.Count -ne 1 -or
+    $geometryGuardPlan.Actions[0].ProcessId -ne 901) {
+    throw "HS2 geometry must prevent a misplaced overlay window from reversing the guard direction."
+}
+
+$targetOnlyMonitor = $hs2Monitor.PSObject.Copy()
+$targetOnlyMonitor.IsPrimary = $true
+$targetOnlyPlan = Get-HS2ExclusiveWindowGuardPlan `
+    -Monitors @($targetOnlyMonitor) `
+    -Windows @($guardWindows[0], $guardWindows[1]) `
+    -OverlayProcessIds @(900)
+if ($targetOnlyPlan.Status -cne "target-only" -or
+    $targetOnlyPlan.Actions.Count -ne 1 -or
+    $targetOnlyPlan.Actions[0].Action -cne "Minimize") {
+    throw "HS2 exclusive-window guard must minimize ordinary apps when HS2 is the only display."
+}
+
 $decisionNow = [DateTime]::Parse("2026-08-02T06:00:00Z").ToUniversalTime()
 $healthyOverlay = Get-HS2OverlayWatchdogDecision `
     -IsRunning $true `
@@ -243,6 +388,9 @@ foreach ($pattern in @(
     "Enable-DesktopWindowPreservation",
     "Windows display window preservation compliant=",
     "Invoke-HS2OverlayHealthCheck",
+    "Invoke-HS2ExclusiveWindowProtection",
+    "Invoke-HS2ExclusiveWindowGuard",
+    "HS2 exclusive-window guard corrected",
     'hs2DisplayStateActive = $false',
     "HS2 overlay watchdog=enabled",
     "HS2OverlayRetrySeconds = 30",

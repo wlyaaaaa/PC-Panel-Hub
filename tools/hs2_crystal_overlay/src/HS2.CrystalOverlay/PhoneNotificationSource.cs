@@ -85,7 +85,9 @@ internal sealed class PhoneNotificationSourceCoordinator : IDisposable
             var currentIds = new HashSet<uint>();
             var xiaomiCount = 0;
             var phoneLinkCount = 0;
-            foreach (var notification in notifications)
+            foreach (var notification in notifications
+                         .OrderBy(notification => notification.CreationTime)
+                         .ThenBy(notification => notification.Id))
             {
                 if (!TryRead(
                         notification,

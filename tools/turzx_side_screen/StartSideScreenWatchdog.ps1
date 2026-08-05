@@ -54,6 +54,10 @@ $watchdogStartedUtc = [DateTime]::UtcNow
 $script:hs2OverlayLastAttemptUtc = [DateTime]::MinValue
 $script:hs2OverlayWasRunning = $false
 $script:hs2DisplayStateActive = $false
+$script:hs2WindowGuardTargetMonitorDevice = $null
+$script:hs2WindowGuardSafeMonitorDevice = $null
+$script:hs2WindowGuardLastStatus = $null
+$script:hs2WindowGuardLastFailure = $null
 
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 . $shutdownPolicy
@@ -217,6 +221,98 @@ function Invoke-HS2OverlayHealthCheck {
     catch {
         Write-WatchdogLog (
             "HS2 overlay activation failed: {0}" -f $_.Exception.Message)
+    }
+}
+
+function Invoke-HS2ExclusiveWindowProtection {
+    if ($NoWindowPreservationPolicy -or
+        -not $script:hs2DisplayStateActive) {
+        return
+    }
+
+    $overlayProcess = Get-HS2OverlayProcess
+    if ($null -eq $overlayProcess) {
+        return
+    }
+
+    try {
+        $result = Invoke-HS2ExclusiveWindowGuard `
+            -OverlayProcessIds @([int]$overlayProcess.Id) `
+            -PreferredTargetMonitorDevice `
+                $script:hs2WindowGuardTargetMonitorDevice `
+            -PreferredSafeMonitorDevice `
+                $script:hs2WindowGuardSafeMonitorDevice
+        if (-not [string]::IsNullOrWhiteSpace(
+                [string]$result.TargetMonitorDevice)) {
+            $script:hs2WindowGuardTargetMonitorDevice =
+                [string]$result.TargetMonitorDevice
+        }
+        if (-not [string]::IsNullOrWhiteSpace(
+                [string]$result.SafeMonitorDevice)) {
+            $script:hs2WindowGuardSafeMonitorDevice =
+                [string]$result.SafeMonitorDevice
+        }
+
+        $status = "{0}|target={1}|safe={2}" -f `
+            [string]$result.Status,
+            [string]$result.TargetMonitorDevice,
+            [string]$result.SafeMonitorDevice
+        if ($status -cne $script:hs2WindowGuardLastStatus) {
+            Write-WatchdogLog ("HS2 exclusive-window guard {0}" -f $status)
+            $script:hs2WindowGuardLastStatus = $status
+        }
+
+        $applied = @($result.AppliedActions)
+        if ($applied.Count -gt 0) {
+            $moved = @($applied | Where-Object { $_.Action -ceq "Move" }).Count
+            $minimized = @(
+                $applied |
+                    Where-Object { $_.Action -ceq "Minimize" }
+            ).Count
+            $processes = @(
+                $applied |
+                    ForEach-Object { [string]$_.ProcessName } |
+                    Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+                    Sort-Object -Unique
+            ) -join ","
+            Write-WatchdogLog (
+                "HS2 exclusive-window guard corrected moved={0} minimized={1} processes={2}" -f `
+                    $moved,
+                    $minimized,
+                    $processes)
+        }
+
+        $failures = @($result.FailedActions)
+        $failureSignature = if ($failures.Count -eq 0) {
+            $null
+        }
+        else {
+            @(
+                $failures |
+                    ForEach-Object {
+                        "{0}:{1}:{2}" -f `
+                            $_.Action,
+                            $_.ProcessId,
+                            $_.Hwnd
+                    }
+            ) -join ","
+        }
+        if ($failureSignature -cne $script:hs2WindowGuardLastFailure) {
+            if ($null -ne $failureSignature) {
+                Write-WatchdogLog (
+                    "HS2 exclusive-window guard correction failed actions={0}" -f `
+                        $failureSignature)
+            }
+            $script:hs2WindowGuardLastFailure = $failureSignature
+        }
+    }
+    catch {
+        $failure = $_.Exception.Message
+        if ($failure -cne $script:hs2WindowGuardLastFailure) {
+            Write-WatchdogLog (
+                "HS2 exclusive-window guard failed: {0}" -f $failure)
+            $script:hs2WindowGuardLastFailure = $failure
+        }
     }
 }
 
@@ -447,6 +543,7 @@ try {
     Enable-DesktopWindowPreservation
     Set-ActiveDisplayState -Reason "watchdog-start"
     Invoke-HS2OverlayHealthCheck
+    Invoke-HS2ExclusiveWindowProtection
     $child = Start-Stack -Reason "watchdog-start"
     $childStartedUtc = [DateTime]::UtcNow
     while ($true) {
@@ -513,6 +610,7 @@ try {
         }
 
         Invoke-HS2OverlayHealthCheck
+        Invoke-HS2ExclusiveWindowProtection
 
         if ($child -and $child.HasExited) {
             $consecutiveFailures++

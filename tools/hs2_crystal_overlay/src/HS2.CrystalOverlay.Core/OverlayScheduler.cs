@@ -8,6 +8,7 @@ public sealed class OverlayScheduler
         TimeSpan.FromMinutes(3);
     private static readonly TimeSpan MaximumQueuedNotificationAge =
         TimeSpan.FromMinutes(3);
+    private const int MaximumRetainedNotifications = 2;
 
     private readonly Dictionary<string, OverlayItem> items =
         new(StringComparer.Ordinal);
@@ -15,6 +16,9 @@ public sealed class OverlayScheduler
         notificationTimers = new(StringComparer.Ordinal);
     private readonly Dictionary<string, DeduplicationState> recentDedupKeys =
         new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, long> publishSequences =
+        new(StringComparer.Ordinal);
+    private long nextPublishSequence;
 
     public bool Publish(OverlayRequest request, DateTimeOffset now)
     {
@@ -23,8 +27,7 @@ public sealed class OverlayScheduler
 
         if (!request.IsActive)
         {
-            items.Remove(request.EventId);
-            notificationTimers.Remove(request.EventId);
+            RemoveItem(request.EventId);
             return true;
         }
 
@@ -61,6 +64,7 @@ public sealed class OverlayScheduler
                 ? existingItem!.PublishedAt
                 : now,
             expiresAt);
+        publishSequences[request.EventId] = ++nextPublishSequence;
 
         if (isStackedNotification)
         {
@@ -90,6 +94,11 @@ public sealed class OverlayScheduler
                 now,
                 request.Source,
                 request.EventId);
+        }
+
+        if (isStackedNotification)
+        {
+            RetainLatestNotifications();
         }
 
         return true;
@@ -136,6 +145,8 @@ public sealed class OverlayScheduler
     private OverlayItem[] OrderedItems() => items.Values
         .OrderByDescending(item => item.Policy.Priority)
         .ThenByDescending(item => item.PublishedAt)
+        .ThenByDescending(item =>
+            publishSequences.GetValueOrDefault(item.Request.EventId))
         .ToArray();
 
     private OverlayItem[] SelectVisibleNotifications(
@@ -146,13 +157,11 @@ public sealed class OverlayScheduler
             .Where(item =>
                 item.Policy.VisualTier ==
                 OverlayVisualTier.StackedNotification)
-            .OrderBy(item => item.PublishedAt)
+            .OrderByDescending(item => item.PublishedAt)
+            .ThenByDescending(item =>
+                publishSequences.GetValueOrDefault(item.Request.EventId))
             .ToArray();
         var selected = candidates
-            .Where(item =>
-                notificationTimers[item.Request.EventId].IsVisible)
-            .Concat(candidates.Where(item =>
-                !notificationTimers[item.Request.EventId].IsVisible))
             .Take(capacity)
             .ToArray();
         var selectedIds = selected
@@ -183,6 +192,24 @@ public sealed class OverlayScheduler
             .ToArray();
     }
 
+    private void RetainLatestNotifications()
+    {
+        foreach (var eventId in items.Values
+                     .Where(item =>
+                         item.Policy.VisualTier ==
+                         OverlayVisualTier.StackedNotification)
+                     .OrderByDescending(item => item.PublishedAt)
+                     .ThenByDescending(item =>
+                         publishSequences.GetValueOrDefault(
+                             item.Request.EventId))
+                     .Skip(MaximumRetainedNotifications)
+                     .Select(item => item.Request.EventId)
+                     .ToArray())
+        {
+            RemoveItem(eventId);
+        }
+    }
+
     private void UpdateNotificationTimers(DateTimeOffset now)
     {
         foreach (var state in notificationTimers.Values)
@@ -207,7 +234,7 @@ public sealed class OverlayScheduler
                      .Select(pair => pair.Key)
                      .ToArray())
         {
-            items.Remove(eventId);
+            RemoveItem(eventId);
         }
 
         foreach (var eventId in notificationTimers
@@ -217,8 +244,7 @@ public sealed class OverlayScheduler
                      .Select(pair => pair.Key)
                      .ToArray())
         {
-            notificationTimers.Remove(eventId);
-            items.Remove(eventId);
+            RemoveItem(eventId);
         }
 
         foreach (var eventId in items
@@ -234,8 +260,7 @@ public sealed class OverlayScheduler
                      .Select(pair => pair.Key)
                      .ToArray())
         {
-            notificationTimers.Remove(eventId);
-            items.Remove(eventId);
+            RemoveItem(eventId);
         }
 
         foreach (var key in recentDedupKeys
@@ -247,6 +272,13 @@ public sealed class OverlayScheduler
         {
             recentDedupKeys.Remove(key);
         }
+    }
+
+    private void RemoveItem(string eventId)
+    {
+        items.Remove(eventId);
+        notificationTimers.Remove(eventId);
+        publishSequences.Remove(eventId);
     }
 
     private static string? NormalizeDedupKey(string? value)

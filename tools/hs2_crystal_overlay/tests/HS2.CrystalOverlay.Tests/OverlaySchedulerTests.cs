@@ -58,7 +58,7 @@ public sealed class OverlaySchedulerTests
     }
 
     [Fact]
-    public void MultiplePhoneNotifications_UseTwoVisibleCardsAndQueueTheRest()
+    public void MultiplePhoneNotifications_AlwaysKeepOnlyTheLatestTwo()
     {
         var scheduler = new OverlayScheduler();
         for (var index = 1; index <= 3; index++)
@@ -68,28 +68,20 @@ public sealed class OverlaySchedulerTests
                 OverlayKind.PhoneNotification,
                 OverlaySource.XiaomiHyperConnect,
                 $"通知 {index}",
-                $"正文 {index}"), Now.AddMilliseconds(index));
+                $"正文 {index}"), Now);
         }
 
         var firstFrame = scheduler.GetFrame(
             Now.AddSeconds(1),
             maxVisibleNotifications: 2);
         Assert.Equal(2, firstFrame.NotificationCards.Count);
-        Assert.Equal("通知 1", firstFrame.NotificationCards[0].Request.Title);
+        Assert.Equal("通知 3", firstFrame.NotificationCards[0].Request.Title);
         Assert.Equal("通知 2", firstFrame.NotificationCards[1].Request.Title);
 
         var secondFrame = scheduler.GetFrame(
             Now.AddSeconds(61.1),
             maxVisibleNotifications: 2);
-        Assert.Single(secondFrame.NotificationCards);
-        Assert.Equal("通知 3", secondFrame.NotificationCards[0].Request.Title);
-
-        Assert.Single(scheduler.GetFrame(
-            Now.AddSeconds(120.9),
-            maxVisibleNotifications: 2).NotificationCards);
-        Assert.Empty(scheduler.GetFrame(
-            Now.AddSeconds(121.2),
-            maxVisibleNotifications: 2).NotificationCards);
+        Assert.Empty(secondFrame.NotificationCards);
     }
 
     [Fact]
