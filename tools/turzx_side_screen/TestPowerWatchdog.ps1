@@ -213,6 +213,23 @@ if ($targetOnlyPlan.Status -cne "target-only" -or
 }
 
 $decisionNow = [DateTime]::Parse("2026-08-02T06:00:00Z").ToUniversalTime()
+$healthyOverlayCandidate = [pscustomobject]@{
+    HasExited = $false
+    Threads = @([pscustomobject]@{ Id = 1 })
+}
+if (-not (Test-HS2OverlayProcessCandidate `
+        -Process $healthyOverlayCandidate)) {
+    throw "A live HS2 process with a worker thread must be accepted."
+}
+$ghostOverlayCandidate = [pscustomobject]@{
+    HasExited = $false
+    Threads = @()
+}
+if (Test-HS2OverlayProcessCandidate `
+        -Process $ghostOverlayCandidate) {
+    throw "A zero-thread HS2 crash ghost must not own overlay protection."
+}
+
 $healthyOverlay = Get-HS2OverlayWatchdogDecision `
     -IsRunning $true `
     -LastAttemptUtc ([DateTime]::MinValue) `

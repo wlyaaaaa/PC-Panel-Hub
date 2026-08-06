@@ -40,6 +40,23 @@ function Get-HS2OverlayWatchdogDecision {
     }
 }
 
+function Test-HS2OverlayProcessCandidate {
+    param(
+        [Parameter(Mandatory = $true)]$Process
+    )
+
+    try {
+        if ([bool]$Process.HasExited) {
+            return $false
+        }
+
+        return @($Process.Threads).Count -gt 0
+    }
+    catch {
+        return $false
+    }
+}
+
 function Get-HS2OverlayProcess {
     param(
         [string]$ProcessName = "HS2.CrystalOverlay",
@@ -48,6 +65,7 @@ function Get-HS2OverlayProcess {
 
     return Get-Process -Name $ProcessName -ErrorAction SilentlyContinue |
         Where-Object { $_.SessionId -eq $SessionId } |
+        Where-Object { Test-HS2OverlayProcessCandidate -Process $_ } |
         Select-Object -First 1
 }
 

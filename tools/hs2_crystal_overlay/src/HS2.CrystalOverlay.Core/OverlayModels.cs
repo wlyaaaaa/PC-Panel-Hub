@@ -115,12 +115,26 @@ public sealed record OverlayItem(
     OverlayRequest Request,
     OverlayPresentationPolicy Policy,
     DateTimeOffset PublishedAt,
-    DateTimeOffset? ExpiresAt);
+    DateTimeOffset? ExpiresAt,
+    long PublishSequence = 0);
 
 public sealed record OverlayFrame(
     IReadOnlyList<OverlayItem> DirectItems,
     IReadOnlyList<OverlayItem> Cards,
-    IReadOnlyList<OverlayItem> NotificationCards)
+    IReadOnlyList<OverlayItem> NotificationCards,
+    IReadOnlyList<OverlayItem> VisibleCards)
 {
+    public OverlayFrame(
+        IReadOnlyList<OverlayItem> directItems,
+        IReadOnlyList<OverlayItem> cards,
+        IReadOnlyList<OverlayItem> notificationCards)
+        : this(
+            directItems,
+            cards,
+            notificationCards,
+            cards.Concat(notificationCards).ToArray())
+    {
+    }
+
     public OverlayItem? PrimaryCard => Cards.FirstOrDefault();
 }

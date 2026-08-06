@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.RegularExpressions;
 
 namespace HS2.CrystalOverlay.Core;
@@ -12,6 +13,11 @@ public enum PhoneNotificationCategory
 
 public static partial class PhoneNotificationClassifier
 {
+    private const int MinimumApproximateLength = 12;
+    private const double ContainmentLengthRatio = 0.72;
+    private const double NGramDiceThreshold = 0.82;
+    private const int NGramSize = 3;
+
     public static PhoneNotificationCategory Classify(
         string? title,
         string? body)
@@ -50,6 +56,55 @@ public static partial class PhoneNotificationClassifier
             new[] { title, body }
                 .Select(value => Normalize(value))
                 .Where(value => value.Length > 0));
+    }
+
+    public static bool AreApproximatelyEquivalent(
+        string? firstTitle,
+        string? firstBody,
+        string? secondTitle,
+        string? secondBody)
+    {
+        var first = CombinedNormalizedText(firstTitle, firstBody);
+        var second = CombinedNormalizedText(secondTitle, secondBody);
+        if (first.Length == 0 || second.Length == 0)
+        {
+            return false;
+        }
+
+        if (string.Equals(first, second, StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        if (!NumericTokens(first).SequenceEqual(NumericTokens(second)))
+        {
+            return false;
+        }
+
+        var firstRunes = first.EnumerateRunes().ToArray();
+        var secondRunes = second.EnumerateRunes().ToArray();
+        var shorterLength = Math.Min(firstRunes.Length, secondRunes.Length);
+        var longerLength = Math.Max(firstRunes.Length, secondRunes.Length);
+        if (shorterLength < MinimumApproximateLength)
+        {
+            return false;
+        }
+
+        var shorter = firstRunes.Length <= secondRunes.Length
+            ? first
+            : second;
+        var longer = firstRunes.Length <= secondRunes.Length
+            ? second
+            : first;
+        if (longer.Contains(shorter, StringComparison.Ordinal) &&
+            (double)shorterLength / longerLength >=
+            ContainmentLengthRatio)
+        {
+            return true;
+        }
+
+        return NGramDice(firstRunes, secondRunes, NGramSize) >=
+               NGramDiceThreshold;
     }
 
     public static OverlaySource SourceForRelayApp(string? appName)
@@ -93,15 +148,113 @@ public static partial class PhoneNotificationClassifier
         return OverlaySource.System;
     }
 
-    private static string Normalize(string? value) =>
+    private static string CombinedNormalizedText(
+        string? title,
+        string? body) =>
         string.Join(
             ' ',
-            (value ?? string.Empty)
-                .Trim()
-                .ToLowerInvariant()
-                .Split(
-                    (char[]?)null,
-                    StringSplitOptions.RemoveEmptyEntries));
+            new[] { Normalize(title), Normalize(body) }
+                .Where(value => value.Length > 0));
+
+    private static string Normalize(string? value)
+    {
+        var normalized = (value ?? string.Empty).Normalize(
+            NormalizationForm.FormKC);
+        var builder = new StringBuilder(normalized.Length);
+        var needsSeparator = false;
+        foreach (var rune in normalized.EnumerateRunes())
+        {
+            if (Rune.IsLetterOrDigit(rune))
+            {
+                if (needsSeparator && builder.Length > 0)
+                {
+                    builder.Append(' ');
+                }
+
+                builder.Append(Rune.ToLowerInvariant(rune).ToString());
+                needsSeparator = false;
+            }
+            else
+            {
+                needsSeparator = builder.Length > 0;
+            }
+        }
+
+        return builder.ToString();
+    }
+
+    private static IReadOnlyList<string> NumericTokens(string value)
+    {
+        var tokens = new List<string>();
+        var current = new StringBuilder();
+        foreach (var rune in value.EnumerateRunes())
+        {
+            if (Rune.IsDigit(rune))
+            {
+                current.Append(rune.ToString());
+                continue;
+            }
+
+            if (current.Length > 0)
+            {
+                tokens.Add(current.ToString());
+                current.Clear();
+            }
+        }
+
+        if (current.Length > 0)
+        {
+            tokens.Add(current.ToString());
+        }
+
+        return tokens;
+    }
+
+    private static double NGramDice(
+        IReadOnlyList<Rune> first,
+        IReadOnlyList<Rune> second,
+        int size)
+    {
+        var firstCounts = NGramCounts(first, size);
+        var secondCounts = NGramCounts(second, size);
+        var firstTotal = firstCounts.Values.Sum();
+        var secondTotal = secondCounts.Values.Sum();
+        if (firstTotal == 0 || secondTotal == 0)
+        {
+            return 0;
+        }
+
+        var intersection = firstCounts.Sum(pair =>
+            Math.Min(
+                pair.Value,
+                secondCounts.GetValueOrDefault(pair.Key)));
+        return 2d * intersection / (firstTotal + secondTotal);
+    }
+
+    private static Dictionary<string, int> NGramCounts(
+        IReadOnlyList<Rune> runes,
+        int size)
+    {
+        var result = new Dictionary<string, int>(StringComparer.Ordinal);
+        if (runes.Count < size)
+        {
+            return result;
+        }
+
+        for (var index = 0; index <= runes.Count - size; index++)
+        {
+            var builder = new StringBuilder();
+            for (var offset = 0; offset < size; offset++)
+            {
+                builder.Append(runes[index + offset].ToString());
+            }
+
+            var gram = builder.ToString();
+            result[gram] = result.GetValueOrDefault(gram) + 1;
+        }
+
+        return result;
+    }
 
     [GeneratedRegex(
         @"(?:^|[\s：:])来电(?:$|[\s：:])|来电\s*$|incoming\s+call|calling\s*$",

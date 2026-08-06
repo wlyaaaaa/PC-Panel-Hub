@@ -27,7 +27,7 @@ public static class OverlayPolicies
             [OverlayKind.GameAchievement] = Timed(
                 OverlayVisualTier.Crystal, 12, 620, Normal),
             [OverlayKind.GameSummary] = Timed(
-                OverlayVisualTier.Crystal, 20, 600, Normal),
+                OverlayVisualTier.Crystal, 60, 600, Normal),
             [OverlayKind.SystemOperation] = Timed(
                 OverlayVisualTier.Crystal, 6, 640, Normal),
             [OverlayKind.DeviceOrNetwork] = Timed(

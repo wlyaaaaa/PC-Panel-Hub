@@ -58,10 +58,10 @@ public sealed class OverlaySchedulerTests
     }
 
     [Fact]
-    public void MultiplePhoneNotifications_AlwaysKeepOnlyTheLatestTwo()
+    public void FourthPhoneNotification_PermanentlyDiscardsTheOldest()
     {
         var scheduler = new OverlayScheduler();
-        for (var index = 1; index <= 3; index++)
+        for (var index = 1; index <= 4; index++)
         {
             scheduler.Publish(OverlayRequest.Timed(
                 $"phone-toast-{index}",
@@ -73,14 +73,25 @@ public sealed class OverlaySchedulerTests
 
         var firstFrame = scheduler.GetFrame(
             Now.AddSeconds(1),
-            maxVisibleNotifications: 2);
-        Assert.Equal(2, firstFrame.NotificationCards.Count);
-        Assert.Equal("通知 3", firstFrame.NotificationCards[0].Request.Title);
-        Assert.Equal("通知 2", firstFrame.NotificationCards[1].Request.Title);
+            maxVisibleNotifications: 3);
+        Assert.Equal(3, firstFrame.NotificationCards.Count);
+        Assert.Equal("通知 4", firstFrame.NotificationCards[0].Request.Title);
+        Assert.Equal("通知 3", firstFrame.NotificationCards[1].Request.Title);
+        Assert.Equal("通知 2", firstFrame.NotificationCards[2].Request.Title);
+
+        Assert.Empty(scheduler.GetFrame(
+            Now.AddSeconds(2),
+            maxVisibleNotifications: 0).NotificationCards);
+        var restored = scheduler.GetFrame(
+            Now.AddSeconds(2),
+            maxVisibleNotifications: 3);
+        Assert.DoesNotContain(
+            restored.NotificationCards,
+            item => item.Request.EventId == "phone-toast-1");
 
         var secondFrame = scheduler.GetFrame(
             Now.AddSeconds(61.1),
-            maxVisibleNotifications: 2);
+            maxVisibleNotifications: 3);
         Assert.Empty(secondFrame.NotificationCards);
     }
 
@@ -305,30 +316,281 @@ public sealed class OverlaySchedulerTests
     }
 
     [Fact]
-    public void SameSourceIdenticalPayloads_RemainSeparateNotifications()
+    public void SameSourceApproximateDuplicate_IsDisplayedOnlyOnce()
     {
         var scheduler = new OverlayScheduler();
-        var dedupKey = PhoneNotificationClassifier.DedupKey(
-            "微信",
-            "收到一条消息");
         Assert.True(scheduler.Publish(OverlayRequest.Timed(
             "xiaomi-toast-one",
             OverlayKind.PhoneNotification,
             OverlaySource.XiaomiHyperConnect,
-            "微信",
-            "收到一条消息",
-            dedupKey: dedupKey), Now));
+            "Fight for the Future",
+            "UPDATE: KOSA theater is a gift to Big Tech",
+            dedupKey: PhoneNotificationClassifier.DedupKey(
+                "Fight for the Future",
+                "UPDATE: KOSA theater is a gift to Big Tech")), Now));
 
-        Assert.True(scheduler.Publish(OverlayRequest.Timed(
+        Assert.False(scheduler.Publish(OverlayRequest.Timed(
             "xiaomi-toast-two",
             OverlayKind.PhoneNotification,
             OverlaySource.XiaomiHyperConnect,
-            "微信",
-            "收到一条消息",
-            dedupKey: dedupKey), Now.AddSeconds(3)));
-        Assert.Equal(2, scheduler.GetFrame(
+            "Fight for the Future",
+            "KOSA theater is a gift to Big Tech",
+            dedupKey: PhoneNotificationClassifier.DedupKey(
+                "Fight for the Future",
+                "KOSA theater is a gift to Big Tech")), Now.AddSeconds(3)));
+        Assert.Single(scheduler.GetFrame(
             Now.AddSeconds(3),
-            maxVisibleNotifications: 2).NotificationCards.Count);
+            maxVisibleNotifications: 3).NotificationCards);
+    }
+
+    [Fact]
+    public void SameSourceApproximateDuplicate_IsSuppressedAcrossThreeMinuteWindow()
+    {
+        var scheduler = new OverlayScheduler();
+        Assert.True(scheduler.Publish(OverlayRequest.Timed(
+            "xiaomi-kosa-early",
+            OverlayKind.PhoneNotification,
+            OverlaySource.XiaomiHyperConnect,
+            "Fight for the Future",
+            "UPDATE: KOSA theater is a gift to Big Tech"), Now));
+
+        Assert.False(scheduler.Publish(OverlayRequest.Timed(
+            "xiaomi-kosa-delayed",
+            OverlayKind.PhoneNotification,
+            OverlaySource.XiaomiHyperConnect,
+            "Fight for the Future",
+            "KOSA theater is a gift to Big Tech"), Now.AddSeconds(90)));
+    }
+
+    [Fact]
+    public void ApproximateDuplicate_DoesNotRestartVisibleTimer()
+    {
+        var scheduler = new OverlayScheduler();
+        Assert.True(scheduler.Publish(OverlayRequest.Timed(
+            "xiaomi-kosa-one",
+            OverlayKind.PhoneNotification,
+            OverlaySource.XiaomiHyperConnect,
+            "Fight for the Future",
+            "UPDATE: KOSA theater is a gift to Big Tech"), Now));
+        Assert.Single(scheduler.GetFrame(
+            Now,
+            maxVisibleNotifications: 1).NotificationCards);
+
+        Assert.False(scheduler.Publish(OverlayRequest.Timed(
+            "xiaomi-kosa-two",
+            OverlayKind.PhoneNotification,
+            OverlaySource.XiaomiHyperConnect,
+            "Fight for the Future",
+            "KOSA theater is a gift to Big Tech"), Now.AddSeconds(8)));
+
+        Assert.Single(scheduler.GetFrame(
+            Now.AddSeconds(59.9),
+            maxVisibleNotifications: 1).NotificationCards);
+        Assert.Empty(scheduler.GetFrame(
+            Now.AddSeconds(60.1),
+            maxVisibleNotifications: 1).NotificationCards);
+    }
+
+    [Fact]
+    public void PhonePayloadsWithDifferentNumbers_AreNotDeduplicated()
+    {
+        var scheduler = new OverlayScheduler();
+        Assert.True(scheduler.Publish(OverlayRequest.Timed(
+            "otp-one",
+            OverlayKind.PhoneNotification,
+            OverlaySource.XiaomiHyperConnect,
+            "验证码",
+            "123456"), Now));
+        Assert.True(scheduler.Publish(OverlayRequest.Timed(
+            "otp-two",
+            OverlayKind.PhoneNotification,
+            OverlaySource.XiaomiHyperConnect,
+            "验证码",
+            "123457"), Now.AddSeconds(1)));
+
+        Assert.Equal(2, scheduler.GetFrame(
+            Now.AddSeconds(1),
+            maxVisibleNotifications: 3).NotificationCards.Count);
+    }
+
+    [Fact]
+    public void CrossSourceApproximateDuplicate_IsDisplayedOnlyOnce()
+    {
+        var scheduler = new OverlayScheduler();
+        Assert.True(scheduler.Publish(OverlayRequest.Timed(
+            "xiaomi-kosa",
+            OverlayKind.PhoneNotification,
+            OverlaySource.XiaomiHyperConnect,
+            "Fight for the Future",
+            "UPDATE: KOSA theater is a gift to Big Tech"), Now));
+
+        Assert.False(scheduler.Publish(OverlayRequest.Timed(
+            "phone-link-kosa",
+            OverlayKind.PhoneNotification,
+            OverlaySource.PhoneLink,
+            "Fight for the Future",
+            "KOSA theater is a gift to Big Tech"), Now.AddSeconds(90)));
+    }
+
+    [Fact]
+    public void PhoneNotification_IsDiscardedAfterThreeMinutesOfWallClockAge()
+    {
+        var scheduler = new OverlayScheduler();
+        scheduler.Publish(OverlayRequest.Timed(
+            "phone-toast",
+            OverlayKind.PhoneNotification,
+            OverlaySource.PhoneLink,
+            "持续被挤下的通知"), Now);
+
+        Assert.Single(scheduler.GetFrame(
+            Now,
+            maxVisibleNotifications: 1).NotificationCards);
+        Assert.Empty(scheduler.GetFrame(
+            Now.AddSeconds(30),
+            maxVisibleNotifications: 0).NotificationCards);
+        Assert.Empty(scheduler.GetFrame(
+            Now.AddSeconds(181),
+            maxVisibleNotifications: 1).NotificationCards);
+    }
+
+    [Fact]
+    public void GameSummary_UsesSixtySecondsOfAccumulatedVisibleTime()
+    {
+        var scheduler = new OverlayScheduler();
+        scheduler.Publish(OverlayRequest.Timed(
+            "steam-summary",
+            OverlayKind.GameSummary,
+            OverlaySource.Steam,
+            "本次游戏 2 小时"), Now);
+
+        Assert.Single(scheduler.GetFrame(
+            Now,
+            maxVisibleCards: 1,
+            maxVisibleNotifications: 0).VisibleCards);
+        Assert.Empty(scheduler.GetFrame(
+            Now.AddSeconds(10),
+            maxVisibleCards: 0,
+            maxVisibleNotifications: 0).VisibleCards);
+        Assert.Empty(scheduler.GetFrame(
+            Now.AddSeconds(40),
+            maxVisibleCards: 0,
+            maxVisibleNotifications: 0).VisibleCards);
+        Assert.Single(scheduler.GetFrame(
+            Now.AddSeconds(40),
+            maxVisibleCards: 1,
+            maxVisibleNotifications: 0).VisibleCards);
+        Assert.Single(scheduler.GetFrame(
+            Now.AddSeconds(89.9),
+            maxVisibleCards: 1,
+            maxVisibleNotifications: 0).VisibleCards);
+        Assert.Empty(scheduler.GetFrame(
+            Now.AddSeconds(90.1),
+            maxVisibleCards: 1,
+            maxVisibleNotifications: 0).VisibleCards);
+    }
+
+    [Fact]
+    public void NewGameSummary_WithReusedEventIdReceivesFreshVisibleTime()
+    {
+        var scheduler = new OverlayScheduler();
+        scheduler.Publish(OverlayRequest.Timed(
+            "game-summary",
+            OverlayKind.GameSummary,
+            OverlaySource.Steam,
+            "第一款游戏",
+            "本次游玩 30 分钟",
+            dedupKey: "summary:first"), Now);
+        Assert.Single(scheduler.GetFrame(
+            Now,
+            maxVisibleCards: 1,
+            maxVisibleNotifications: 0).VisibleCards);
+        Assert.Single(scheduler.GetFrame(
+            Now.AddSeconds(30),
+            maxVisibleCards: 1,
+            maxVisibleNotifications: 0).VisibleCards);
+
+        scheduler.Publish(OverlayRequest.Timed(
+            "game-summary",
+            OverlayKind.GameSummary,
+            OverlaySource.Steam,
+            "第二款游戏",
+            "本次游玩 10 分钟",
+            dedupKey: "summary:second"), Now.AddSeconds(30));
+        Assert.Single(scheduler.GetFrame(
+            Now.AddSeconds(30),
+            maxVisibleCards: 1,
+            maxVisibleNotifications: 0).VisibleCards);
+
+        Assert.Single(scheduler.GetFrame(
+            Now.AddSeconds(89.9),
+            maxVisibleCards: 1,
+            maxVisibleNotifications: 0).VisibleCards);
+        Assert.Empty(scheduler.GetFrame(
+            Now.AddSeconds(90.1),
+            maxVisibleCards: 1,
+            maxVisibleNotifications: 0).VisibleCards);
+    }
+
+    [Fact]
+    public void ClearDismissible_PreservesActiveWorkAndSuppressesRelayResurrection()
+    {
+        var scheduler = new OverlayScheduler();
+        scheduler.Publish(OverlayRequest.Active(
+            "media", OverlayKind.MediaActive, OverlaySource.NetEase, "歌曲"), Now);
+        scheduler.Publish(OverlayRequest.Active(
+            "game", OverlayKind.GameActive, OverlaySource.Steam, "游戏"), Now);
+        scheduler.Publish(OverlayRequest.Active(
+            "task", OverlayKind.ImportantTask, OverlaySource.Task, "传输任务"), Now);
+        scheduler.Publish(OverlayRequest.Active(
+            "call", OverlayKind.PhoneCall, OverlaySource.PhoneLink, "妈妈来电"), Now);
+        scheduler.Publish(OverlayRequest.Active(
+            "transfer", OverlayKind.PhoneTransfer, OverlaySource.PhoneLink, "文件传输"), Now);
+        scheduler.Publish(OverlayRequest.Active(
+            "alert", OverlayKind.HardwareAlert, OverlaySource.Hardware, "温度告警"), Now);
+        scheduler.Publish(OverlayRequest.Timed(
+            "phone", OverlayKind.PhoneNotification, OverlaySource.PhoneLink,
+            "微信", "午饭见"), Now);
+        scheduler.Publish(OverlayRequest.Timed(
+            "volume", OverlayKind.SystemOperation, OverlaySource.System, "音量 42%"), Now);
+        scheduler.Publish(OverlayRequest.Timed(
+            "summary", OverlayKind.GameSummary, OverlaySource.Steam, "游戏总结"), Now);
+
+        Assert.Equal(3, scheduler.ClearDismissible(Now.AddSeconds(1)));
+        var remainingKinds = scheduler.GetFrame(
+                Now.AddSeconds(1),
+                maxVisibleCards: 6,
+                maxVisibleNotifications: 3)
+            .VisibleCards
+            .Select(item => item.Request.Kind)
+            .ToArray();
+        Assert.Contains(OverlayKind.MediaActive, remainingKinds);
+        Assert.Contains(OverlayKind.GameActive, remainingKinds);
+        Assert.Contains(OverlayKind.ImportantTask, remainingKinds);
+        Assert.Contains(OverlayKind.PhoneCall, remainingKinds);
+        Assert.Contains(OverlayKind.PhoneTransfer, remainingKinds);
+        Assert.Contains(OverlayKind.HardwareAlert, remainingKinds);
+        Assert.DoesNotContain(OverlayKind.PhoneNotification, remainingKinds);
+        Assert.DoesNotContain(OverlayKind.SystemOperation, remainingKinds);
+        Assert.DoesNotContain(OverlayKind.GameSummary, remainingKinds);
+
+        Assert.False(scheduler.Publish(OverlayRequest.Timed(
+            "phone-link-next-poll",
+            OverlayKind.PhoneNotification,
+            OverlaySource.PhoneLink,
+            "微信",
+            "午饭见"), Now.AddSeconds(2)));
+        Assert.False(scheduler.Publish(OverlayRequest.Timed(
+            "xiaomi-next-poll",
+            OverlayKind.PhoneNotification,
+            OverlaySource.XiaomiHyperConnect,
+            "微信",
+            "午饭见"), Now.AddSeconds(2)));
+        Assert.True(scheduler.Publish(OverlayRequest.Timed(
+            "phone-new-content",
+            OverlayKind.PhoneNotification,
+            OverlaySource.PhoneLink,
+            "微信",
+            "晚饭见"), Now.AddSeconds(2)));
     }
 
     [Fact]

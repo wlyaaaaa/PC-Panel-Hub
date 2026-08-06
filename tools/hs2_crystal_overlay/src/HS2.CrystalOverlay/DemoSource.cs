@@ -23,6 +23,21 @@ internal static class DemoSource
                 PublishMedia(publisher);
                 PublishNotificationBurst(publisher);
                 break;
+            case "max-six":
+                PublishMaximumDeck(publisher);
+                break;
+            case "sparse":
+                PublishMedia(publisher);
+                PublishLongNotification(publisher);
+                break;
+            case "overflow":
+                PublishMaximumDeck(publisher);
+                PublishOverflowNotification(publisher);
+                break;
+            case "reflow":
+                PublishMaximumDeck(publisher);
+                _ = RunReflowAsync(publisher);
+                break;
             case "call":
                 PublishCall(publisher);
                 break;
@@ -104,11 +119,53 @@ internal static class DemoSource
             OverlayKind.PhoneNotification,
             OverlaySource.XiaomiHyperConnect,
             "外卖已放入智能柜",
-            "取餐码 6821；前两条通知显示满 60 秒后，本条才从队列进入画面。",
+            "取餐码 6821；这是当前最新三条手机通知中的第三条。",
             visual: new OverlayVisualData(
                 Eyebrow: "手机通知 / PHONE",
                 Subtitle: "小米妙享",
                 AccentHex: "#70F0B2")));
+    }
+
+    private static void PublishMaximumDeck(IOverlayPublisher publisher)
+    {
+        PublishMedia(publisher);
+        PublishNotificationBurst(publisher);
+        PublishGame(publisher);
+        PublishSystemOperation(publisher);
+    }
+
+    private static void PublishOverflowNotification(
+        IOverlayPublisher publisher)
+    {
+        _ = publisher.Publish(OverlayRequest.Timed(
+            "demo-phone-notification-4",
+            OverlayKind.PhoneNotification,
+            OverlaySource.PhoneLink,
+            "第四条通知到达，最旧一条应退出",
+            "只保留最新三条；布局应自动补位，不能出现空框、遮挡或文字突然缩小。",
+            visual: new OverlayVisualData(
+                Eyebrow: "手机通知 / PHONE",
+                Subtitle: "手机连接",
+                AccentHex: "#70F0B2")));
+    }
+
+    private static async Task RunReflowAsync(IOverlayPublisher publisher)
+    {
+        await Task.Delay(TimeSpan.FromSeconds(4));
+        _ = publisher.Publish(OverlayRequest.End(
+            "demo-system-operation",
+            OverlayKind.SystemOperation,
+            OverlaySource.System));
+        await Task.Delay(TimeSpan.FromSeconds(3));
+        _ = publisher.Publish(OverlayRequest.End(
+            "demo-phone-notification-3",
+            OverlayKind.PhoneNotification,
+            OverlaySource.XiaomiHyperConnect));
+        await Task.Delay(TimeSpan.FromSeconds(3));
+        _ = publisher.Publish(OverlayRequest.End(
+            "demo-game",
+            OverlayKind.GameActive,
+            OverlaySource.Steam));
     }
 
     private static void PublishLongNotification(

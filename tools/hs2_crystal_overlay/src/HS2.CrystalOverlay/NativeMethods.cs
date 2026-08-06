@@ -5,6 +5,13 @@ namespace HS2_CrystalOverlay;
 
 internal static class NativeMethods
 {
+    internal const int WhKeyboardLl = 13;
+    internal const int WmKeyDown = 0x0100;
+    internal const int WmKeyUp = 0x0101;
+    internal const int WmSysKeyDown = 0x0104;
+    internal const int WmSysKeyUp = 0x0105;
+    internal const uint LlkhfLowerIlInjected = 0x00000002;
+    internal const uint LlkhfInjected = 0x00000010;
     internal const int GwlExStyle = -20;
     internal const long WsExTransparent = 0x00000020L;
     internal const long WsExToolWindow = 0x00000080L;
@@ -34,6 +41,11 @@ internal static class NativeMethods
         nint data);
 
     internal delegate bool WindowEnumProc(nint hwnd, nint data);
+
+    internal delegate nint LowLevelKeyboardProc(
+        int code,
+        nuint message,
+        nint keyboardData);
 
     [StructLayout(LayoutKind.Sequential)]
     internal struct Rect
@@ -89,6 +101,16 @@ internal static class NativeMethods
         internal byte BlendFlags;
         internal byte SourceConstantAlpha;
         internal byte AlphaFormat;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct LowLevelKeyboardInput
+    {
+        internal uint VirtualKey;
+        internal uint ScanCode;
+        internal uint Flags;
+        internal uint Time;
+        internal nuint ExtraInfo;
     }
 
     [DllImport("user32.dll")]
@@ -266,7 +288,7 @@ internal static class NativeMethods
         ref BlendFunction blend,
         uint flags);
 
-    [DllImport("user32.dll")]
+    [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool RegisterHotKey(
         nint hwnd,
@@ -277,4 +299,28 @@ internal static class NativeMethods
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool UnregisterHotKey(nint hwnd, int id);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    internal static extern nint SetWindowsHookEx(
+        int hookId,
+        LowLevelKeyboardProc callback,
+        nint module,
+        uint threadId);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool UnhookWindowsHookEx(nint hook);
+
+    [DllImport("user32.dll")]
+    internal static extern nint CallNextHookEx(
+        nint hook,
+        int code,
+        nuint message,
+        nint keyboardData);
+
+    [DllImport("user32.dll")]
+    internal static extern short GetAsyncKeyState(int virtualKey);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    internal static extern nint GetModuleHandle(string? moduleName);
 }

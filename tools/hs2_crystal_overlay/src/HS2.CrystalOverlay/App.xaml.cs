@@ -21,6 +21,8 @@ public partial class App : Application
     private DeviceNetworkSourceCoordinator? deviceNetwork;
     private PhoneNotificationSourceCoordinator? phoneNotifications;
     private ImportantTaskSourceCoordinator? importantTasks;
+    private GlobalHotkeyCoordinator? hotkeys;
+    private bool runtimeDisposed;
 
     public App()
     {
@@ -50,6 +52,7 @@ public partial class App : Application
             $"Target {target.DeviceName} {target.Width}x{target.Height} at {target.X},{target.Y}.");
         var placement = OverlayLayoutPlanner.Plan(target);
         window = new MainWindow();
+        window.Closed += (_, _) => DisposeRuntime();
         window.Activate();
         window.Configure(placement);
         controller = new OverlayController(
@@ -76,6 +79,10 @@ public partial class App : Application
                     "--demo=",
                     StringComparison.OrdinalIgnoreCase));
         glance = new GlanceSourceCoordinator(controller);
+        hotkeys = new GlobalHotkeyCoordinator(
+            window.DispatcherQueue,
+            controller.ClearDismissible,
+            glance.Toggle);
         if (demoArgument is not null)
         {
             var separator = demoArgument.IndexOf('=');
@@ -105,6 +112,27 @@ public partial class App : Application
         {
             _ = NativeMethods.SetForegroundWindow(foreground);
         }
+    }
+
+    private void DisposeRuntime()
+    {
+        if (runtimeDisposed)
+        {
+            return;
+        }
+
+        runtimeDisposed = true;
+        hotkeys?.Dispose();
+        importantTasks?.Dispose();
+        phoneNotifications?.Dispose();
+        deviceNetwork?.Dispose();
+        audioOperations?.Dispose();
+        steamGames?.Dispose();
+        hardwareAlerts?.Dispose();
+        media?.Dispose();
+        phoneBattery?.Dispose();
+        glance?.Dispose();
+        controller?.Dispose();
     }
 
     private static async Task<DisplayGeometry?>

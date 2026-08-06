@@ -41,7 +41,7 @@ public sealed class OverlayPolicyTests
     [Theory]
     [InlineData(OverlayKind.MediaTrackChange, 8)]
     [InlineData(OverlayKind.GameAchievement, 12)]
-    [InlineData(OverlayKind.GameSummary, 20)]
+    [InlineData(OverlayKind.GameSummary, 60)]
     [InlineData(OverlayKind.SystemOperation, 6)]
     [InlineData(OverlayKind.DeviceOrNetwork, 12)]
     [InlineData(OverlayKind.ImportantTaskComplete, 15)]

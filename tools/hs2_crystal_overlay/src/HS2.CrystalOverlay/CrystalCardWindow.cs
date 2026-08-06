@@ -59,6 +59,21 @@ internal sealed class CrystalCardWindow : IDisposable
         }
 
         var target = ResolveCardRect(item, maximum);
+        RenderExact(item, target, now);
+    }
+
+    internal void RenderExact(
+        OverlayItem? item,
+        PixelRect target,
+        DateTimeOffset now)
+    {
+        ObjectDisposedException.ThrowIf(disposed, this);
+        if (item is null)
+        {
+            Hide();
+            return;
+        }
+
         using var bitmap = new Bitmap(
             target.Width,
             target.Height,
@@ -76,7 +91,12 @@ internal sealed class CrystalCardWindow : IDisposable
             if (item.Request.Kind is
                 OverlayKind.MediaActive or OverlayKind.MediaTrackChange)
             {
-                DrawMedia(graphics, item, target.Width, target.Height);
+                DrawMedia(
+                    graphics,
+                    item,
+                    target.Width,
+                    target.Height,
+                    now);
             }
             else if (item.Policy.VisualTier ==
                      OverlayVisualTier.StackedNotification)
@@ -95,6 +115,25 @@ internal sealed class CrystalCardWindow : IDisposable
         }
 
         Present(bitmap, target);
+    }
+
+    internal void MoveTo(PixelRect target)
+    {
+        ObjectDisposedException.ThrowIf(disposed, this);
+        _ = NativeMethods.SetWindowPos(
+            hwnd,
+            NativeMethods.HwndTopmost,
+            target.X,
+            target.Y,
+            target.Width,
+            target.Height,
+            NativeMethods.SwpNoActivate | NativeMethods.SwpShowWindow);
+    }
+
+    internal void Hide()
+    {
+        ObjectDisposedException.ThrowIf(disposed, this);
+        _ = NativeMethods.ShowWindow(hwnd, NativeMethods.SwHide);
     }
 
     private static void ConfigureGraphics(Graphics graphics)
@@ -117,11 +156,11 @@ internal sealed class CrystalCardWindow : IDisposable
         var outer = new RectangleF(1.5f, 1.5f, width - 3, height - 3);
         using var path = RoundedRectangle(outer, 34);
         var washStart = notificationSurface
-            ? Color.FromArgb(18, 125, 255, 193)
-            : Color.FromArgb(16, 255, 255, 255);
+            ? Color.FromArgb(24, 154, 255, 211)
+            : Color.FromArgb(22, 255, 255, 255);
         var washEnd = notificationSurface
-            ? Color.FromArgb(5, 157, 245, 205)
-            : Color.FromArgb(5, 226, 250, 255);
+            ? Color.FromArgb(7, 185, 255, 222)
+            : Color.FromArgb(7, 226, 255, 246);
         using var clearWash = new LinearGradientBrush(
             outer,
             washStart,
@@ -159,9 +198,12 @@ internal sealed class CrystalCardWindow : IDisposable
         Graphics graphics,
         OverlayItem item,
         int width,
-        int height)
+        int height,
+        DateTimeOffset now)
     {
         var visual = item.Request.Visual;
+        var marqueeProgress = visual?.MarqueeProgress ??
+            AmbientMarqueeProgress(now);
         var expanded = item.Request.Kind == OverlayKind.MediaTrackChange;
         var identityOnly =
             string.IsNullOrWhiteSpace(item.Request.Body) &&
@@ -185,7 +227,7 @@ internal sealed class CrystalCardWindow : IDisposable
             visual?.AccentHex,
             Color.FromArgb(244, 137, 247, 255));
         var titleTop = identityOnly
-            ? expanded ? 38f : 34f
+            ? expanded ? 32f : 28f
             : expanded ? 18f : 12f;
         using var dot = new SolidBrush(accent);
         graphics.FillEllipse(
@@ -199,18 +241,18 @@ internal sealed class CrystalCardWindow : IDisposable
         contentX += expanded ? 23 : 20;
 
         var titleRight = expanded ? right - 205 : right;
-        DrawFittedText(
+        DrawScrollingText(
             graphics,
             item.Request.Title,
             new RectangleF(
                 contentX,
                 titleTop,
                 Math.Max(100, titleRight - contentX),
-                expanded ? 53 : 42),
-            expanded ? 40 : 31,
-            expanded ? 28 : 22,
+                expanded ? 62 : 64),
+            expanded ? 48 : 52,
             FontStyle.Bold,
-            Color.FromArgb(252, 255, 255, 255));
+            Color.FromArgb(252, 255, 255, 255),
+            marqueeProgress);
 
         if (expanded)
         {
@@ -244,12 +286,12 @@ internal sealed class CrystalCardWindow : IDisposable
                 new RectangleF(
                     contentX,
                     identityOnly
-                        ? titleTop + (expanded ? 58 : 46)
-                        : expanded ? 68 : 48,
+                        ? titleTop + (expanded ? 64 : 62)
+                        : expanded ? 72 : 58,
                     right - contentX,
-                    expanded ? 35 : 28),
-                expanded ? 24 : 20,
-                expanded ? 18 : 16,
+                    expanded ? 43 : 38),
+                expanded ? 34 : 32,
+                expanded ? 28 : 26,
                 FontStyle.Regular,
                 Color.FromArgb(225, 224, 246, 249));
         }
@@ -271,7 +313,7 @@ internal sealed class CrystalCardWindow : IDisposable
                 expanded ? 47 : 39,
                 FontStyle.Bold,
                 Color.FromArgb(250, 255, 255, 255),
-                visual?.MarqueeProgress ?? 0);
+                marqueeProgress);
             if (hasTranslation)
             {
                 DrawScrollingText(
@@ -285,7 +327,7 @@ internal sealed class CrystalCardWindow : IDisposable
                     expanded ? 27 : 23,
                     FontStyle.Regular,
                     Color.FromArgb(230, 213, 247, 250),
-                    visual.MarqueeProgress ?? 0);
+                    marqueeProgress);
             }
         }
 
@@ -358,10 +400,11 @@ internal sealed class CrystalCardWindow : IDisposable
     {
         var visual = item.Request.Visual;
         var narrow = width < 900;
-        var padding = narrow ? 32f : 42f;
-        var titleSize = narrow ? 47f : 56f;
-        var bodySize = narrow ? 39f : 44f;
-        var headerHeight = narrow ? 58f : 64f;
+        var shortCard = narrow && height < 230;
+        var padding = shortCard ? 28f : narrow ? 32f : 42f;
+        var titleSize = shortCard ? 44f : narrow ? 52f : 58f;
+        var bodySize = shortCard ? 36f : narrow ? 42f : 46f;
+        var headerHeight = shortCard ? 54f : narrow ? 58f : 64f;
         var accent = ParseColor(
             visual?.AccentHex,
             Color.FromArgb(244, 112, 240, 178));
@@ -396,7 +439,7 @@ internal sealed class CrystalCardWindow : IDisposable
             padding,
             headerHeight,
             width - padding * 2,
-            height - headerHeight - 24);
+            height - headerHeight - (shortCard ? 18f : 24f));
         var titleHeight = MeasureWrappedText(
             graphics,
             item.Request.Title,
@@ -464,7 +507,12 @@ internal sealed class CrystalCardWindow : IDisposable
             OverlayKind.ImportantTask or
             OverlayKind.ImportantTaskComplete or
             OverlayKind.HardwareResolved or
-            OverlayKind.SystemOperation;
+            OverlayKind.SystemOperation or
+            OverlayKind.DeviceOrNetwork;
+        var operation = item.Request.Kind is
+            OverlayKind.SystemOperation or
+            OverlayKind.DeviceOrNetwork;
+        var narrow = width < 900;
         var padding = compact ? 40f : 50f;
         var accent = ParseColor(
             visual?.AccentHex,
@@ -489,41 +537,73 @@ internal sealed class CrystalCardWindow : IDisposable
             Color.FromArgb(204, 217, 243, 248),
             StringAlignment.Far);
 
-        var titleTop = compact ? 74f : 84f;
+        var titleTop = operation ? 48f : compact ? 70f : 84f;
         var hasProgress = visual?.Progress is not null;
         var progressY = height - 64f;
-        DrawText(
+        var operationTitleHeight = Math.Clamp(
+            height * 0.38f,
+            62f,
+            narrow ? 72f : 78f);
+        var titleSize = operation
+            ? narrow ? 52f : 60f
+            : item.Request.Kind == OverlayKind.GameActive
+                ? narrow ? 52f : 58f
+                : compact ? 50f : (float)item.Policy.Typography.TitlePx;
+        var titleHeight = operation
+            ? operationTitleHeight
+            : compact ? 74f : 90f;
+        DrawFittedText(
             graphics,
             item.Request.Title,
             new RectangleF(
                 padding,
                 titleTop,
                 width - padding * 2,
-                compact ? 72 : 90),
-            compact ? 48 : (float)item.Policy.Typography.TitlePx,
+                titleHeight),
+            titleSize,
+            operation ? narrow ? 44f : 50f : 44f,
             FontStyle.Bold,
             Color.FromArgb(252, 255, 255, 255));
         if (!string.IsNullOrWhiteSpace(item.Request.Body))
         {
-            DrawText(
-                graphics,
-                item.Request.Body!,
-                new RectangleF(
-                    padding,
-                    titleTop + (compact ? 66 : 82),
-                    width - padding * 2,
-                    hasProgress
-                        ? Math.Max(
-                            0,
-                            progressY -
-                            (titleTop + (compact ? 66 : 82)) -
-                            15)
-                        : height - titleTop - 126),
-                compact ? 34 : (float)item.Policy.Typography.BodyPx,
-                FontStyle.Bold,
-                Color.FromArgb(239, 246, 252, 254),
-                StringAlignment.Near,
-                wrap: true);
+            var bodyTop = operation
+                ? titleTop + titleHeight - 4f
+                : titleTop + (compact ? 66f : 82f);
+            var bottomReserve = string.IsNullOrWhiteSpace(visual?.Meta)
+                ? operation ? 10f : 16f
+                : compact ? 58f : 68f;
+            var bodyHeight = hasProgress
+                ? Math.Max(0, progressY - bodyTop - 15)
+                : Math.Max(0, height - bodyTop - bottomReserve);
+            var bodyBounds = new RectangleF(
+                padding,
+                bodyTop,
+                width - padding * 2,
+                bodyHeight);
+            var bodyColor = Color.FromArgb(239, 246, 252, 254);
+            if (operation)
+            {
+                DrawFittedText(
+                    graphics,
+                    item.Request.Body!,
+                    bodyBounds,
+                    narrow ? 30f : 34f,
+                    narrow ? 25f : 28f,
+                    FontStyle.Bold,
+                    bodyColor);
+            }
+            else
+            {
+                DrawWrappedText(
+                    graphics,
+                    item.Request.Body!,
+                    bodyBounds,
+                    compact
+                        ? 38f
+                        : (float)item.Policy.Typography.BodyPx,
+                    FontStyle.Bold,
+                    bodyColor);
+            }
         }
 
         if (visual?.Progress is not null)
@@ -629,7 +709,9 @@ internal sealed class CrystalCardWindow : IDisposable
         bool wrap = false)
     {
         using var font = UiFont(size, style);
-        using var shadow = new SolidBrush(Color.FromArgb(126, 0, 8, 12));
+        using var outline = new SolidBrush(
+            Color.FromArgb(176, 0, 34, 31));
+        using var shadow = new SolidBrush(Color.FromArgb(150, 0, 8, 12));
         using var brush = new SolidBrush(fill);
         using var format = Typographic();
         format.Alignment = alignment;
@@ -640,8 +722,17 @@ internal sealed class CrystalCardWindow : IDisposable
             format.FormatFlags |= StringFormatFlags.NoWrap;
         }
 
+        var outlineOffset = Math.Clamp(size * 0.045f, 1.4f, 3f);
+        DrawTextOutline(
+            graphics,
+            text,
+            font,
+            outline,
+            bounds,
+            format,
+            outlineOffset);
         var shadowBounds = bounds;
-        shadowBounds.Offset(1.7f, 2.1f);
+        shadowBounds.Offset(outlineOffset, outlineOffset + 0.7f);
         graphics.DrawString(text, font, shadow, shadowBounds, format);
         graphics.DrawString(text, font, brush, bounds, format);
     }
@@ -673,15 +764,49 @@ internal sealed class CrystalCardWindow : IDisposable
         Color fill)
     {
         using var font = UiFont(size, style);
-        using var shadow = new SolidBrush(Color.FromArgb(112, 0, 13, 8));
+        using var outline = new SolidBrush(
+            Color.FromArgb(170, 0, 38, 30));
+        using var shadow = new SolidBrush(Color.FromArgb(142, 0, 13, 8));
         using var brush = new SolidBrush(fill);
         using var format = Typographic();
         format.Trimming = StringTrimming.None;
         format.LineAlignment = StringAlignment.Near;
+        var outlineOffset = Math.Clamp(size * 0.045f, 1.4f, 3f);
+        DrawTextOutline(
+            graphics,
+            text,
+            font,
+            outline,
+            bounds,
+            format,
+            outlineOffset);
         var shadowBounds = bounds;
-        shadowBounds.Offset(1.6f, 2f);
+        shadowBounds.Offset(outlineOffset, outlineOffset + 0.7f);
         graphics.DrawString(text, font, shadow, shadowBounds, format);
         graphics.DrawString(text, font, brush, bounds, format);
+    }
+
+    private static void DrawTextOutline(
+        Graphics graphics,
+        string text,
+        Font font,
+        Brush brush,
+        RectangleF bounds,
+        StringFormat format,
+        float offset)
+    {
+        var shifted = bounds;
+        shifted.Offset(-offset, 0);
+        graphics.DrawString(text, font, brush, shifted, format);
+        shifted = bounds;
+        shifted.Offset(offset, 0);
+        graphics.DrawString(text, font, brush, shifted, format);
+        shifted = bounds;
+        shifted.Offset(0, -offset);
+        graphics.DrawString(text, font, brush, shifted, format);
+        shifted = bounds;
+        shifted.Offset(0, offset);
+        graphics.DrawString(text, font, brush, shifted, format);
     }
 
     private static double NotificationScrollProgress(
@@ -703,6 +828,21 @@ internal sealed class CrystalCardWindow : IDisposable
             0,
             (now - item.PublishedAt).TotalSeconds);
         return elapsed % 9 / 9;
+    }
+
+    private static double AmbientMarqueeProgress(DateTimeOffset now)
+    {
+        const double periodSeconds = 16;
+        var phase = (now.ToUnixTimeMilliseconds() / 1000d) %
+            periodSeconds;
+        return phase switch
+        {
+            < 2 => 0,
+            < 7 => (phase - 2) / 5,
+            < 9 => 1,
+            < 14 => 1 - (phase - 9) / 5,
+            _ => 0,
+        };
     }
 
     private static float SmoothHeldProgress(double value)
@@ -940,8 +1080,8 @@ internal sealed class CrystalCardWindow : IDisposable
         ConfigureGraphics(graphics);
         var narrow = width < 900;
         var padding = narrow ? 32f : 42f;
-        var titleSize = narrow ? 47f : 56f;
-        var bodySize = narrow ? 39f : 44f;
+        var titleSize = narrow ? 52f : 58f;
+        var bodySize = narrow ? 42f : 46f;
         var contentWidth = Math.Max(1, width - padding * 2);
         var titleHeight = MeasureWrappedText(
             graphics,

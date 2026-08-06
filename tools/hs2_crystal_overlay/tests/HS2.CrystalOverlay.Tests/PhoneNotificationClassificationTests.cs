@@ -44,6 +44,44 @@ public sealed class PhoneNotificationClassificationTests
                 "hello  world"));
     }
 
+    [Fact]
+    public void DedupKeyNormalizesUnicodeWidthCaseWhitespaceAndPunctuation()
+    {
+        Assert.Equal(
+            PhoneNotificationClassifier.DedupKey(
+                "Fight for the Future",
+                "UPDATE: KOSA theater is a gift to Big Tech"),
+            PhoneNotificationClassifier.DedupKey(
+                "ＦＩＧＨＴ　ＦＯＲ　ＴＨＥ　ＦＵＴＵＲＥ！",
+                "update - kosa theater is a gift to big tech."));
+    }
+
+    [Fact]
+    public void ApproximateMatchAcceptsPayloadWhereMostCharactersAreShared()
+    {
+        Assert.True(PhoneNotificationClassifier.AreApproximatelyEquivalent(
+            "Fight for the Future",
+            "UPDATE: KOSA theater is a gift to Big Tech",
+            "Fight for the Future",
+            "KOSA theater is a gift to Big Tech"));
+    }
+
+    [Theory]
+    [InlineData("验证码", "123456", "验证码", "123457")]
+    [InlineData("付款提醒", "支付 ¥128.00", "付款提醒", "支付 ¥129.00")]
+    public void ApproximateMatchRejectsDifferentNumbers(
+        string firstTitle,
+        string firstBody,
+        string secondTitle,
+        string secondBody)
+    {
+        Assert.False(PhoneNotificationClassifier.AreApproximatelyEquivalent(
+            firstTitle,
+            firstBody,
+            secondTitle,
+            secondBody));
+    }
+
     [Theory]
     [InlineData("Phone Link", OverlaySource.PhoneLink)]
     [InlineData("手机连接", OverlaySource.PhoneLink)]
