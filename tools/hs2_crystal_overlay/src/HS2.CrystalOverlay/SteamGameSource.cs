@@ -13,8 +13,11 @@ internal sealed partial class SteamGameSourceCoordinator : IDisposable
         TimeSpan.FromSeconds(2);
     private static readonly TimeSpan CatalogRefreshInterval =
         TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan MaximumFutureStartSkew =
+        TimeSpan.FromMinutes(2);
 
     private readonly IOverlayPublisher publisher;
+    private readonly TimeZoneInfo steamLogTimeZone = TimeZoneInfo.Local;
     private readonly string? steamPath;
     private readonly string? processLogPath;
     private readonly HttpClient artworkClient = new()
@@ -30,6 +33,7 @@ internal sealed partial class SteamGameSourceCoordinator : IDisposable
     private string? activeName;
     private string? activeArtwork;
     private DateTimeOffset activeStartedAt;
+    private string? lastTimingDiagnostic;
     private int polling;
     private bool disposed;
 
@@ -56,7 +60,7 @@ internal sealed partial class SteamGameSourceCoordinator : IDisposable
 
         try
         {
-            var now = DateTimeOffset.Now;
+            var now = DateTimeOffset.UtcNow;
             if (string.IsNullOrWhiteSpace(processLogPath) ||
                 !File.Exists(processLogPath))
             {
@@ -73,16 +77,40 @@ internal sealed partial class SteamGameSourceCoordinator : IDisposable
             var text = ReadTail(processLogPath, TailBytes);
             var running = SteamGameProcessLogParser.Parse(
                 text,
-                now.Offset);
+                steamLogTimeZone);
             var current = running.FirstOrDefault(game =>
                 game.AppId != WallpaperEngineAppId &&
                 catalog.TryGetValue(game.AppId, out var metadata) &&
                 IsGame(metadata));
             if (current is null)
             {
+                lastTimingDiagnostic = null;
                 EndActive(now);
                 return;
             }
+
+            if (current.StartedAt > now + MaximumFutureStartSkew)
+            {
+                var diagnostic =
+                    $"{current.AppId}:{current.StartedAt.ToUnixTimeSeconds()}";
+                if (!string.Equals(
+                        diagnostic,
+                        lastTimingDiagnostic,
+                        StringComparison.Ordinal))
+                {
+                    RuntimeLog.Write(
+                        $"Steam game start rejected as future: " +
+                        $"appId={current.AppId}; " +
+                        $"sourceZone={steamLogTimeZone.Id}; " +
+                        $"startedAtUtc={current.StartedAt.UtcDateTime:O}.");
+                    lastTimingDiagnostic = diagnostic;
+                }
+
+                EndActive(now, publishSummary: false);
+                return;
+            }
+
+            lastTimingDiagnostic = null;
 
             var metadata = catalog[current.AppId];
             if (activeAppId != current.AppId)
@@ -94,6 +122,11 @@ internal sealed partial class SteamGameSourceCoordinator : IDisposable
                 activeArtwork = await CacheArtworkAsync(
                     current.AppId,
                     cancellation.Token);
+                RuntimeLog.Write(
+                    $"Steam game active: appId={current.AppId}; " +
+                    $"sourceZone={steamLogTimeZone.Id}; " +
+                    $"startedAtUtc={current.StartedAt.UtcDateTime:O}; " +
+                    $"display={SteamGameDisplay.FormatStartMeta(current.StartedAt)}.");
             }
 
             var elapsed = NonNegative(now - activeStartedAt);
@@ -106,7 +139,7 @@ internal sealed partial class SteamGameSourceCoordinator : IDisposable
                 dedupKey: $"steam:{current.AppId}",
                 visual: new OverlayVisualData(
                     Eyebrow: "STEAM 游戏",
-                    Meta: $"启动于 {activeStartedAt:HH:mm}",
+                    Meta: SteamGameDisplay.FormatStartMeta(activeStartedAt),
                     ArtworkPath: activeArtwork,
                     AccentHex: "#83CAFF")));
         }
@@ -146,7 +179,9 @@ internal sealed partial class SteamGameSourceCoordinator : IDisposable
                 OverlaySource.Steam,
                 activeName ?? "游戏已结束",
                 $"本次游玩 {FormatDuration(elapsed)}",
-                dedupKey: $"steam-summary:{activeAppId}:{activeStartedAt:O}",
+                dedupKey:
+                    $"steam-summary:{activeAppId}:" +
+                    activeStartedAt.ToUnixTimeMilliseconds(),
                 visual: new OverlayVisualData(
                     Eyebrow: "本次游戏",
                     ArtworkPath: activeArtwork,

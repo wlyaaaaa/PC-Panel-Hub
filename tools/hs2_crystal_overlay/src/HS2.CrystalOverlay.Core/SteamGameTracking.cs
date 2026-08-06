@@ -21,12 +21,27 @@ public static partial class SteamGameProcessLogParser
 
     public static IReadOnlyList<SteamRunningGame> Parse(
         string text,
-        TimeSpan localOffset)
+        TimeZoneInfo sourceTimeZone)
     {
+        ArgumentNullException.ThrowIfNull(sourceTimeZone);
         var running = new Dictionary<uint, DateTimeOffset>();
+        DateTimeOffset? previousTimestamp = null;
         using var reader = new StringReader(text);
         while (reader.ReadLine() is { } line)
         {
+            DateTimeOffset? lineTimestamp = null;
+            var timestamp = Timestamp().Match(line);
+            if (timestamp.Success &&
+                TryTimestamp(
+                    timestamp.Groups["time"].Value,
+                    sourceTimeZone,
+                    previousTimestamp,
+                    out var parsedTimestamp))
+            {
+                lineTimestamp = parsedTimestamp;
+                previousTimestamp = parsedTimestamp;
+            }
+
             if (ClientStarted().IsMatch(line))
             {
                 running.Clear();
@@ -35,10 +50,7 @@ public static partial class SteamGameProcessLogParser
 
             var added = Added().Match(line);
             if (added.Success &&
-                TryTimestamp(
-                    added.Groups["time"].Value,
-                    localOffset,
-                    out var startedAt) &&
+                lineTimestamp is { } startedAt &&
                 uint.TryParse(
                     added.Groups["app"].Value,
                     NumberStyles.None,
@@ -70,7 +82,8 @@ public static partial class SteamGameProcessLogParser
 
     private static bool TryTimestamp(
         string value,
-        TimeSpan offset,
+        TimeZoneInfo sourceTimeZone,
+        DateTimeOffset? previousTimestamp,
         out DateTimeOffset result)
     {
         result = default;
@@ -84,11 +97,45 @@ public static partial class SteamGameProcessLogParser
             return false;
         }
 
+        parsed = DateTime.SpecifyKind(parsed, DateTimeKind.Unspecified);
+        if (sourceTimeZone.IsInvalidTime(parsed))
+        {
+            return false;
+        }
+
+        if (sourceTimeZone.IsAmbiguousTime(parsed))
+        {
+            var candidates = sourceTimeZone
+                .GetAmbiguousTimeOffsets(parsed)
+                .Select(offset => new DateTimeOffset(parsed, offset))
+                .OrderBy(candidate => candidate.UtcTicks)
+                .ToArray();
+            if (previousTimestamp is not null)
+            {
+                foreach (var candidate in candidates)
+                {
+                    if (candidate.UtcTicks >= previousTimestamp.Value.UtcTicks)
+                    {
+                        result = candidate;
+                        return true;
+                    }
+                }
+            }
+
+            result = candidates[0];
+            return true;
+        }
+
         result = new DateTimeOffset(
-            DateTime.SpecifyKind(parsed, DateTimeKind.Unspecified),
-            offset);
+            parsed,
+            sourceTimeZone.GetUtcOffset(parsed));
         return true;
     }
+
+    [GeneratedRegex(
+        @"^\[(?<time>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]",
+        RegexOptions.CultureInvariant)]
+    private static partial Regex Timestamp();
 
     [GeneratedRegex(
         @"^\[(?<time>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\] Client version:",
@@ -104,6 +151,12 @@ public static partial class SteamGameProcessLogParser
         @"^\[(?<time>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\] Remove (?<app>\d+) from running list",
         RegexOptions.CultureInvariant)]
     private static partial Regex Removed();
+}
+
+public static class SteamGameDisplay
+{
+    public static string FormatStartMeta(DateTimeOffset startedAt) =>
+        $"启动于 {GlanceClock.FormatChinaTime(startedAt)} · UTC+8";
 }
 
 public static partial class SteamManifestParser
