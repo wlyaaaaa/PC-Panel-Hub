@@ -88,7 +88,16 @@ internal sealed class CrystalCardWindow : IDisposable
                 target.Height,
                 item.Policy.VisualTier ==
                 OverlayVisualTier.StackedNotification);
-            if (item.Request.Kind is
+            if (item.Request.Kind == OverlayKind.SystemOperation &&
+                item.Request.Visual?.AudioIcon is not null)
+            {
+                DrawAudioHud(
+                    graphics,
+                    item,
+                    target.Width,
+                    target.Height);
+            }
+            else if (item.Request.Kind is
                 OverlayKind.MediaActive or OverlayKind.MediaTrackChange)
             {
                 DrawMedia(
@@ -493,6 +502,113 @@ internal sealed class CrystalCardWindow : IDisposable
         }
 
         graphics.Restore(state);
+    }
+
+    private static void DrawAudioHud(
+        Graphics graphics,
+        OverlayItem item,
+        int width,
+        int height)
+    {
+        var icon = item.Request.Visual?.AudioIcon ??
+                   AudioHudIcon.Silent;
+        var accent = ParseColor(
+            item.Request.Visual?.AccentHex,
+            Color.FromArgb(244, 156, 231, 255));
+        var narrow = width < 900;
+        var iconSize = Math.Clamp(
+            height * (narrow ? 0.48f : 0.52f),
+            78f,
+            122f);
+        var left = narrow ? 42f : 54f;
+        var iconBounds = new RectangleF(
+            left,
+            (height - iconSize) / 2f,
+            iconSize,
+            iconSize);
+        DrawAudioIcon(graphics, iconBounds, icon, accent);
+
+        var textLeft = iconBounds.Right + (narrow ? 30f : 42f);
+        DrawFittedText(
+            graphics,
+            item.Request.Title,
+            new RectangleF(
+                textLeft,
+                20,
+                Math.Max(1, width - textLeft - left),
+                height - 40),
+            narrow ? 76f : 88f,
+            narrow ? 58f : 68f,
+            FontStyle.Bold,
+            Color.FromArgb(252, 244, 255, 251));
+    }
+
+    private static void DrawAudioIcon(
+        Graphics graphics,
+        RectangleF bounds,
+        AudioHudIcon icon,
+        Color accent)
+    {
+        using var fill = new SolidBrush(accent);
+        using var path = new GraphicsPath();
+        path.AddPolygon(
+        [
+            new PointF(bounds.Left + bounds.Width * 0.08f,
+                bounds.Top + bounds.Height * 0.39f),
+            new PointF(bounds.Left + bounds.Width * 0.30f,
+                bounds.Top + bounds.Height * 0.39f),
+            new PointF(bounds.Left + bounds.Width * 0.54f,
+                bounds.Top + bounds.Height * 0.17f),
+            new PointF(bounds.Left + bounds.Width * 0.54f,
+                bounds.Top + bounds.Height * 0.83f),
+            new PointF(bounds.Left + bounds.Width * 0.30f,
+                bounds.Top + bounds.Height * 0.61f),
+            new PointF(bounds.Left + bounds.Width * 0.08f,
+                bounds.Top + bounds.Height * 0.61f),
+        ]);
+        graphics.FillPath(fill, path);
+
+        using var pen = new Pen(
+            accent,
+            Math.Max(4f, bounds.Width * 0.052f))
+        {
+            StartCap = LineCap.Round,
+            EndCap = LineCap.Round,
+        };
+        if (icon == AudioHudIcon.Muted)
+        {
+            graphics.DrawLine(
+                pen,
+                bounds.Left + bounds.Width * 0.66f,
+                bounds.Top + bounds.Height * 0.35f,
+                bounds.Left + bounds.Width * 0.92f,
+                bounds.Top + bounds.Height * 0.65f);
+            graphics.DrawLine(
+                pen,
+                bounds.Left + bounds.Width * 0.92f,
+                bounds.Top + bounds.Height * 0.35f,
+                bounds.Left + bounds.Width * 0.66f,
+                bounds.Top + bounds.Height * 0.65f);
+            return;
+        }
+
+        var waveCount = icon switch
+        {
+            AudioHudIcon.Low => 1,
+            AudioHudIcon.Medium => 2,
+            AudioHudIcon.High => 3,
+            _ => 0,
+        };
+        for (var wave = 0; wave < waveCount; wave++)
+        {
+            var inset = bounds.Width * (0.27f - wave * 0.09f);
+            var arcBounds = new RectangleF(
+                bounds.Left + bounds.Width * 0.44f - inset,
+                bounds.Top + inset,
+                bounds.Width * 0.55f + inset * 2,
+                bounds.Height - inset * 2);
+            graphics.DrawArc(pen, arcBounds, -48, 96);
+        }
     }
 
     private static void DrawEvent(

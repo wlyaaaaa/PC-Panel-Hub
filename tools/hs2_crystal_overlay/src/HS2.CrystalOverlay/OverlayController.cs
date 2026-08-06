@@ -151,14 +151,35 @@ internal sealed class OverlayController : IOverlayPublisher, IDisposable
         var cards = frame.VisibleCards
             .Take(MaximumCardWindows)
             .ToArray();
+        var notificationStackOrders = cards
+            .Where(item =>
+                item.Policy.VisualTier ==
+                OverlayVisualTier.StackedNotification)
+            .OrderByDescending(item => item.PublishedAt)
+            .ThenByDescending(item => item.PublishSequence)
+            .Select((item, stackOrder) => new
+            {
+                item.Request.EventId,
+                StackOrder = stackOrder,
+            })
+            .ToDictionary(
+                item => item.EventId,
+                item => item.StackOrder,
+                StringComparer.Ordinal);
         var requests = cards.Select((item, index) =>
-                ToLayoutRequest(item, index))
+                ToLayoutRequest(
+                    item,
+                    index,
+                    notificationStackOrders.GetValueOrDefault(
+                        item.Request.EventId)))
             .ToArray();
         var deckSignature = string.Join(
             '\u001f',
             requests.Select(request =>
                 $"{request.EventId}\u001e{request.Kind}\u001e" +
-                $"{request.SortOrder}\u001e{request.WidthPreference}"));
+                $"{request.SortOrder}\u001e{request.WidthPreference}\u001e" +
+                $"{request.PlacementPreference}\u001e" +
+                $"{request.StackOrder}"));
         var plan = string.Equals(
                 deckSignature,
                 lastDeckSignature,
@@ -332,7 +353,8 @@ internal sealed class OverlayController : IOverlayPublisher, IDisposable
 
     private static OverlayCardLayoutRequest ToLayoutRequest(
         OverlayItem item,
-        int index)
+        int index,
+        int stackOrder)
     {
         var kind = item.Request.Kind switch
         {
@@ -363,11 +385,19 @@ internal sealed class OverlayController : IOverlayPublisher, IDisposable
             OverlayCardKind.Transient => OverlayCardWidthPreference.Compact,
             _ => OverlayCardWidthPreference.Auto,
         };
+        var placement = item.Policy.VisualTier ==
+                        OverlayVisualTier.StackedNotification
+            ? OverlayCardPlacementPreference.BottomStack
+            : item.Request.Kind == OverlayKind.SystemOperation
+                ? OverlayCardPlacementPreference.BottomLeft
+                : OverlayCardPlacementPreference.Auto;
         return new OverlayCardLayoutRequest(
             item.Request.EventId,
             kind,
             index,
-            width);
+            width,
+            placement,
+            stackOrder);
     }
 
     private static PixelRect Interpolate(

@@ -52,17 +52,24 @@ public sealed class OverlayScheduler
             UsesVisibleTimer(existingItem.Request, existingItem.Policy) &&
             existingTimer is not null &&
             IsSameVisibleOccurrence(existingItem.Request, request);
+        var preservesOrderingIdentity =
+            existingItem is not null &&
+            existingItem.Request.Kind == request.Kind &&
+            existingItem.Request.Source == request.Source &&
+            (!usesVisibleTimer || preservesVisibleTimer);
         DateTimeOffset? expiresAt =
             policy.Lifetime == OverlayLifetime.Timed &&
             !usesVisibleTimer
                 ? now + policy.Duration!.Value
                 : null;
-        var publishSequence = ++nextPublishSequence;
+        var publishSequence = preservesOrderingIdentity
+            ? existingItem!.PublishSequence
+            : ++nextPublishSequence;
 
         items[request.EventId] = new OverlayItem(
             request,
             policy,
-            preservesVisibleTimer
+            preservesOrderingIdentity
                 ? existingItem!.PublishedAt
                 : now,
             expiresAt,

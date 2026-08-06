@@ -18,6 +18,13 @@ public enum OverlayCardWidthPreference
     Compact,
 }
 
+public enum OverlayCardPlacementPreference
+{
+    Auto,
+    BottomLeft,
+    BottomStack,
+}
+
 public enum OverlayDeckRegion
 {
     Front,
@@ -29,7 +36,10 @@ public sealed record OverlayCardLayoutRequest(
     OverlayCardKind Kind,
     int SortOrder,
     OverlayCardWidthPreference WidthPreference =
-        OverlayCardWidthPreference.Auto);
+        OverlayCardWidthPreference.Auto,
+    OverlayCardPlacementPreference PlacementPreference =
+        OverlayCardPlacementPreference.Auto,
+    int StackOrder = 0);
 
 public sealed record OverlayCardLayoutPlacement(
     string EventId,
@@ -88,6 +98,7 @@ public static class CompositionPlanner
                     "Every layout request needs a non-empty event ID.",
                     nameof(requests));
             }
+
         }
 
         if (materialized
@@ -107,6 +118,22 @@ public static class CompositionPlanner
                 request,
                 priorityRank))
             .ToArray();
+        var stackOrders = cards
+            .Where(card =>
+                card.Request.PlacementPreference ==
+                OverlayCardPlacementPreference.BottomStack)
+            .Select(card => card.Request.StackOrder)
+            .Order()
+            .ToArray();
+        if (stackOrders.Length > 3 ||
+            !stackOrders.SequenceEqual(
+                Enumerable.Range(0, stackOrders.Length)))
+        {
+            throw new ArgumentException(
+                "Selected bottom-stack orders must be unique, contiguous " +
+                "from zero, and limited to three cards.",
+                nameof(requests));
+        }
         var geometry = DeckGeometry.For(display);
         if (cards.Length == 0)
         {
@@ -116,7 +143,7 @@ public static class CompositionPlanner
                 []);
         }
 
-        var rowCount = (cards.Length + 1) / 2;
+        var rowCount = CalculateRowCount(cards);
         var assignment = SelectBestAssignment(cards, rowCount);
         var rowHeights = CalculateRowHeights(
             assignment,
@@ -202,6 +229,33 @@ public static class CompositionPlanner
             "No dense deck layout exists for the supplied cards.");
     }
 
+    private static int CalculateRowCount(
+        IReadOnlyList<LayoutCard> cards)
+    {
+        var denseRows = (cards.Count + 1) / 2;
+        var stackedRows = cards
+            .Where(card =>
+                card.Request.PlacementPreference ==
+                OverlayCardPlacementPreference.BottomStack)
+            .Select(card => card.Request.StackOrder + 1)
+            .DefaultIfEmpty(0)
+            .Max();
+        var hasBottomStack = stackedRows > 0;
+        var frontPreferred = cards.Count(card =>
+            card.Request.WidthPreference ==
+                OverlayCardWidthPreference.Wide ||
+            card.Request.PlacementPreference ==
+                OverlayCardPlacementPreference.BottomStack ||
+            !hasBottomStack &&
+            card.Request.PlacementPreference ==
+                OverlayCardPlacementPreference.BottomLeft);
+        return Math.Min(
+            3,
+            Math.Max(
+                denseRows,
+                Math.Max(stackedRows, frontPreferred)));
+    }
+
     private static IEnumerable<RowTemplate[]> GenerateTemplates(
         int rowCount,
         int cardCount)
@@ -253,6 +307,9 @@ public static class CompositionPlanner
         {
             switch (templates[row])
             {
+                case RowTemplate.FrontLeft:
+                    slots.Add(new LayoutSlot(row, SlotKind.FrontLeft));
+                    break;
                 case RowTemplate.FrontWide:
                     slots.Add(new LayoutSlot(row, SlotKind.FrontWide));
                     break;
@@ -287,27 +344,42 @@ public static class CompositionPlanner
         score += PreferenceScore(
             card.Request.WidthPreference,
             slot.Kind);
+        score += PlacementScore(
+            card.Request.PlacementPreference,
+            slot.Kind);
 
-        var desiredRow = card.Request.Kind switch
+        var desiredRow = card.Request.PlacementPreference switch
         {
-            OverlayCardKind.Media => 0,
-            OverlayCardKind.Activity => Math.Min(1, rowCount - 1),
-            OverlayCardKind.Progress => Math.Min(1, rowCount - 1),
-            OverlayCardKind.Transient => 0,
-            OverlayCardKind.Notification
-                when slot.Kind == SlotKind.Side =>
-                    Math.Max(0, rowCount - 2),
-            _ => rowCount - 1,
+            OverlayCardPlacementPreference.BottomLeft => 0,
+            OverlayCardPlacementPreference.BottomStack => Math.Min(
+                card.Request.StackOrder,
+                rowCount - 1),
+            _ => card.Request.Kind switch
+            {
+                OverlayCardKind.Media => 0,
+                OverlayCardKind.Activity => Math.Min(1, rowCount - 1),
+                OverlayCardKind.Progress => Math.Min(1, rowCount - 1),
+                OverlayCardKind.Transient => 0,
+                OverlayCardKind.Notification
+                    when slot.Kind == SlotKind.Side =>
+                        Math.Max(0, rowCount - 2),
+                _ => rowCount - 1,
+            },
         };
-        var rowPenalty = card.Request.Kind switch
+        var rowPenalty = card.Request.PlacementPreference switch
         {
-            OverlayCardKind.Media => 100,
-            OverlayCardKind.Activity => 80,
-            OverlayCardKind.Progress => 70,
-            OverlayCardKind.Notification => 90,
-            OverlayCardKind.Transient => 40,
-            OverlayCardKind.Alert => 70,
-            _ => 40,
+            OverlayCardPlacementPreference.BottomStack => 1000,
+            OverlayCardPlacementPreference.BottomLeft => 700,
+            _ => card.Request.Kind switch
+            {
+                OverlayCardKind.Media => 100,
+                OverlayCardKind.Activity => 80,
+                OverlayCardKind.Progress => 70,
+                OverlayCardKind.Notification => 90,
+                OverlayCardKind.Transient => 40,
+                OverlayCardKind.Alert => 70,
+                _ => 40,
+            },
         };
         score -= Math.Abs(slot.Row - desiredRow) * rowPenalty;
 
@@ -372,9 +444,9 @@ public static class CompositionPlanner
             },
             _ => slot switch
             {
-                SlotKind.FrontWide => 220,
+                SlotKind.FrontWide => 240,
                 SlotKind.Side => 200,
-                _ => 240,
+                _ => 220,
             },
         };
 
@@ -386,13 +458,36 @@ public static class CompositionPlanner
             {
                 SlotKind.FrontWide => 200,
                 SlotKind.Side => -2000,
-                _ => 0,
+                _ => -400,
             },
             OverlayCardWidthPreference.Compact => slot switch
             {
-                SlotKind.FrontWide => -40,
-                SlotKind.Side => 220,
-                _ => 80,
+                SlotKind.FrontWide => -200,
+                SlotKind.Side => 100,
+                _ => 300,
+            },
+            _ => 0,
+        };
+
+    private static int PlacementScore(
+        OverlayCardPlacementPreference preference,
+        SlotKind slot) => preference switch
+        {
+            OverlayCardPlacementPreference.BottomLeft => slot switch
+            {
+                SlotKind.FrontLeft => 700,
+                SlotKind.FrontWide => 500,
+                SlotKind.FrontRight => 350,
+                SlotKind.Side => 200,
+                _ => 0,
+            },
+            OverlayCardPlacementPreference.BottomStack => slot switch
+            {
+                SlotKind.FrontWide => 850,
+                SlotKind.FrontLeft => 600,
+                SlotKind.FrontRight => 260,
+                SlotKind.Side => 100,
+                _ => 0,
             },
             _ => 0,
         };
@@ -521,6 +616,7 @@ public static class CompositionPlanner
 
     private static int Capacity(RowTemplate template) => template switch
     {
+        RowTemplate.FrontLeft => 1,
         RowTemplate.FrontWide => 1,
         RowTemplate.FrontWideWithSide => 2,
         RowTemplate.FrontSplit => 2,
@@ -634,6 +730,7 @@ public static class CompositionPlanner
 
     private enum RowTemplate
     {
+        FrontLeft,
         FrontWide,
         FrontWideWithSide,
         FrontSplit,

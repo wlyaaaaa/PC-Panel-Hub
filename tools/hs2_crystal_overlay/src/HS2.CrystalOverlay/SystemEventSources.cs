@@ -1,132 +1,383 @@
+using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using HS2.CrystalOverlay.Core;
 using NAudio.CoreAudioApi;
+using NAudio.CoreAudioApi.Interfaces;
 
 namespace HS2_CrystalOverlay;
 
-internal sealed record AudioOutputState(
-    string DeviceId,
-    string DeviceName,
-    int VolumePercent,
-    bool IsMuted);
-
 internal sealed class AudioOperationSourceCoordinator : IDisposable
 {
-    private static readonly TimeSpan PollInterval =
-        TimeSpan.FromMilliseconds(500);
+    private static readonly TimeSpan RecoveryInterval =
+        TimeSpan.FromSeconds(2);
 
     private readonly IOverlayPublisher publisher;
-    private readonly MMDeviceEnumerator devices = new();
-    private readonly Timer timer;
-    private AudioOutputState? previous;
-    private int polling;
-    private bool disposed;
+    private readonly BlockingCollection<AudioCommand> commands = new();
+    private readonly DefaultEndpointNotificationClient deviceNotifications;
+    private readonly Thread worker;
+    private int disposeState;
 
     internal AudioOperationSourceCoordinator(IOverlayPublisher publisher)
     {
         this.publisher = publisher;
-        timer = new Timer(
-            Poll,
-            null,
-            TimeSpan.Zero,
-            PollInterval);
+        deviceNotifications = new DefaultEndpointNotificationClient(
+            () => Enqueue(RebindAudioCommand.Instance));
+        worker = new Thread(Run)
+        {
+            IsBackground = true,
+            Name = "HS2 audio endpoint worker",
+        };
+        worker.Start();
     }
 
-    private void Poll(object? state)
+    private void Run()
     {
-        if (disposed || Interlocked.Exchange(ref polling, 1) != 0)
+        MMDeviceEnumerator? devices = null;
+        MMDevice? currentDevice = null;
+        AudioEndpointVolume? endpointVolume = null;
+        AudioEndpointVolumeNotificationDelegate? volumeHandler = null;
+        var notificationsRegistered = false;
+        var tracker = new AudioHudStateTracker();
+        long activeGeneration = 0;
+
+        try
+        {
+            devices = new MMDeviceEnumerator();
+            try
+            {
+                devices.RegisterEndpointNotificationCallback(
+                    deviceNotifications);
+                notificationsRegistered = true;
+            }
+            catch (COMException exception)
+            {
+                RuntimeLog.Write(
+                    $"Audio endpoint notifications unavailable: " +
+                    exception.GetType().Name);
+            }
+
+            BindDefaultEndpoint();
+            while (Volatile.Read(ref disposeState) == 0)
+            {
+                if (commands.TryTake(
+                        out var command,
+                        RecoveryInterval))
+                {
+                    if (Volatile.Read(ref disposeState) != 0)
+                    {
+                        break;
+                    }
+
+                    switch (command)
+                    {
+                        case RebindAudioCommand:
+                            BindDefaultEndpoint();
+                            break;
+                        case VolumeChangedAudioCommand changed
+                            when changed.Generation == activeGeneration:
+                            Publish(tracker.Observe(
+                                changed.VolumePercent,
+                                changed.IsMuted));
+                            break;
+                    }
+                }
+                else if (Volatile.Read(ref disposeState) == 0)
+                {
+                    Reconcile();
+                }
+            }
+        }
+        catch (Exception exception) when (
+            exception is COMException or InvalidOperationException)
+        {
+            RuntimeLog.Write(
+                $"Audio endpoint worker failed: " +
+                exception.GetType().Name);
+        }
+        finally
+        {
+            activeGeneration++;
+            DetachEndpoint();
+            if (notificationsRegistered && devices is not null)
+            {
+                try
+                {
+                    devices.UnregisterEndpointNotificationCallback(
+                        deviceNotifications);
+                }
+                catch (Exception exception) when (
+                    exception is COMException or InvalidOperationException)
+                {
+                    RuntimeLog.Write(
+                        $"Audio endpoint notification cleanup failed: " +
+                        exception.GetType().Name);
+                }
+            }
+
+            if (devices is not null)
+            {
+                try
+                {
+                    devices.Dispose();
+                }
+                catch (Exception exception) when (
+                    exception is COMException or InvalidOperationException)
+                {
+                    RuntimeLog.Write(
+                        $"Audio enumerator cleanup failed: " +
+                        exception.GetType().Name);
+                }
+            }
+        }
+
+        void BindDefaultEndpoint()
+        {
+            if (devices is null || Volatile.Read(ref disposeState) != 0)
+            {
+                return;
+            }
+
+            activeGeneration++;
+            DetachEndpoint();
+            MMDevice? replacementDevice = null;
+            AudioEndpointVolume? replacementVolume = null;
+            AudioEndpointVolumeNotificationDelegate? replacementHandler =
+                null;
+            try
+            {
+                replacementDevice = devices.GetDefaultAudioEndpoint(
+                    DataFlow.Render,
+                    Role.Console);
+                replacementVolume = replacementDevice.AudioEndpointVolume;
+                var generation = activeGeneration;
+                replacementHandler =
+                    notification => Enqueue(
+                        new VolumeChangedAudioCommand(
+                            generation,
+                            AudioHudProjection.ToPercent(
+                                notification.MasterVolume),
+                            notification.Muted));
+                replacementVolume.OnVolumeNotification +=
+                    replacementHandler;
+                var initialPercent = AudioHudProjection.ToPercent(
+                    replacementVolume.MasterVolumeLevelScalar);
+                var initialMute = replacementVolume.Mute;
+                currentDevice = replacementDevice;
+                endpointVolume = replacementVolume;
+                volumeHandler = replacementHandler;
+                replacementDevice = null;
+                replacementVolume = null;
+                replacementHandler = null;
+                Publish(tracker.Observe(
+                    initialPercent,
+                    initialMute));
+            }
+            catch (Exception exception) when (
+                exception is COMException or InvalidOperationException)
+            {
+                RuntimeLog.Write(
+                    $"Audio endpoint bind failed: " +
+                    exception.GetType().Name);
+            }
+            finally
+            {
+                ReleaseEndpoint(
+                    replacementVolume,
+                    replacementHandler,
+                    replacementDevice);
+            }
+        }
+
+        void Reconcile()
+        {
+            if (devices is null || Volatile.Read(ref disposeState) != 0)
+            {
+                return;
+            }
+
+            try
+            {
+                using var defaultDevice =
+                    devices.GetDefaultAudioEndpoint(
+                        DataFlow.Render,
+                        Role.Console);
+                if (endpointVolume is null ||
+                    !string.Equals(
+                        currentDevice?.ID,
+                        defaultDevice.ID,
+                        StringComparison.Ordinal))
+                {
+                    BindDefaultEndpoint();
+                    return;
+                }
+
+                Publish(tracker.Observe(
+                    AudioHudProjection.ToPercent(
+                        endpointVolume.MasterVolumeLevelScalar),
+                    endpointVolume.Mute));
+            }
+            catch (Exception exception) when (
+                exception is COMException or InvalidOperationException)
+            {
+                RuntimeLog.Write(
+                    $"Audio endpoint recovery failed: " +
+                    exception.GetType().Name);
+            }
+        }
+
+        void DetachEndpoint()
+        {
+            var detachedVolume = endpointVolume;
+            var detachedHandler = volumeHandler;
+            var detachedDevice = currentDevice;
+            endpointVolume = null;
+            volumeHandler = null;
+            currentDevice = null;
+            ReleaseEndpoint(
+                detachedVolume,
+                detachedHandler,
+                detachedDevice);
+        }
+
+        void ReleaseEndpoint(
+            AudioEndpointVolume? volume,
+            AudioEndpointVolumeNotificationDelegate? handler,
+            MMDevice? device)
+        {
+            if (volume is not null && handler is not null)
+            {
+                try
+                {
+                    volume.OnVolumeNotification -= handler;
+                }
+                catch (Exception exception) when (
+                    exception is COMException or InvalidOperationException)
+                {
+                    RuntimeLog.Write(
+                        $"Audio endpoint unsubscribe failed: " +
+                        exception.GetType().Name);
+                }
+            }
+
+            if (volume is not null)
+            {
+                try
+                {
+                    volume.Dispose();
+                }
+                catch (Exception exception) when (
+                    exception is COMException or InvalidOperationException)
+                {
+                    RuntimeLog.Write(
+                        $"Audio endpoint cleanup failed: " +
+                        exception.GetType().Name);
+                }
+            }
+
+            if (device is not null)
+            {
+                try
+                {
+                    device.Dispose();
+                }
+                catch (Exception exception) when (
+                    exception is COMException or InvalidOperationException)
+                {
+                    RuntimeLog.Write(
+                        $"Audio device cleanup failed: " +
+                        exception.GetType().Name);
+                }
+            }
+        }
+    }
+
+    private void Publish(OverlayRequest? request)
+    {
+        if (request is not null &&
+            Volatile.Read(ref disposeState) == 0)
+        {
+            _ = publisher.Publish(request);
+        }
+    }
+
+    private void Enqueue(AudioCommand command)
+    {
+        if (Volatile.Read(ref disposeState) != 0)
         {
             return;
         }
 
         try
         {
-            using var device = devices.GetDefaultAudioEndpoint(
-                DataFlow.Render,
-                Role.Multimedia);
-            var current = new AudioOutputState(
-                device.ID,
-                device.FriendlyName,
-                (int)Math.Round(
-                    device.AudioEndpointVolume.MasterVolumeLevelScalar *
-                    100),
-                device.AudioEndpointVolume.Mute);
-            if (previous is null)
-            {
-                previous = current;
-                return;
-            }
-
-            if (!string.Equals(
-                    previous.DeviceId,
-                    current.DeviceId,
-                    StringComparison.Ordinal))
-            {
-                Publish(
-                    "audio-device",
-                    "音频输出已切换",
-                    current.DeviceName,
-                    "输出设备");
-            }
-            else if (previous.IsMuted != current.IsMuted)
-            {
-                Publish(
-                    "audio-mute",
-                    current.IsMuted ? "已静音" : "已取消静音",
-                    current.DeviceName,
-                    "音频");
-            }
-            else if (previous.VolumePercent != current.VolumePercent)
-            {
-                Publish(
-                    "audio-volume",
-                    $"音量 {current.VolumePercent}%",
-                    current.DeviceName,
-                    "系统音量");
-            }
-
-            previous = current;
+            _ = commands.TryAdd(command);
         }
-        catch (Exception exception) when (
-            exception is COMException or InvalidOperationException)
+        catch (InvalidOperationException)
         {
-            RuntimeLog.Write(
-                $"Audio operation probe failed: {exception.GetType().Name}");
         }
-        finally
-        {
-            Interlocked.Exchange(ref polling, 0);
-        }
-    }
-
-    private void Publish(
-        string eventId,
-        string title,
-        string body,
-        string eyebrow)
-    {
-        _ = publisher.Publish(OverlayRequest.Timed(
-            eventId,
-            OverlayKind.SystemOperation,
-            OverlaySource.System,
-            title,
-            body,
-            visual: new OverlayVisualData(
-                Eyebrow: eyebrow,
-                AccentHex: "#9CE7FF")));
     }
 
     public void Dispose()
     {
-        if (disposed)
+        if (Interlocked.Exchange(ref disposeState, 1) != 0)
         {
             return;
         }
 
-        disposed = true;
-        timer.Dispose();
-        devices.Dispose();
+        commands.CompleteAdding();
+        if (Thread.CurrentThread != worker)
+        {
+            worker.Join();
+        }
+
+        commands.Dispose();
     }
+
+    private sealed class DefaultEndpointNotificationClient(
+        Action onDefaultDeviceChanged) : IMMNotificationClient
+    {
+        public void OnDeviceStateChanged(
+            string deviceId,
+            DeviceState newState)
+        {
+        }
+
+        public void OnDeviceAdded(string pwstrDeviceId)
+        {
+        }
+
+        public void OnDeviceRemoved(string deviceId)
+        {
+        }
+
+        public void OnDefaultDeviceChanged(
+            DataFlow flow,
+            Role role,
+            string defaultDeviceId)
+        {
+            if (flow == DataFlow.Render && role == Role.Console)
+            {
+                onDefaultDeviceChanged();
+            }
+        }
+
+        public void OnPropertyValueChanged(
+            string pwstrDeviceId,
+            PropertyKey key)
+        {
+        }
+    }
+
+    private abstract record AudioCommand;
+
+    private sealed record RebindAudioCommand : AudioCommand
+    {
+        internal static RebindAudioCommand Instance { get; } = new();
+    }
+
+    private sealed record VolumeChangedAudioCommand(
+        long Generation,
+        int VolumePercent,
+        bool IsMuted) : AudioCommand;
 }
 
 internal sealed class DeviceNetworkSourceCoordinator : IDisposable

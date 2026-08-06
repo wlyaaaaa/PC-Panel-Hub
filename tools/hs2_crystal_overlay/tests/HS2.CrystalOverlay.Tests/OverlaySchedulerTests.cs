@@ -8,6 +8,39 @@ public sealed class OverlaySchedulerTests
         new(2026, 7, 30, 12, 0, 0, TimeSpan.Zero);
 
     [Fact]
+    public void SameAudioHudEvent_UpdatesInPlaceAndExpiresFromTheLastChange()
+    {
+        var scheduler = new OverlayScheduler();
+        scheduler.Publish(
+            AudioHudProjection.Create(22, isMuted: false),
+            Now);
+        var original = Assert.Single(scheduler.GetFrame(
+            Now,
+            maxVisibleCards: 6,
+            maxVisibleNotifications: 3).VisibleCards);
+
+        scheduler.Publish(
+            AudioHudProjection.Create(100, isMuted: false),
+            Now.AddSeconds(2));
+        var updated = Assert.Single(scheduler.GetFrame(
+            Now.AddSeconds(2),
+            maxVisibleCards: 6,
+            maxVisibleNotifications: 3).VisibleCards);
+
+        Assert.Equal("100%", updated.Request.Title);
+        Assert.Equal(original.PublishedAt, updated.PublishedAt);
+        Assert.Equal(original.PublishSequence, updated.PublishSequence);
+        Assert.Single(scheduler.GetFrame(
+            Now.AddSeconds(7.9),
+            maxVisibleCards: 6,
+            maxVisibleNotifications: 3).VisibleCards);
+        Assert.Empty(scheduler.GetFrame(
+            Now.AddSeconds(8.1),
+            maxVisibleCards: 6,
+            maxVisibleNotifications: 3).VisibleCards);
+    }
+
+    [Fact]
     public void DirectPhoneBattery_RemainsVisibleAlongsidePhoneNotification()
     {
         var scheduler = new OverlayScheduler();

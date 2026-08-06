@@ -50,6 +50,20 @@ internal static class DemoSource
             case "system":
                 PublishSystemOperation(publisher);
                 break;
+            case "system-mute":
+                PublishMutedSystemOperation(publisher);
+                break;
+            case "audio-phone":
+                PublishNotificationBurst(publisher);
+                PublishSystemOperation(publisher);
+                break;
+            case "audio-media":
+                PublishMedia(publisher);
+                PublishSystemOperation(publisher);
+                break;
+            case "phone-order":
+                PublishNotificationBurst(publisher);
+                break;
             case "alert":
                 PublishHardwareAlert(publisher);
                 break;
@@ -153,7 +167,7 @@ internal static class DemoSource
     {
         await Task.Delay(TimeSpan.FromSeconds(4));
         _ = publisher.Publish(OverlayRequest.End(
-            "demo-system-operation",
+            AudioHudProjection.EventId,
             OverlayKind.SystemOperation,
             OverlaySource.System));
         await Task.Delay(TimeSpan.FromSeconds(3));
@@ -229,15 +243,15 @@ internal static class DemoSource
     private static void PublishSystemOperation(
         IOverlayPublisher publisher)
     {
-        _ = publisher.Publish(OverlayRequest.Timed(
-            "demo-system-operation",
-            OverlayKind.SystemOperation,
-            OverlaySource.System,
-            "音量 42%",
-            "输出设备  ·  扬声器（USB DAC）",
-            visual: new OverlayVisualData(
-                Eyebrow: "系统操作 / SYSTEM",
-                AccentHex: "#8FF8FF")));
+        _ = publisher.Publish(
+            AudioHudProjection.Create(100, isMuted: false));
+    }
+
+    private static void PublishMutedSystemOperation(
+        IOverlayPublisher publisher)
+    {
+        _ = publisher.Publish(
+            AudioHudProjection.Create(100, isMuted: true));
     }
 
     private static void PublishHardwareAlert(

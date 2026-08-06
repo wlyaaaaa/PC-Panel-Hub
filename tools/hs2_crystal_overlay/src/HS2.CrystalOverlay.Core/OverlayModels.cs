@@ -48,6 +48,15 @@ public enum OverlayLifetime
     WhileActive,
 }
 
+public enum AudioHudIcon
+{
+    Muted,
+    Silent,
+    Low,
+    Medium,
+    High,
+}
+
 public sealed record TypographyScale(
     double TitlePx,
     double BodyPx,
@@ -72,7 +81,8 @@ public sealed record OverlayVisualData(
     bool? IsCharging = null,
     double? MarqueeProgress = null,
     string? TranslatedTitle = null,
-    string? SecondaryBody = null);
+    string? SecondaryBody = null,
+    AudioHudIcon? AudioIcon = null);
 
 public sealed record OverlayRequest(
     string EventId,
