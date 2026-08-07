@@ -27,10 +27,11 @@ function Get-LiveStreamEvidence {
             $heartbeat = Get-Content -Raw -LiteralPath $heartbeatItem.FullName | ConvertFrom-Json
             if ($heartbeatAgeSeconds -le 15 -and
                 [int64]$heartbeat.frame -gt 0 -and
-                [string]$heartbeat.status -ne "fatal") {
+                [string]$heartbeat.status -ne "fatal" -and
+                [string]$heartbeat.transport_mode -eq "verified_full_200") {
                 return [pscustomobject]@{
                     Source = "fresh-heartbeat"
-                    Detail = ("frame={0} ageSeconds={1:N1} file={2}" -f [int64]$heartbeat.frame, $heartbeatAgeSeconds, $heartbeatItem.Name)
+                    Detail = ("frame={0} ageSeconds={1:N1} transport={2} file={3}" -f [int64]$heartbeat.frame, $heartbeatAgeSeconds, [string]$heartbeat.transport_mode, $heartbeatItem.Name)
                 }
             }
         }

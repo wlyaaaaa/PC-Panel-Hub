@@ -173,6 +173,7 @@ namespace TURZX.SideScreen
                                 {
                                     sent++;
                                     consecutiveSendFailures = 0;
+                                    lastFullFrame = frame;
                                     Console.WriteLine("frame " + frame + " sent in " + sendWatch.ElapsedMilliseconds + "ms: " + message);
                                 }
                             }
@@ -273,6 +274,11 @@ namespace TURZX.SideScreen
         internal static bool ShouldSendFullFrameForTest(int frame, bool hasPreviousFrame, int fullResyncEveryFrames)
         {
             return ShouldSendFullFrame(frame, hasPreviousFrame, fullResyncEveryFrames);
+        }
+
+        internal static bool IsDifferentialTransportAllowedForTest(bool useDiff, bool dryRun, bool allowUnverifiedDiff)
+        {
+            return IsDifferentialTransportAllowed(useDiff, dryRun, allowUnverifiedDiff);
         }
 
         internal static string DescribeExceptionForTest(Exception error)
@@ -385,6 +391,11 @@ namespace TURZX.SideScreen
             return !hasPreviousFrame || (fullResyncEveryFrames > 0 && frame > 1 && frame % fullResyncEveryFrames == 0);
         }
 
+        private static bool IsDifferentialTransportAllowed(bool useDiff, bool dryRun, bool allowUnverifiedDiff)
+        {
+            return !useDiff || dryRun || allowUnverifiedDiff;
+        }
+
         private static bool IsLikelyDeviceSendFailure(Exception error)
         {
             Exception current = error;
@@ -459,6 +470,7 @@ namespace TURZX.SideScreen
             AppendJsonProperty(json, "status", frameStatus, true);
             AppendJsonProperty(json, "snapshot_status", snapshotStatus, true);
             AppendJsonProperty(json, "error", frameError, true);
+            AppendJsonProperty(json, "transport_mode", options.UseDiff ? "experimental_diff_204" : "verified_full_200", true);
             AppendJsonProperty(json, "frame", frame, true);
             AppendJsonProperty(json, "sent", sent, true);
             AppendJsonProperty(json, "failed", failed, true);
@@ -794,8 +806,8 @@ namespace TURZX.SideScreen
 
         private static void PrintUsage()
         {
-            Console.WriteLine("TURZX.SideScreen.Stream.exe [--sample] [--dry-run] [--diff] [--alt-helper] [--frames N] [--interval-ms 1000] [--preview-interval-seconds 45] [--full-resync-every-frames 300] [--max-consecutive-send-failures 5] [--metrics-url URL] [--root TURZX_ROOT] [--port COM7]");
-            Console.WriteLine("frames=0 means infinite. --diff sends one full baseline frame, then command-204 differential frames.");
+            Console.WriteLine("TURZX.SideScreen.Stream.exe [--sample] [--dry-run] [--diff --allow-unverified-diff] [--alt-helper] [--frames N] [--interval-ms 3000] [--preview-interval-seconds 45] [--full-resync-every-frames 300] [--max-consecutive-send-failures 5] [--metrics-url URL] [--root TURZX_ROOT] [--port COM7]");
+            Console.WriteLine("frames=0 means infinite. Live --diff uses unverified command 204 and requires --allow-unverified-diff; production uses verified full-frame command 200.");
         }
 
         private sealed class StreamOptions
@@ -804,6 +816,7 @@ namespace TURZX.SideScreen
             public bool UseSample;
             public bool DryRun;
             public bool UseDiff;
+            public bool AllowUnverifiedDiff;
             public bool AltHelper;
             public int FrameCount = 0;
             public int IntervalMs = 3000;
@@ -828,6 +841,7 @@ namespace TURZX.SideScreen
                     else if (arg == "--sample") options.UseSample = true;
                     else if (arg == "--dry-run") options.DryRun = true;
                     else if (arg == "--diff") options.UseDiff = true;
+                    else if (arg == "--allow-unverified-diff") options.AllowUnverifiedDiff = true;
                     else if (arg == "--alt-helper") options.AltHelper = true;
                     else if (arg == "--frames") options.FrameCount = int.Parse(Next(args, ref i, arg));
                     else if (arg == "--interval-ms") options.IntervalMs = int.Parse(Next(args, ref i, arg));
@@ -849,6 +863,10 @@ namespace TURZX.SideScreen
                 if (options.MaxConsecutiveSendFailures < 0) throw new ArgumentOutOfRangeException("max-consecutive-send-failures");
                 if (options.FullResyncEveryFrames < 0) throw new ArgumentOutOfRangeException("full-resync-every-frames");
                 if (options.PreviewIntervalSeconds < 0) throw new ArgumentOutOfRangeException("preview-interval-seconds");
+                if (!IsDifferentialTransportAllowed(options.UseDiff, options.DryRun, options.AllowUnverifiedDiff))
+                {
+                    throw new InvalidOperationException("Live differential command 204 is unverified; use the full-frame transport or explicitly pass --allow-unverified-diff for isolated experiments.");
+                }
                 return options;
             }
 

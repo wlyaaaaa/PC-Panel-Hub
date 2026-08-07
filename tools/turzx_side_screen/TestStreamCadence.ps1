@@ -96,6 +96,14 @@ public static class TestStreamCadenceProgram
             SideScreenStreamApp.ShouldSendFullFrameForTest(300, true, 300));
         Equal("zero disables periodic full baselines after startup", false,
             SideScreenStreamApp.ShouldSendFullFrameForTest(300, true, 0));
+        Equal("verified full-frame transport is always allowed", true,
+            SideScreenStreamApp.IsDifferentialTransportAllowedForTest(false, false, false));
+        Equal("live differential transport fails closed without explicit opt-in", false,
+            SideScreenStreamApp.IsDifferentialTransportAllowedForTest(true, false, false));
+        Equal("dry-run differential transport remains available for tests", true,
+            SideScreenStreamApp.IsDifferentialTransportAllowedForTest(true, true, false));
+        Equal("live differential transport requires explicit experimental opt-in", true,
+            SideScreenStreamApp.IsDifferentialTransportAllowedForTest(true, false, true));
         Equal("preview writes the first frame", true,
             SideScreenStreamApp.ShouldWritePreviewForTest(-1, 1000, 1000, 45));
         Equal("preview is throttled before the configured interval", false,

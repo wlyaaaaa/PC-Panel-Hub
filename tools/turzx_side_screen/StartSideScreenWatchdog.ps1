@@ -1,7 +1,7 @@
 param(
     [string]$Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path,
     [string]$Port = "COM7",
-    [int]$IntervalMs = 1000,
+    [int]$IntervalMs = 3000,
     [int]$FullResyncEveryFrames = 300,
     [int]$PreviewIntervalSeconds = 45,
     [int64]$MaxStackLogBytes = 1048576,
@@ -580,6 +580,13 @@ function Get-StreamHeartbeatHealth {
                 return [pscustomobject]@{
                     Healthy = $false
                     Reason = ("frame-status={0} error={1}" -f $frameStatus, [string]$heartbeat.error)
+                }
+            }
+            $transportMode = [string]$heartbeat.transport_mode
+            if ($transportMode -ne "verified_full_200") {
+                return [pscustomobject]@{
+                    Healthy = $false
+                    Reason = ("transport-unverified mode={0}" -f $transportMode)
                 }
             }
             return [pscustomobject]@{

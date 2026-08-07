@@ -16,7 +16,6 @@ try {
     powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $scriptDir "StartVideoStream.ps1") `
         -Sample `
         -DryRun `
-        -Diff `
         -Frames 2 `
         -IntervalMs 10 `
         -PreviewIntervalSeconds 45 `
@@ -47,6 +46,9 @@ try {
     }
     if ([int]$heartbeatJson.failed -ne 0) {
         throw "Stream heartbeat reported failures: $($heartbeatJson.failed)"
+    }
+    if ([string]$heartbeatJson.transport_mode -ne "verified_full_200") {
+        throw "Default stream test must exercise verified full-frame transport: $($heartbeatJson.transport_mode)"
     }
 
     Write-Host ("OK isolated preview {0} bytes -> {1}" -f $item.Length, $item.FullName)

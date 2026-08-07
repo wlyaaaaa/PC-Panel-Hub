@@ -12,11 +12,16 @@
     [switch]$Sample,
     [switch]$DryRun,
     [switch]$Diff,
+    [switch]$AllowUnverifiedDifferentialProtocol,
     [switch]$AltHelper
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+if ($Diff -and -not $DryRun -and -not $AllowUnverifiedDifferentialProtocol) {
+    throw "Live differential command 204 is unverified. Production must use the full-frame transport."
+}
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $outDir = Join-Path $scriptDir "out"
@@ -231,6 +236,7 @@ try {
     if ($Sample) { $argsList += "--sample" }
     if ($DryRun) { $argsList += "--dry-run" }
     if ($Diff) { $argsList += "--diff" }
+    if ($AllowUnverifiedDifferentialProtocol) { $argsList += "--allow-unverified-diff" }
     if ($AltHelper) { $argsList += "--alt-helper" }
     & $exePath @argsList
     if ($LASTEXITCODE -ne 0) {

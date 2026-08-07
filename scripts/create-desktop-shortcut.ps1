@@ -3,7 +3,7 @@ param(
     [string]$ShortcutName = "TURZX SideScreen Start.lnk",
     [string]$StartMenuShortcutName = "TURZX SideScreen.lnk",
     [string]$Port = "COM7",
-    [int]$IntervalMs = 1000,
+    [int]$IntervalMs = 3000,
     [switch]$NoDesktop,
     [switch]$NoStartMenu,
     [switch]$DryRun

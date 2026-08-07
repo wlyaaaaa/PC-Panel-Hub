@@ -8,7 +8,9 @@ $ErrorActionPreference = "Stop"
 $Root = (Resolve-Path -LiteralPath $Root).Path
 $side = Join-Path $Root "tools\turzx_side_screen"
 $streamSource = Get-Content -Raw -LiteralPath (Join-Path $side "TURZX.SideScreen.Stream.cs")
-$streamStart = Get-Content -Raw -LiteralPath (Join-Path $side "StartVideoStream.ps1")
+$streamStartPath = Join-Path $side "StartVideoStream.ps1"
+$streamStart = Get-Content -Raw -LiteralPath $streamStartPath
+$streamBackground = Get-Content -Raw -LiteralPath (Join-Path $side "StartVideoStreamBackground.ps1")
 $stackStart = Get-Content -Raw -LiteralPath (Join-Path $side "StartSideScreenStack.ps1")
 $watchdogStart = Get-Content -Raw -LiteralPath (Join-Path $side "StartSideScreenWatchdog.ps1")
 $videoTest = Get-Content -Raw -LiteralPath (Join-Path $side "TestVideoStream.ps1")
@@ -41,6 +43,22 @@ if ($streamSource -match [regex]::Escape("File.WriteAllText(path, json.ToString(
     throw "Heartbeat must not overwrite stream-heartbeat.json in place."
 }
 
+$unverifiedDiffRejected = $false
+try {
+    & $streamStartPath -Root $Root -Diff -Frames 1 2>&1 | Out-Null
+}
+catch {
+    if ($_.Exception.Message -match "differential command 204 is unverified") {
+        $unverifiedDiffRejected = $true
+    }
+    else {
+        throw
+    }
+}
+if (-not $unverifiedDiffRejected) {
+    throw "Live differential transport must fail closed before touching COM7."
+}
+
 foreach ($pattern in @(
     '[int]$PreviewIntervalSeconds = 45',
     '[string]$PreviewDir',
@@ -53,6 +71,37 @@ foreach ($pattern in @(
 )) {
     if ($streamStart -notmatch [regex]::Escape($pattern)) {
         throw "StartVideoStream missing reliability contract: $pattern"
+    }
+}
+
+if ($stackStart -match '(?m)&\s+\$streamScript[^\r\n]*\s-Diff(?:\s|$)') {
+    throw "Production stack must use the verified full-frame transport; differential command 204 remains experimental."
+}
+if ($streamBackground -match 'if\s*\(\s*!\$NoDiff\s*\)') {
+    throw "Background launcher must not enable differential command 204 by default."
+}
+$experimentalDiffGate = [regex]::Escape('if ($ExperimentalDiff -and !$NoDiff)') +
+    '[\s\S]{0,200}' +
+    [regex]::Escape('$arguments += @("-Diff", "-AllowUnverifiedDifferentialProtocol")')
+if ($streamBackground -notmatch $experimentalDiffGate) {
+    throw "Background differential command 204 must be gated by ExperimentalDiff and its explicit live opt-in."
+}
+if (([regex]::Matches($streamBackground, [regex]::Escape('"-Diff"'))).Count -ne 1) {
+    throw "Background launcher must have exactly one differential argument insertion point."
+}
+foreach ($pattern in @('ExperimentalDiff', 'AllowUnverifiedDifferentialProtocol')) {
+    if ($streamBackground -notmatch [regex]::Escape($pattern)) {
+        throw "Background differential transport must remain explicitly experimental: $pattern"
+    }
+}
+foreach ($pattern in @(
+    'transport_mode',
+    'verified_full_200',
+    'AllowUnverifiedDifferentialProtocol'
+)) {
+    if ($streamSource -notmatch [regex]::Escape($pattern) -and
+        $streamStart -notmatch [regex]::Escape($pattern)) {
+        throw "Verified transport guard is missing: $pattern"
     }
 }
 
@@ -103,6 +152,8 @@ foreach ($pattern in @(
 
 foreach ($pattern in @(
     "stream-heartbeat.json",
+    "transport_mode",
+    "verified_full_200",
     "Get-ScheduledTask",
     "Get-Process"
 )) {
@@ -190,9 +241,9 @@ $slotBHeartbeat = Join-Path $heartbeatTestRoot "stream-heartbeat-b.json"
 $heartbeatPaths = @($legacyHeartbeat, $slotAHeartbeat, $slotBHeartbeat)
 $HeartbeatStaleSeconds = 15
 try {
-    Set-Content -LiteralPath $slotBHeartbeat -Value '{"frame":41,"status":"ok","error":null}' -Encoding UTF8
+    Set-Content -LiteralPath $slotBHeartbeat -Value '{"frame":41,"status":"ok","error":null,"transport_mode":"verified_full_200"}' -Encoding UTF8
     (Get-Item -LiteralPath $slotBHeartbeat).LastWriteTimeUtc = [DateTime]::UtcNow.AddSeconds(-1)
-    Set-Content -LiteralPath $legacyHeartbeat -Value '{"frame":40,"status":"ok","error":null}' -Encoding UTF8
+    Set-Content -LiteralPath $legacyHeartbeat -Value '{"frame":40,"status":"ok","error":null,"transport_mode":"verified_full_200"}' -Encoding UTF8
     (Get-Item -LiteralPath $legacyHeartbeat).LastWriteTimeUtc = [DateTime]::UtcNow
 
     $legacyLock = [IO.File]::Open(
@@ -208,6 +259,13 @@ try {
     }
     if (-not $slotHealth.Healthy -or $slotHealth.Reason -notmatch "stream-heartbeat-b.json") {
         throw "Watchdog did not recover from a locked legacy heartbeat via the alternate slot: $($slotHealth.Reason)"
+    }
+
+    Set-Content -LiteralPath $slotBHeartbeat -Value '{"frame":42,"status":"ok","error":null,"transport_mode":"experimental_diff_204"}' -Encoding UTF8
+    (Get-Item -LiteralPath $slotBHeartbeat).LastWriteTimeUtc = [DateTime]::UtcNow
+    $experimentalHealth = Get-StreamHeartbeatHealth
+    if ($experimentalHealth.Healthy -or $experimentalHealth.Reason -notmatch "transport-unverified") {
+        throw "Watchdog must reject an experimental differential transport heartbeat."
     }
 }
 finally {

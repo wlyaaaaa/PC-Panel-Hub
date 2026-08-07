@@ -1,8 +1,9 @@
 ﻿param(
     [string]$Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path,
     [string]$Port = "COM7",
-    [int]$IntervalMs = 1000,
+    [int]$IntervalMs = 3000,
     [switch]$NoDiff,
+    [switch]$ExperimentalDiff,
     [switch]$AltHelper
 )
 
@@ -34,8 +35,8 @@ $arguments = @(
     "-IntervalMs", [string]$IntervalMs,
     "-Frames", "0"
 )
-if (!$NoDiff) {
-    $arguments += "-Diff"
+if ($ExperimentalDiff -and !$NoDiff) {
+    $arguments += @("-Diff", "-AllowUnverifiedDifferentialProtocol")
 }
 if ($AltHelper) {
     $arguments += "-AltHelper"

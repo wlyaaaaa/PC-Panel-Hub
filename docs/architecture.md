@@ -23,7 +23,7 @@ TURZX SideScreen is intentionally split into small local processes:
 4. `TURZX.SideScreen.Stream.exe`
    - Fetches snapshots with a short timeout and reuses the last good snapshot if metrics are slow.
    - Renders 480x1920 bitmaps with `System.Drawing`.
-   - Sends one full frame, then TURZX differential frames over COM7.
+   - Sends verified full frames over COM7. TURZX command `204` differential frames remain experimental and are blocked by production entrypoints.
 
 5. `StartSideScreenStack.ps1`
    - Starts/stops the full stack.
@@ -33,7 +33,7 @@ TURZX SideScreen is intentionally split into small local processes:
 
 ## Data Freshness
 
-- Main screen refresh target: `1000ms` by default, using differential frames to reduce USB/HID interference with RGB control software.
+- Main metrics sampling target: `1000ms` by default. Verified full-frame transfers are paced at `3000ms`, leaving COM7 idle headroom after the measured ~2.3s send instead of saturating the device continuously.
 - The header clock is rendered from local Beijing time in the C# renderer, not from the metrics snapshot cache.
 - Metrics fetches are capped at a short timeout; stale hardware values are preferable to a visibly stalled screen.
 - Top process ranking refresh: `3s`.

@@ -7,7 +7,7 @@ The recommended startup path is a Windows Scheduled Task:
 - Trigger: user logon
 - Action: hidden `powershell.exe` -> `tools\turzx_side_screen\StartSideScreenWatchdog.ps1`
 - Default port: `COM7`
-- Default refresh: `1000ms`
+- Default panel refresh: `3000ms` (metrics still sample every `1000ms`)
 
 This is not a `SYSTEM` account task. It runs as the current interactive user with `Highest` run level, which is usually safer for COM ports, user-profile Python installs, RTSS/Afterburner, and other desktop telemetry tools.
 

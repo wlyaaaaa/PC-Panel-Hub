@@ -8,7 +8,7 @@ here = fso.GetParentFolderName(WScript.ScriptFullName)
 toolsRoot = fso.GetParentFolderName(here)
 root = fso.GetParentFolderName(toolsRoot)
 port = "COM7"
-intervalMs = "1000"
+intervalMs = "3000"
 delaySeconds = "10"
 
 i = 0

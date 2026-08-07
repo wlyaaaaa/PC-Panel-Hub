@@ -20,6 +20,8 @@ The active video stream path is full-frame only:
 5. Reflection creates `駟(devCode)`, opens the `釃` serial helper field `韘`, and calls `駟.詔(byte[], int, false)`.
 6. The observed helper message is `OK frameBytes=3686400`.
 
+The production watchdog and background launcher fail closed on this verified command-200 full-frame transport. Command `204` remains available only behind an explicit experimental opt-in for isolated protocol work; it is never enabled by a production entrypoint by default.
+
 The full frame size is:
 
 ```text

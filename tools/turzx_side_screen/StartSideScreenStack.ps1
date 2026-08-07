@@ -1,7 +1,7 @@
 param(
     [string]$Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path,
     [string]$Port = "COM7",
-    [int]$IntervalMs = 1000,
+    [int]$IntervalMs = 3000,
     [int]$FullResyncEveryFrames = 300,
     [int]$PreviewIntervalSeconds = 45,
     [int64]$MaxStackLogBytes = 1048576,
@@ -204,7 +204,9 @@ Start-Sleep -Milliseconds 900
 
 $streamScript = Join-Path $scriptDir "StartVideoStream.ps1"
 try {
-    & $streamScript -Root $Root -Port $Port -IntervalMs $IntervalMs -Frames 0 -FullResyncEveryFrames $FullResyncEveryFrames -PreviewIntervalSeconds $PreviewIntervalSeconds -PythonPath $python -Diff *>&1 |
+    # Command 204 can accept host writes while the physical panel stops refreshing.
+    # Production therefore stays on the verified command-200 full-frame path.
+    & $streamScript -Root $Root -Port $Port -IntervalMs $IntervalMs -Frames 0 -FullResyncEveryFrames $FullResyncEveryFrames -PreviewIntervalSeconds $PreviewIntervalSeconds -PythonPath $python *>&1 |
         ForEach-Object {
             Write-BoundedLogLine -Path $stdoutPath -Message ([string]$_) -MaxBytes $MaxStreamLogBytes -BackupCount $LogBackupCount
         }

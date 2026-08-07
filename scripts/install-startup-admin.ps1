@@ -3,7 +3,7 @@ param(
     [string]$TaskName = "TURZX SideScreen",
     [string]$ResumeTaskName = "TURZX SideScreen Resume",
     [string]$Port = "COM7",
-    [int]$IntervalMs = 1000,
+    [int]$IntervalMs = 3000,
     [switch]$DoNotDisableOldTasks
 )
 

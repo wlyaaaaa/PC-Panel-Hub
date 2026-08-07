@@ -2,7 +2,7 @@ param(
     [string]$Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path,
     [string]$TaskName = "TURZX SideScreen",
     [string]$Port = "COM7",
-    [int]$IntervalMs = 1000,
+    [int]$IntervalMs = 3000,
     [int]$DelaySeconds = 10,
     [string]$DeviceIdPattern = "VID_0525&PID_A4A7",
     [int]$DeviceRestartSettleSeconds = 6,
