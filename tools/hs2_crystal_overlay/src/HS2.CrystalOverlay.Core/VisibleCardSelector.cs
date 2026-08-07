@@ -88,6 +88,8 @@ public static class VisibleCardSelector
             OverlayKind.HardwareAlert or
             OverlayKind.PhoneCall or
             OverlayKind.PhoneTransfer or
+            OverlayKind.ImportantTask or
+            OverlayKind.ImportantTaskComplete or
             OverlayKind.MediaActive or
             OverlayKind.GameActive or
             OverlayKind.GameSummary;
@@ -97,7 +99,9 @@ public static class VisibleCardSelector
         {
             OverlayKind.HardwareAlert => 700,
             OverlayKind.PhoneCall => 600,
-            OverlayKind.PhoneTransfer => 500,
+            OverlayKind.PhoneTransfer => 570,
+            OverlayKind.ImportantTaskComplete => 550,
+            OverlayKind.ImportantTask => 530,
             OverlayKind.GameActive => 400,
             OverlayKind.MediaActive => 300,
             OverlayKind.GameSummary => 200,

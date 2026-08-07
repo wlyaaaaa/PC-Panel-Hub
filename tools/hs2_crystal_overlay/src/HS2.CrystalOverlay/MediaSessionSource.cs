@@ -11,36 +11,56 @@ internal sealed class MediaSessionSource : IDisposable
 
     private static readonly TimeSpan PollInterval =
         TimeSpan.FromMilliseconds(250);
+    private static readonly TimeSpan ArtworkDownloadTimeout =
+        TimeSpan.FromSeconds(8);
     private static readonly HttpClient ArtworkClient = new()
     {
-        Timeout = TimeSpan.FromSeconds(8),
+        Timeout = Timeout.InfiniteTimeSpan,
     };
 
     private readonly IOverlayPublisher publisher;
+    private readonly LifetimePublicationGate publicationGate = new();
     private readonly NeteaseLocalMediaProbe local = new();
     private readonly CancellationTokenSource cancellation = new();
-    private readonly Timer timer;
+    private readonly PeriodicTimer timer;
+    private readonly Task loop;
+    private readonly object sync = new();
+    private readonly ArtworkGenerationGate artworkGeneration = new();
+    private readonly List<Task> artworkTasks = [];
+    private CancellationTokenSource? artworkCancellation;
+    private ArtworkGeneration currentArtworkGeneration;
     private string? lastTrackInstance;
     private string? currentArtworkPath;
     private string? lastDiagnosticState;
     private bool activePublished;
     private int inactiveSamples;
-    private int polling;
-    private bool disposed;
 
     internal MediaSessionSource(IOverlayPublisher publisher)
     {
         this.publisher = publisher;
-        timer = new Timer(
-            Poll,
-            null,
-            TimeSpan.Zero,
-            PollInterval);
+        timer = new PeriodicTimer(PollInterval);
+        loop = Task.Run(PollLoopAsync);
     }
 
-    private async void Poll(object? state)
+    private async Task PollLoopAsync()
     {
-        if (disposed || Interlocked.Exchange(ref polling, 1) != 0)
+        try
+        {
+            PollOnce();
+            while (await timer.WaitForNextTickAsync(cancellation.Token))
+            {
+                PollOnce();
+            }
+        }
+        catch (OperationCanceledException)
+            when (cancellation.IsCancellationRequested)
+        {
+        }
+    }
+
+    private void PollOnce()
+    {
+        if (publicationGate.IsClosed)
         {
             return;
         }
@@ -49,57 +69,161 @@ internal sealed class MediaSessionSource : IDisposable
         {
             var now = DateTimeOffset.Now;
             var observation = local.Read(now);
-            if (observation is null)
+            lock (sync)
             {
-                LogState(local.LastReadState);
-                HideAfterInactiveSamples(resetTrack: true);
-                return;
-            }
+                if (publicationGate.IsClosed)
+                {
+                    return;
+                }
 
-            if (!observation.IsPlaying)
-            {
-                LogState(
-                    observation.AudioStateIsAuthoritative
-                        ? "audio-inactive"
-                        : "audio-state-unavailable");
-                HideAfterInactiveSamples(resetTrack: false);
-                return;
-            }
+                if (observation is null)
+                {
+                    LogState(local.LastReadState);
+                    HideAfterInactiveSamplesLocked(resetTrack: true);
+                    return;
+                }
 
-            inactiveSamples = 0;
-            LogState("playing-audio");
-            var trackChanged = !string.Equals(
-                observation.TrackInstance,
-                lastTrackInstance,
-                StringComparison.Ordinal);
-            if (trackChanged)
-            {
-                currentArtworkPath = await CacheArtworkAsync(
-                    observation.Track,
-                    cancellation.Token);
-            }
+                if (!observation.IsPlaying)
+                {
+                    LogState(
+                        observation.AudioStateIsAuthoritative
+                            ? "audio-inactive"
+                            : "audio-state-unavailable");
+                    HideAfterInactiveSamplesLocked(resetTrack: false);
+                    return;
+                }
 
-            PublishPlaying(
-                observation,
-                trackChanged);
-            lastTrackInstance = observation.TrackInstance;
-        }
-        catch (OperationCanceledException)
-        {
+                inactiveSamples = 0;
+                LogState("playing-audio");
+                var trackChanged = !string.Equals(
+                    observation.TrackInstance,
+                    lastTrackInstance,
+                    StringComparison.Ordinal);
+                if (trackChanged)
+                {
+                    lastTrackInstance = observation.TrackInstance;
+                    currentArtworkPath = null;
+                }
+
+                PublishPlayingLocked(observation, trackChanged);
+                if (trackChanged ||
+                    (currentArtworkPath is null &&
+                     !artworkGeneration.IsCurrent(
+                         currentArtworkGeneration)))
+                {
+                    StartArtworkRefreshLocked(observation);
+                }
+            }
         }
         catch (Exception exception)
         {
             RuntimeLog.Write(
                 $"NetEase local probe failed: {exception.GetType().Name}");
-            HideAfterInactiveSamples(resetTrack: false);
-        }
-        finally
-        {
-            Interlocked.Exchange(ref polling, 0);
+            lock (sync)
+            {
+                if (!publicationGate.IsClosed)
+                {
+                    HideAfterInactiveSamplesLocked(resetTrack: false);
+                }
+            }
         }
     }
 
-    private void PublishPlaying(
+    private void StartArtworkRefreshLocked(
+        NeteaseLocalMediaObservation observation)
+    {
+        if (publicationGate.IsClosed)
+        {
+            return;
+        }
+
+        CancelArtworkLocked(invalidateGeneration: false);
+        var generation = artworkGeneration.Begin();
+        currentArtworkGeneration = generation;
+        var refreshCancellation =
+            CancellationTokenSource.CreateLinkedTokenSource(
+                cancellation.Token);
+        artworkCancellation = refreshCancellation;
+        var refresh = RefreshArtworkAsync(
+            observation,
+            generation,
+            refreshCancellation.Token);
+        TrackArtworkTaskLocked(refresh, refreshCancellation);
+    }
+
+    private async Task RefreshArtworkAsync(
+        NeteaseLocalMediaObservation observation,
+        ArtworkGeneration generation,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var path = await CacheArtworkAsync(
+                observation.Track,
+                cancellationToken);
+            if (path is null)
+            {
+                return;
+            }
+
+            lock (sync)
+            {
+                if (publicationGate.IsClosed ||
+                    !artworkGeneration.IsCurrent(generation) ||
+                    !activePublished ||
+                    !string.Equals(
+                        observation.TrackInstance,
+                        lastTrackInstance,
+                        StringComparison.Ordinal))
+                {
+                    return;
+                }
+
+                currentArtworkPath = path;
+                PublishPlayingLocked(observation, trackChanged: false);
+            }
+        }
+        catch (OperationCanceledException)
+            when (cancellationToken.IsCancellationRequested ||
+                  cancellation.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception)
+        {
+            RuntimeLog.Write(
+                $"NetEase artwork refresh failed: " +
+                $"{exception.GetType().Name}");
+        }
+    }
+
+    private void TrackArtworkTaskLocked(
+        Task refresh,
+        CancellationTokenSource refreshCancellation)
+    {
+        artworkTasks.Add(refresh);
+        _ = refresh.ContinueWith(
+            completed =>
+            {
+                _ = completed.Exception;
+                lock (sync)
+                {
+                    artworkTasks.Remove(completed);
+                    if (ReferenceEquals(
+                            artworkCancellation,
+                            refreshCancellation))
+                    {
+                        artworkCancellation = null;
+                    }
+                }
+
+                refreshCancellation.Dispose();
+            },
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+    }
+
+    private void PublishPlayingLocked(
         NeteaseLocalMediaObservation observation,
         bool trackChanged)
     {
@@ -109,21 +233,20 @@ internal sealed class MediaSessionSource : IDisposable
             ArtworkPath: currentArtworkPath,
             AccentHex: "#89F7FF",
             TranslatedTitle: track.TranslatedTitle);
-        _ = publisher.Publish(OverlayRequest.Active(
+        activePublished |= PublishIfActive(OverlayRequest.Active(
             "media-active",
             OverlayKind.MediaActive,
             OverlaySource.NetEase,
             track.Title,
             body: null,
             visual: visual));
-        activePublished = true;
 
         if (!trackChanged)
         {
             return;
         }
 
-        _ = publisher.Publish(OverlayRequest.Timed(
+        _ = PublishIfActive(OverlayRequest.Timed(
             "media-track-change",
             OverlayKind.MediaTrackChange,
             OverlaySource.NetEase,
@@ -136,7 +259,7 @@ internal sealed class MediaSessionSource : IDisposable
             }));
     }
 
-    private void HideAfterInactiveSamples(bool resetTrack)
+    private void HideAfterInactiveSamplesLocked(bool resetTrack)
     {
         inactiveSamples++;
         if (inactiveSamples < InactiveSamplesBeforeHide)
@@ -144,18 +267,19 @@ internal sealed class MediaSessionSource : IDisposable
             return;
         }
 
-        EndMedia(resetTrack);
+        EndMediaLocked(resetTrack);
     }
 
-    private void EndMedia(bool resetTrack)
+    private void EndMediaLocked(bool resetTrack)
     {
+        CancelArtworkLocked(invalidateGeneration: true);
         if (activePublished)
         {
-            _ = publisher.Publish(OverlayRequest.End(
+            _ = PublishIfActive(OverlayRequest.End(
                 "media-active",
                 OverlayKind.MediaActive,
                 OverlaySource.NetEase));
-            _ = publisher.Publish(OverlayRequest.End(
+            _ = PublishIfActive(OverlayRequest.End(
                 "media-track-change",
                 OverlayKind.MediaTrackChange,
                 OverlaySource.NetEase));
@@ -171,6 +295,18 @@ internal sealed class MediaSessionSource : IDisposable
         currentArtworkPath = null;
     }
 
+    private void CancelArtworkLocked(bool invalidateGeneration)
+    {
+        if (invalidateGeneration)
+        {
+            artworkGeneration.Invalidate();
+            currentArtworkGeneration = default;
+        }
+
+        artworkCancellation?.Cancel();
+        artworkCancellation = null;
+    }
+
     private static async Task<string?> CacheArtworkAsync(
         NeteaseTrackMetadata track,
         CancellationToken cancellationToken)
@@ -180,6 +316,7 @@ internal sealed class MediaSessionSource : IDisposable
             return null;
         }
 
+        string? temporary = null;
         try
         {
             var folder = Path.Combine(
@@ -198,10 +335,18 @@ internal sealed class MediaSessionSource : IDisposable
                 return path;
             }
 
-            using var response = await ArtworkClient.GetAsync(
-                track.ArtworkUri,
+            using var timeout =
+                CancellationTokenSource.CreateLinkedTokenSource(
+                    cancellationToken);
+            timeout.CancelAfter(ArtworkDownloadTimeout);
+            var token = timeout.Token;
+            using var request = new HttpRequestMessage(
+                HttpMethod.Get,
+                track.ArtworkUri);
+            using var response = await ArtworkClient.SendAsync(
+                request,
                 HttpCompletionOption.ResponseHeadersRead,
-                cancellationToken);
+                token);
             response.EnsureSuccessStatusCode();
             if (response.Content.Headers.ContentLength >
                 MaximumArtworkBytes)
@@ -209,12 +354,13 @@ internal sealed class MediaSessionSource : IDisposable
                 return null;
             }
 
-            var temporary = path + ".tmp";
+            temporary = path + "." + Guid.NewGuid().ToString("N") +
+                        ".tmp";
             await using var input =
-                await response.Content.ReadAsStreamAsync(cancellationToken);
+                await response.Content.ReadAsStreamAsync(token);
             await using (var output = new FileStream(
                              temporary,
-                             FileMode.Create,
+                             FileMode.CreateNew,
                              FileAccess.Write,
                              FileShare.None,
                              81920,
@@ -225,8 +371,8 @@ internal sealed class MediaSessionSource : IDisposable
                 while (true)
                 {
                     var read = await input.ReadAsync(
-                        buffer,
-                        cancellationToken);
+                        buffer.AsMemory(),
+                        token);
                     if (read == 0)
                     {
                         break;
@@ -240,12 +386,17 @@ internal sealed class MediaSessionSource : IDisposable
 
                     await output.WriteAsync(
                         buffer.AsMemory(0, read),
-                        cancellationToken);
+                        token);
                 }
             }
 
             File.Move(temporary, path, true);
+            temporary = null;
             return path;
+        }
+        catch (OperationCanceledException)
+        {
+            return null;
         }
         catch (HttpRequestException)
         {
@@ -258,6 +409,22 @@ internal sealed class MediaSessionSource : IDisposable
         catch (UnauthorizedAccessException)
         {
             return null;
+        }
+        finally
+        {
+            if (temporary is not null)
+            {
+                try
+                {
+                    File.Delete(temporary);
+                }
+                catch (IOException)
+                {
+                }
+                catch (UnauthorizedAccessException)
+                {
+                }
+            }
         }
     }
 
@@ -275,16 +442,56 @@ internal sealed class MediaSessionSource : IDisposable
         RuntimeLog.Write($"NetEase source state: {state}");
     }
 
+    private bool PublishIfActive(OverlayRequest request) =>
+        publicationGate.TryPublish(() => publisher.Publish(request));
+
     public void Dispose()
     {
-        if (disposed)
+        if (!publicationGate.Close())
         {
             return;
         }
 
-        disposed = true;
         cancellation.Cancel();
         timer.Dispose();
-        cancellation.Dispose();
+        Task[] pendingArtwork;
+        lock (sync)
+        {
+            CancelArtworkLocked(invalidateGeneration: true);
+            pendingArtwork = artworkTasks.ToArray();
+        }
+
+        var pending = new List<Task>(pendingArtwork.Length + 1)
+        {
+            loop,
+        };
+        pending.AddRange(pendingArtwork);
+        var completion = Task.WhenAll(pending);
+        var completed = false;
+        try
+        {
+            completed = completion.Wait(TimeSpan.FromSeconds(5));
+        }
+        catch
+        {
+            completed = completion.IsCompleted;
+        }
+
+        if (completed)
+        {
+            _ = completion.Exception;
+            cancellation.Dispose();
+            return;
+        }
+
+        _ = completion.ContinueWith(
+            completedTasks =>
+            {
+                _ = completedTasks.Exception;
+                cancellation.Dispose();
+            },
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
     }
 }

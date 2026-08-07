@@ -16,7 +16,8 @@ public sealed record PhoneBatteryReading(
     bool? IsCharging,
     bool IsConnected,
     DateTimeOffset ObservedAt,
-    string? Evidence = null);
+    string? Evidence = null,
+    DateTimeOffset? ConfirmedAt = null);
 
 public sealed record XiaomiBatteryLogSnapshot(
     int Percentage,
@@ -27,6 +28,60 @@ public sealed record XiaomiConnectionLogSnapshot(
     bool IsConnected,
     DateTimeOffset ObservedAt);
 
+public sealed record PhoneBatteryProbeResolution(
+    PhoneBatteryReading? Reading,
+    bool IsExplicitDisconnect);
+
+public static class PhoneBatteryProbeEvidence
+{
+    public static PhoneBatteryReading CreateXiaomiLiveUiReading(
+        int percentage,
+        DateTimeOffset uiObservedAt,
+        XiaomiBatteryLogSnapshot? chargingTrend,
+        DateTimeOffset now,
+        TimeSpan maximumChargingTrendAge)
+    {
+        bool? charging = null;
+        if (chargingTrend is not null)
+        {
+            var age = now - chargingTrend.ObservedAt;
+            if (age >= TimeSpan.FromMinutes(-1) &&
+                age <= maximumChargingTrendAge)
+            {
+                charging = chargingTrend.IsCharging;
+            }
+        }
+
+        return new PhoneBatteryReading(
+            PhoneBatteryProvider.XiaomiHyperConnect,
+            percentage,
+            charging,
+            true,
+            uiObservedAt,
+            "xiaomi-ui");
+    }
+
+    public static PhoneBatteryProbeResolution ResolvePhoneLink(
+        PhoneBatteryReading? liveUi,
+        PhoneBatteryReading? companion,
+        bool companionExplicitDisconnect)
+    {
+        if (liveUi is not null)
+        {
+            return new PhoneBatteryProbeResolution(liveUi, false);
+        }
+
+        if (companion is not null)
+        {
+            return new PhoneBatteryProbeResolution(companion, false);
+        }
+
+        return new PhoneBatteryProbeResolution(
+            null,
+            companionExplicitDisconnect);
+    }
+}
+
 public static class PhoneBatteryArbitration
 {
     public static PhoneBatteryReading? Select(
@@ -35,11 +90,24 @@ public static class PhoneBatteryArbitration
         DateTimeOffset now,
         TimeSpan maximumAge)
     {
-        return IsUsable(xiaomi, now, maximumAge)
+        var xiaomiUsable = IsUsable(xiaomi, now, maximumAge);
+        var phoneLinkUsable = IsUsable(phoneLink, now, maximumAge);
+        if (!xiaomiUsable)
+        {
+            return phoneLinkUsable ? phoneLink : null;
+        }
+
+        if (!phoneLinkUsable)
+        {
+            return xiaomi;
+        }
+
+        // Xiaomi is the preferred source when both samples describe roughly
+        // the same moment. A materially newer Phone Link sample must still
+        // beat an old Xiaomi log line that was merely re-confirmed this poll.
+        return xiaomi!.ObservedAt >= phoneLink!.ObservedAt.AddSeconds(-15)
             ? xiaomi
-            : IsUsable(phoneLink, now, maximumAge)
-                ? phoneLink
-                : null;
+            : phoneLink;
     }
 
     private static bool IsUsable(
@@ -54,7 +122,8 @@ public static class PhoneBatteryArbitration
             return false;
         }
 
-        var age = now - reading.ObservedAt;
+        var freshnessAt = reading.ConfirmedAt ?? reading.ObservedAt;
+        var age = now - freshnessAt;
         return age >= TimeSpan.FromSeconds(-5) && age <= maximumAge;
     }
 }
@@ -62,7 +131,7 @@ public static class PhoneBatteryArbitration
 public sealed record PhoneLinkCompanionSnapshot(
     int Percentage,
     bool? IsCharging,
-    bool IsConnected);
+    bool? IsConnected);
 
 public static partial class PhoneLinkCompanionParser
 {
@@ -85,9 +154,11 @@ public static partial class PhoneLinkCompanionParser
                                  speak.ValueKind == JsonValueKind.String
                 ? speak.GetString() ?? string.Empty
                 : string.Join(' ', strings);
-            var connected =
-                !DisconnectedText().IsMatch(connectionText) &&
-                ConnectedText().IsMatch(connectionText);
+            bool? connected = DisconnectedText().IsMatch(connectionText)
+                ? false
+                : ConnectedText().IsMatch(connectionText)
+                    ? true
+                    : null;
 
             int? percentage = null;
             bool? charging = null;
@@ -338,11 +409,6 @@ public static partial class XiaomiConnectionLogParser
         if (latest is null)
         {
             return null;
-        }
-
-        if (!latest.IsConnected)
-        {
-            return latest;
         }
 
         var age = now - latest.ObservedAt;

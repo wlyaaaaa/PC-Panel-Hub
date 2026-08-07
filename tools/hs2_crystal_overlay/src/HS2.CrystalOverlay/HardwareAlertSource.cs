@@ -12,34 +12,47 @@ internal sealed class HardwareAlertSourceCoordinator : IDisposable
         TimeSpan.FromSeconds(2);
 
     private readonly IOverlayPublisher publisher;
+    private readonly LifetimePublicationGate publicationGate = new();
     private readonly HttpClient client = new()
     {
         Timeout = TimeSpan.FromSeconds(2),
     };
     private readonly CancellationTokenSource cancellation = new();
-    private readonly Timer timer;
+    private readonly PeriodicTimer timer;
+    private readonly Task loop;
     private readonly NetworkConnectivityTracker networkTracker =
         new(reportInitialOffline: true);
+    private readonly ConsecutiveEvidenceGate recoveryGate = new(3);
     private DateTimeOffset? networkDownSince;
-    private string? activeFindingKey;
+    private HardwareAlertFinding? activeFinding;
     private string? activeSignature;
     private string? lastDiagnosticState;
-    private int polling;
-    private bool disposed;
 
     internal HardwareAlertSourceCoordinator(IOverlayPublisher publisher)
     {
         this.publisher = publisher;
-        timer = new Timer(
-            Poll,
-            null,
-            TimeSpan.Zero,
-            PollInterval);
+        timer = new PeriodicTimer(PollInterval);
+        loop = Task.Run(PollLoopAsync);
     }
 
-    private async void Poll(object? state)
+    private async Task PollLoopAsync()
     {
-        if (disposed || Interlocked.Exchange(ref polling, 1) != 0)
+        try
+        {
+            await PollOnceAsync();
+            while (await timer.WaitForNextTickAsync(cancellation.Token))
+            {
+                await PollOnceAsync();
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
+    private async Task PollOnceAsync()
+    {
+        if (publicationGate.IsClosed)
         {
             return;
         }
@@ -51,6 +64,11 @@ internal sealed class HardwareAlertSourceCoordinator : IDisposable
             var snapshotJson = await client.GetStringAsync(
                 SnapshotUri,
                 token);
+            if (publicationGate.IsClosed)
+            {
+                return;
+            }
+
             var networkStatus =
                 SideScreenSnapshotParser.ParseNetworkLatencyStatus(
                     snapshotJson);
@@ -59,21 +77,30 @@ internal sealed class HardwareAlertSourceCoordinator : IDisposable
                 now);
 
             IReadOnlyList<double> pumpRpms = [];
+            var pumpTelemetryAvailable = false;
+            var diagnosticState = "healthy-snapshot";
             try
             {
                 var lhmJson = await client.GetStringAsync(
                     LibreHardwareMonitorUri,
                     token);
+                if (publicationGate.IsClosed)
+                {
+                    return;
+                }
+
                 pumpRpms =
                     SideScreenSnapshotParser.ParsePumpRpms(lhmJson);
+                pumpTelemetryAvailable = pumpRpms.Count > 0;
             }
             catch (HttpRequestException)
             {
-                LogState("lhm-unavailable");
+                diagnosticState = "lhm-unavailable";
             }
             catch (TaskCanceledException)
+                when (!cancellation.IsCancellationRequested)
             {
-                LogState("lhm-timeout");
+                diagnosticState = "lhm-timeout";
             }
 
             var telemetry = SideScreenSnapshotParser.ParseHardware(
@@ -82,10 +109,37 @@ internal sealed class HardwareAlertSourceCoordinator : IDisposable
                 networkDownSince is null
                     ? null
                     : now - networkDownSince.Value);
-            Publish(
-                HardwareAlertEvaluator.Evaluate(telemetry)
-                    .FirstOrDefault());
-            LogState("healthy-snapshot");
+            var finding = HardwareAlertEvaluator.Evaluate(telemetry)
+                .FirstOrDefault();
+            var recoveryEvidenceAvailable =
+                activeFinding is null ||
+                HardwareAlertRecovery.HasRecoveryEvidence(
+                    activeFinding,
+                    telemetry,
+                    pumpTelemetryAvailable);
+            if (HardwareAlertContinuity.ShouldRetainActive(
+                    activeFinding,
+                    recoveryEvidenceAvailable,
+                    finding))
+            {
+                recoveryGate.Reset();
+            }
+            else if (finding is not null)
+            {
+                recoveryGate.Reset();
+                Publish(finding);
+            }
+            else if (activeFinding is null)
+            {
+                recoveryGate.Reset();
+            }
+            else if (recoveryGate.Observe(
+                         recoveryEvidenceAvailable))
+            {
+                Publish(null);
+            }
+
+            LogState(diagnosticState);
         }
         catch (OperationCanceledException)
         {
@@ -98,10 +152,6 @@ internal sealed class HardwareAlertSourceCoordinator : IDisposable
         {
             RuntimeLog.Write(
                 $"Hardware alert probe failed: {exception.GetType().Name}");
-        }
-        finally
-        {
-            Interlocked.Exchange(ref polling, 0);
         }
     }
 
@@ -125,18 +175,14 @@ internal sealed class HardwareAlertSourceCoordinator : IDisposable
     {
         if (finding is null)
         {
-            if (activeFindingKey is null)
+            if (activeFinding is null)
             {
                 return;
             }
 
-            var resolvedKey = activeFindingKey;
-            _ = publisher.Publish(OverlayRequest.End(
+            var resolvedKey = activeFinding.Key;
+            _ = PublishIfActive(OverlayRequest.Timed(
                 "hardware-alert",
-                OverlayKind.HardwareAlert,
-                OverlaySource.Hardware));
-            _ = publisher.Publish(OverlayRequest.Timed(
-                "hardware-resolved",
                 OverlayKind.HardwareResolved,
                 OverlaySource.Hardware,
                 "硬件状态已恢复",
@@ -145,13 +191,14 @@ internal sealed class HardwareAlertSourceCoordinator : IDisposable
                 visual: new OverlayVisualData(
                     Eyebrow: "已恢复",
                     AccentHex: "#83F3C1")));
-            activeFindingKey = null;
+            activeFinding = null;
             activeSignature = null;
             return;
         }
 
         var signature =
-            $"{finding.Key}\u001f{finding.Body}\u001f{finding.SuggestedAction}";
+            $"{finding.Key}\u001f{finding.EvidenceKey}\u001f{finding.Title}" +
+            $"\u001f{finding.Body}\u001f{finding.SuggestedAction}";
         if (string.Equals(
                 signature,
                 activeSignature,
@@ -160,7 +207,7 @@ internal sealed class HardwareAlertSourceCoordinator : IDisposable
             return;
         }
 
-        _ = publisher.Publish(OverlayRequest.Active(
+        _ = PublishIfActive(OverlayRequest.Active(
             "hardware-alert",
             OverlayKind.HardwareAlert,
             OverlaySource.Hardware,
@@ -170,7 +217,7 @@ internal sealed class HardwareAlertSourceCoordinator : IDisposable
             visual: new OverlayVisualData(
                 Eyebrow: "需要处理",
                 AccentHex: "#FF8A7A")));
-        activeFindingKey = finding.Key;
+        activeFinding = finding;
         activeSignature = signature;
     }
 
@@ -188,17 +235,43 @@ internal sealed class HardwareAlertSourceCoordinator : IDisposable
         RuntimeLog.Write($"Hardware alerts: {state}.");
     }
 
+    private bool PublishIfActive(OverlayRequest request) =>
+        publicationGate.TryPublish(() => publisher.Publish(request));
+
     public void Dispose()
     {
-        if (disposed)
+        if (!publicationGate.Close())
         {
             return;
         }
 
-        disposed = true;
         cancellation.Cancel();
         timer.Dispose();
-        client.Dispose();
-        cancellation.Dispose();
+        var completed = false;
+        try
+        {
+            completed = loop.Wait(TimeSpan.FromSeconds(5));
+        }
+        catch
+        {
+        }
+
+        if (completed)
+        {
+            client.Dispose();
+            cancellation.Dispose();
+            return;
+        }
+
+        _ = loop.ContinueWith(
+            completedLoop =>
+            {
+                _ = completedLoop.Exception;
+                client.Dispose();
+                cancellation.Dispose();
+            },
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
     }
 }

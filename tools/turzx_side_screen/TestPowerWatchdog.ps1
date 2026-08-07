@@ -13,6 +13,7 @@ $stack = Join-Path $side "StartSideScreenStack.ps1"
 $stop = Join-Path $side "StopSideScreenStack.ps1"
 $blank = Join-Path $side "SendBlankFrame.ps1"
 $displayPowerPolicy = Join-Path $side "SideScreenDisplayPowerPolicy.ps1"
+$activeRecoveryPolicy = Join-Path $side "HS2ActiveRecoveryPolicy.ps1"
 $windowPreservationPolicy = Join-Path $side "WindowsDisplayWindowPolicy.ps1"
 $overlayWatchdogPolicy = Join-Path $side "HS2OverlayWatchdogPolicy.ps1"
 $brightness = Join-Path $side "SetTurzxBrightness.ps1"
@@ -26,13 +27,14 @@ $overlayManifest = Join-Path $Root "tools\hs2_crystal_overlay\src\HS2.CrystalOve
 $overlayController = Join-Path $Root "tools\hs2_crystal_overlay\src\HS2.CrystalOverlay\OverlayController.cs"
 $crystalCardWindow = Join-Path $Root "tools\hs2_crystal_overlay\src\HS2.CrystalOverlay\CrystalCardWindow.cs"
 
-foreach ($path in @($watchdog, $shutdownPolicy, $displayPowerPolicy, $windowPreservationPolicy, $overlayWatchdogPolicy, $brightness, $powerProgram, $watchdogLauncher, $stop, $blank, $overlayManifest, $overlayController, $crystalCardWindow)) {
+foreach ($path in @($watchdog, $shutdownPolicy, $displayPowerPolicy, $activeRecoveryPolicy, $windowPreservationPolicy, $overlayWatchdogPolicy, $brightness, $powerProgram, $watchdogLauncher, $stop, $blank, $overlayManifest, $overlayController, $crystalCardWindow)) {
     if (!(Test-Path -LiteralPath $path)) {
         throw "Missing power management script: $path"
     }
 }
 
 . $displayPowerPolicy
+. $activeRecoveryPolicy
 . $windowPreservationPolicy
 . $overlayWatchdogPolicy
 
@@ -387,6 +389,204 @@ if (($script:mockHS2Writes -join ",") -ne "SetSecondaryScreen=False,SetIsScreenO
     throw "HS2 Active must restore screen state before returning the device to Windows display mode."
 }
 
+$decisionNow = [DateTime]::Parse("2026-08-06T12:00:00Z").ToUniversalTime()
+$idleDecision = Get-HS2ActiveRecoveryDecision `
+    -DesiredActive $false `
+    -VerifiedActive $false `
+    -LastAttemptUtc ([DateTime]::MinValue) `
+    -LastVerifiedUtc ([DateTime]::MinValue) `
+    -NowUtc $decisionNow
+if ($idleDecision.Action -ne "Idle") {
+    throw "HS2 recovery must remain idle while the display is not desired active."
+}
+
+$activateDecision = Get-HS2ActiveRecoveryDecision `
+    -DesiredActive $true `
+    -VerifiedActive $false `
+    -LastAttemptUtc ([DateTime]::MinValue) `
+    -LastVerifiedUtc ([DateTime]::MinValue) `
+    -NowUtc $decisionNow
+if ($activateDecision.Action -ne "Activate") {
+    throw "An unverified HS2 display must receive an immediate activation attempt."
+}
+
+$waitDecision = Get-HS2ActiveRecoveryDecision `
+    -DesiredActive $true `
+    -VerifiedActive $false `
+    -LastAttemptUtc $decisionNow.AddSeconds(-14) `
+    -LastVerifiedUtc ([DateTime]::MinValue) `
+    -NowUtc $decisionNow `
+    -RetrySeconds 15
+if ($waitDecision.Action -ne "Wait") {
+    throw "HS2 activation failures must observe the configured retry backoff."
+}
+
+$retryDecision = Get-HS2ActiveRecoveryDecision `
+    -DesiredActive $true `
+    -VerifiedActive $false `
+    -LastAttemptUtc $decisionNow.AddSeconds(-15) `
+    -LastVerifiedUtc ([DateTime]::MinValue) `
+    -NowUtc $decisionNow `
+    -RetrySeconds 15
+if ($retryDecision.Action -ne "Activate") {
+    throw "HS2 activation must retry after the backoff expires."
+}
+
+$healthyDecision = Get-HS2ActiveRecoveryDecision `
+    -DesiredActive $true `
+    -VerifiedActive $true `
+    -LastAttemptUtc $decisionNow.AddSeconds(-20) `
+    -LastVerifiedUtc $decisionNow.AddSeconds(-29) `
+    -NowUtc $decisionNow `
+    -VerifySeconds 30
+if ($healthyDecision.Action -ne "Healthy") {
+    throw "A recently verified HS2 display must remain healthy without extra writes."
+}
+
+$verifyDecision = Get-HS2ActiveRecoveryDecision `
+    -DesiredActive $true `
+    -VerifiedActive $true `
+    -LastAttemptUtc $decisionNow.AddSeconds(-30) `
+    -LastVerifiedUtc $decisionNow.AddSeconds(-30) `
+    -NowUtc $decisionNow `
+    -VerifySeconds 30
+if ($verifyDecision.Action -ne "Verify") {
+    throw "A verified HS2 display must be periodically re-verified."
+}
+
+$validHub = [pscustomobject]@{
+    InstanceId = "USB\VID_1A86&PID_8091\dedicated-hs2-hub"
+    Present = $true
+}
+$validChild = [pscustomobject]@{
+    InstanceId = "USB\VID_0000&PID_0002\failed-port-two"
+    ParentInstanceId = $validHub.InstanceId
+    ProblemCode = 43
+    LocationInfo = "Port_#0002.Hub_#0012"
+    Present = $true
+}
+$validUsbPlan = Get-HS2UsbRecoveryPlan `
+    -BoundHubInstanceId $validHub.InstanceId `
+    -Hubs @($validHub) `
+    -Children @($validChild)
+if (-not $validUsbPlan.Applicable -or
+    $validUsbPlan.HubInstanceId -cne $validHub.InstanceId -or
+    $validUsbPlan.ChildInstanceId -cne $validChild.InstanceId -or
+    ($validUsbPlan.Operations -join ",") -cne "RestartDedicatedHub,RemoveExactFailedChild,ScanDevices") {
+    throw "HS2 USB recovery must target only the dedicated hub and its exact port-two Code 43 child."
+}
+
+$rejectedUsbCases = @(
+    [pscustomobject]@{
+        Name = "wrong hub"
+        Hubs = @([pscustomobject]@{ InstanceId = "USB\VID_1234&PID_5678\root"; Present = $true })
+        Children = @($validChild)
+    },
+    [pscustomobject]@{
+        Name = "ambiguous hubs"
+        Hubs = @($validHub, [pscustomobject]@{ InstanceId = $validHub.InstanceId; Present = $true })
+        Children = @($validChild)
+    },
+    [pscustomobject]@{
+        Name = "wrong parent"
+        Hubs = @($validHub)
+        Children = @([pscustomobject]@{ InstanceId = $validChild.InstanceId; ParentInstanceId = "USB\ROOT_HUB30\broad"; ProblemCode = 43; LocationInfo = $validChild.LocationInfo; Present = $true })
+    },
+    [pscustomobject]@{
+        Name = "not Code 43"
+        Hubs = @($validHub)
+        Children = @([pscustomobject]@{ InstanceId = $validChild.InstanceId; ParentInstanceId = $validHub.InstanceId; ProblemCode = 0; LocationInfo = $validChild.LocationInfo; Present = $true })
+    },
+    [pscustomobject]@{
+        Name = "wrong port"
+        Hubs = @($validHub)
+        Children = @([pscustomobject]@{ InstanceId = $validChild.InstanceId; ParentInstanceId = $validHub.InstanceId; ProblemCode = 43; LocationInfo = "Port_#0003.Hub_#0012"; Present = $true })
+    },
+    [pscustomobject]@{
+        Name = "ambiguous port-two children"
+        Hubs = @($validHub)
+        Children = @(
+            $validChild,
+            [pscustomobject]@{ InstanceId = "USB\VID_0000&PID_0002\second-port-two"; ParentInstanceId = $validHub.InstanceId; ProblemCode = 43; LocationInfo = $validChild.LocationInfo; Present = $true })
+    }
+)
+foreach ($rejectedCase in $rejectedUsbCases) {
+    $rejectedPlan = Get-HS2UsbRecoveryPlan `
+        -BoundHubInstanceId $validHub.InstanceId `
+        -Hubs $rejectedCase.Hubs `
+        -Children $rejectedCase.Children
+    if ($rejectedPlan.Applicable) {
+        throw "HS2 USB recovery must fail closed for $($rejectedCase.Name)."
+    }
+}
+
+$wrongBoundHubPlan = Get-HS2UsbRecoveryPlan `
+    -BoundHubInstanceId "USB\VID_1A86&PID_8091\different-machine-hub" `
+    -Hubs @($validHub) `
+    -Children @($validChild)
+if ($wrongBoundHubPlan.Applicable) {
+    throw "HS2 USB recovery must require the exact previously verified machine binding."
+}
+
+$script:mockHS2PnpDevices = @()
+function Get-PnpDevice {
+    [CmdletBinding()]
+    param([switch]$PresentOnly)
+    return $script:mockHS2PnpDevices
+}
+try {
+    $script:mockHS2PnpDevices = @(
+        [pscustomobject]@{
+            InstanceId = "USB\VID_1CBE&PID_A068\native-mode"
+            Status = "OK"
+        }
+    )
+    if (Test-HS2UsbDisplayHealthy) {
+        throw "Native A068 controller mode must not be treated as a healthy Windows display."
+    }
+
+    $script:mockHS2PnpDevices = @(
+        [pscustomobject]@{
+            InstanceId = "USB\VID_1A86&PID_AD23\failed-display"
+            Status = "Unknown"
+        }
+    )
+    if (Test-HS2UsbDisplayHealthy) {
+        throw "An unhealthy AD23 device must not trigger L-Connect-only recovery."
+    }
+
+    $script:mockHS2PnpDevices = @(
+        [pscustomobject]@{
+            InstanceId = "USB\VID_1A86&PID_AD23\healthy-display"
+            Status = "OK"
+        }
+    )
+    if (-not (Test-HS2UsbDisplayHealthy)) {
+        throw "A healthy AD23 display must permit bounded L-Connect recovery."
+    }
+}
+finally {
+    Remove-Item Function:\Get-PnpDevice -Force
+}
+
+$activeRecoveryText = Get-Content -Raw -LiteralPath $activeRecoveryPolicy
+$missingBindingPath = Join-Path `
+    ([IO.Path]::GetTempPath()) `
+    ("absent-hs2-binding-{0}.json" -f [Guid]::NewGuid().ToString("N"))
+if ($null -ne (Read-HS2UsbTopologyBinding -Path $missingBindingPath)) {
+    throw "Missing HS2 topology binding must fail closed."
+}
+foreach ($forbidden in @(
+    '/restart-device "USB\ROOT',
+    '/disable-device "USB\ROOT',
+    'Get-PnpDevice | Disable-PnpDevice',
+    'Get-PnpDevice | Restart-PnpDevice'
+)) {
+    if ($activeRecoveryText -match [regex]::Escape($forbidden)) {
+        throw "HS2 recovery must never reset the whole USB tree: $forbidden"
+    }
+}
+
 $watchdogText = Get-Content -Raw -LiteralPath $watchdog
 foreach ($pattern in @(
     "Win32_PowerManagementEvent",
@@ -400,6 +600,7 @@ foreach ($pattern in @(
     "MaxConsecutiveFailures",
     "SendBlankFrame.ps1",
     "SideScreenDisplayPowerPolicy.ps1",
+    "HS2ActiveRecoveryPolicy.ps1",
     "WindowsDisplayWindowPolicy.ps1",
     "HS2OverlayWatchdogPolicy.ps1",
     "Enable-DesktopWindowPreservation",
@@ -409,6 +610,13 @@ foreach ($pattern in @(
     "Invoke-HS2ExclusiveWindowGuard",
     "HS2 exclusive-window guard corrected",
     'hs2DisplayStateActive = $false',
+    'hs2DisplayStateDesiredActive = $false',
+    "Invoke-HS2ActiveMaintenance",
+    "Invoke-HS2UsbRecovery",
+    "HS2UsbRecoveryAfterFailures",
+    "HS2ActiveSlowRetrySeconds",
+    "HS2 recovery helper failed safely",
+    "hs2-usb-topology-binding.json",
     "HS2 overlay watchdog=enabled",
     "HS2OverlayRetrySeconds = 30",
     "SetTurzxBrightness.ps1",
@@ -437,6 +645,43 @@ foreach ($pattern in @(
 )) {
     if ($watchdogText -notmatch [regex]::Escape($pattern)) {
         throw "Watchdog missing expected pattern: $pattern"
+    }
+}
+
+if ($watchdogText -match '(?s)function Set-ActiveDisplayState.*?\$script:hs2DisplayStateActive\s*=\s*\$true.*?Invoke-HS2PowerState') {
+    throw "HS2 Active must never be marked verified before L-Connect read-back succeeds."
+}
+if ($watchdogText -notmatch '\$null\s*-eq\s*\$result\s*-or\s*-not\s*\[bool\]\$result\.Verified') {
+    throw "HS2 Active requires an explicit Verified=true result."
+}
+if ($watchdogText -notmatch '(?s)function Invoke-HS2ActiveMaintenance.*?try\s*\{.*?Get-HS2UsbRecoveryPlan.*?catch\s*\{.*?HS2 recovery helper failed safely') {
+    throw "HS2 PnP and recovery helpers must be isolated from the watchdog main loop."
+}
+
+$watchdogTokens = $null
+$watchdogParseErrors = $null
+$watchdogAst = [System.Management.Automation.Language.Parser]::ParseFile(
+    $watchdog,
+    [ref]$watchdogTokens,
+    [ref]$watchdogParseErrors)
+if ($watchdogParseErrors.Count -gt 0) {
+    throw "Unable to parse watchdog for verified-state gate tests."
+}
+foreach ($functionName in @(
+        "Invoke-HS2OverlayHealthCheck",
+        "Invoke-HS2ExclusiveWindowProtection")) {
+    $functionAst = @(
+        $watchdogAst.FindAll(
+            {
+                param($node)
+                $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -ceq $functionName
+            },
+            $true)
+    )
+    if ($functionAst.Count -ne 1 -or
+        $functionAst[0].Extent.Text -notmatch '-not\s+\$script:hs2DisplayStateActive') {
+        throw "$functionName must fail closed before HS2 verification."
     }
 }
 
@@ -547,6 +792,41 @@ Assert-OrderAfter `
     -First 'Stop-Stack -Reason ("pre-start/{0}" -f $Reason)' `
     -Second 'Set-TurzxPanelBrightness -Brightness $ActiveBrightness' `
     -Message "Stack startup must restore the configured TURZX brightness after releasing stale COM owners."
+
+Assert-OrderAfter `
+    -Text $watchdogText `
+    -Anchor 'while ($true)' `
+    -First 'Invoke-HS2ActiveMaintenance' `
+    -Second 'Invoke-HS2OverlayHealthCheck' `
+    -Message "The watchdog loop must verify or recover HS2 before checking the overlay."
+
+Assert-OrderAfter `
+    -Text $watchdogText `
+    -Anchor 'function Invoke-HS2ActiveMaintenance' `
+    -First 'Invoke-HS2PowerState -State Active' `
+    -Second '$script:hs2DisplayStateActive = $true' `
+    -Message "HS2 must be marked active only after the verified L-Connect request returns."
+
+Assert-OrderAfter `
+    -Text $watchdogText `
+    -Anchor 'function Invoke-HS2ActiveMaintenance' `
+    -First 'Get-HS2UsbRecoveryPlan' `
+    -Second 'Test-HS2UsbDisplayHealthy' `
+    -Message "An exact bound Code 43 plan must take precedence over L-Connect service recovery."
+
+Assert-OrderAfter `
+    -Text $watchdogText `
+    -Anchor 'if (-not $script:hs2UsbRecoveryAttempted)' `
+    -First '$script:hs2UsbRecoveryAttempted = $true' `
+    -Second 'Invoke-HS2UsbRecovery' `
+    -Message "USB recovery must be consumed before the destructive call."
+
+Assert-OrderAfter `
+    -Text $watchdogText `
+    -Anchor 'if (-not $script:hs2LConnectRecoveryAttempted)' `
+    -First '$script:hs2LConnectRecoveryAttempted = $true' `
+    -Second 'Invoke-HS2LConnectServiceRecovery' `
+    -Message "L-Connect recovery must be consumed before restarting the service."
 
 Assert-OrderAfter `
     -Text $watchdogText `

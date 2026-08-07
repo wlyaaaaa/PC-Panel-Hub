@@ -1,15 +1,8 @@
-using System.Security.Cryptography;
-using System.Text;
 using HS2.CrystalOverlay.Core;
 using Windows.UI.Notifications;
 using Windows.UI.Notifications.Management;
 
 namespace HS2_CrystalOverlay;
-
-internal sealed record ActivePhoneNotification(
-    OverlayKind Kind,
-    OverlaySource Source,
-    string DedupKey);
 
 internal sealed class PhoneNotificationSourceCoordinator : IDisposable
 {
@@ -17,37 +10,49 @@ internal sealed class PhoneNotificationSourceCoordinator : IDisposable
         TimeSpan.FromSeconds(1);
     private static readonly TimeSpan AccessRetryInterval =
         TimeSpan.FromMinutes(1);
+    private static readonly TimeSpan ActiveSafetyLease =
+        TimeSpan.FromMinutes(5);
 
     private readonly IOverlayPublisher publisher;
+    private readonly LifetimePublicationGate publicationGate = new();
     private readonly UserNotificationListener listener =
         UserNotificationListener.Current;
     private readonly CancellationTokenSource cancellation = new();
-    private readonly Dictionary<uint, ActivePhoneNotification> active = [];
-    private readonly Dictionary<uint, string> fingerprints = [];
-    private readonly HashSet<uint> timedPublished = [];
-    private readonly Timer timer;
-    private bool baselineCaptured;
+    private readonly PhoneNotificationSnapshotReconciler reconciler =
+        new(ActiveSafetyLease);
+    private readonly PeriodicTimer timer;
+    private readonly Task loop;
     private bool accessRequested;
     private bool accessAllowed;
     private string? lastInventoryState;
     private DateTimeOffset nextAccessAttemptAt = DateTimeOffset.MinValue;
-    private int polling;
-    private bool disposed;
 
     internal PhoneNotificationSourceCoordinator(
         IOverlayPublisher publisher)
     {
         this.publisher = publisher;
-        timer = new Timer(
-            Poll,
-            null,
-            TimeSpan.Zero,
-            PollInterval);
+        timer = new PeriodicTimer(PollInterval);
+        loop = Task.Run(PollLoopAsync);
     }
 
-    private async void Poll(object? state)
+    private async Task PollLoopAsync()
     {
-        if (disposed || Interlocked.Exchange(ref polling, 1) != 0)
+        try
+        {
+            await PollOnceAsync();
+            while (await timer.WaitForNextTickAsync(cancellation.Token))
+            {
+                await PollOnceAsync();
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
+    private async Task PollOnceAsync()
+    {
+        if (publicationGate.IsClosed)
         {
             return;
         }
@@ -55,6 +60,15 @@ internal sealed class PhoneNotificationSourceCoordinator : IDisposable
         try
         {
             var now = DateTimeOffset.UtcNow;
+            var expired = reconciler.ExpireStale(now);
+            PublishRequests(expired);
+            if (expired.Count > 0)
+            {
+                RuntimeLog.Write(
+                    $"Phone active notification leases expired: " +
+                    $"count={expired.Count}.");
+            }
+
             if (!accessAllowed && now < nextAccessAttemptAt)
             {
                 return;
@@ -64,6 +78,11 @@ internal sealed class PhoneNotificationSourceCoordinator : IDisposable
             {
                 accessRequested = true;
                 var access = await listener.RequestAccessAsync();
+                if (publicationGate.IsClosed)
+                {
+                    return;
+                }
+
                 accessAllowed =
                     access == UserNotificationListenerAccessStatus.Allowed;
                 nextAccessAttemptAt = accessAllowed
@@ -82,7 +101,12 @@ internal sealed class PhoneNotificationSourceCoordinator : IDisposable
 
             var notifications = await listener.GetNotificationsAsync(
                 NotificationKinds.Toast);
-            var currentIds = new HashSet<uint>();
+            if (publicationGate.IsClosed)
+            {
+                return;
+            }
+
+            var snapshot = new List<PhoneNotificationSnapshotItem>();
             var xiaomiCount = 0;
             var phoneLinkCount = 0;
             foreach (var notification in notifications
@@ -108,75 +132,22 @@ internal sealed class PhoneNotificationSourceCoordinator : IDisposable
                     phoneLinkCount++;
                 }
 
-                currentIds.Add(notification.Id);
-                var category =
-                    PhoneNotificationClassifier.Classify(title, body);
-                var isTimed = category is
-                    PhoneNotificationCategory.Ordinary or
-                    PhoneNotificationCategory.Dynamic;
-                var fingerprint =
-                    PhoneNotificationClassifier.DedupKey(
-                        title,
-                        body);
-                var known = fingerprints.TryGetValue(
+                snapshot.Add(new PhoneNotificationSnapshotItem(
                     notification.Id,
-                    out var previousFingerprint);
-                var changed =
-                    !string.Equals(
-                        previousFingerprint,
-                        fingerprint,
-                        StringComparison.Ordinal);
-                if (!baselineCaptured)
-                {
-                    fingerprints[notification.Id] = fingerprint;
-                    continue;
-                }
-
-                if (isTimed)
-                {
-                    EndActive(notification.Id);
-                    if ((!known || changed) &&
-                        timedPublished.Add(notification.Id))
-                    {
-                        PublishTimed(
-                            notification.Id,
-                            category,
-                            source,
-                            appName,
-                            title,
-                            body);
-                    }
-                }
-                else
-                {
-                    if (!known || changed)
-                    {
-                        PublishPersistent(
-                            notification.Id,
-                            category,
-                            source,
-                            appName,
-                            title,
-                            body);
-                    }
-                }
-
-                fingerprints[notification.Id] = fingerprint;
+                    notification.CreationTime,
+                    appName,
+                    title,
+                    body,
+                    source));
             }
 
             LogInventory(xiaomiCount, phoneLinkCount);
-            baselineCaptured = true;
-            foreach (var id in fingerprints.Keys
-                         .Where(id => !currentIds.Contains(id))
-                         .ToArray())
-            {
-                EndActive(id);
-                fingerprints.Remove(id);
-                timedPublished.Remove(id);
-            }
+            PublishRequests(reconciler.Reconcile(snapshot, now));
         }
         catch (OperationCanceledException)
+            when (cancellation.IsCancellationRequested)
         {
+            throw;
         }
         catch (UnauthorizedAccessException)
         {
@@ -196,116 +167,25 @@ internal sealed class PhoneNotificationSourceCoordinator : IDisposable
             RuntimeLog.Write(
                 $"Phone notification probe failed: {exception.GetType().Name}");
         }
-        finally
-        {
-            Interlocked.Exchange(ref polling, 0);
-        }
     }
 
-    private void PublishTimed(
-        uint id,
-        PhoneNotificationCategory category,
-        OverlaySource source,
-        string appName,
-        string title,
-        string? body)
+    private void PublishRequests(
+        IReadOnlyList<OverlayRequest> requests)
     {
-        var accepted = publisher.Publish(OverlayRequest.Timed(
-            EventId(id),
-            category == PhoneNotificationCategory.Dynamic
-                ? OverlayKind.PhoneDynamic
-                : OverlayKind.PhoneNotification,
-            source,
-            title,
-            body,
-            dedupKey: PhoneNotificationClassifier.DedupKey(
-                title,
-                body),
-            visual: new OverlayVisualData(
-                Eyebrow: category == PhoneNotificationCategory.Dynamic
-                    ? "手机动态 / LIVE"
-                    : "手机通知 / PHONE",
-                Subtitle: appName,
-                AccentHex: "#70F0B2")));
-        RuntimeLog.Write(
-            $"Phone notification event: source={SourceLabel(source)}, " +
-            $"result={(accepted ? "published" : "deduplicated")}.");
-    }
-
-    private void PublishPersistent(
-        uint id,
-        PhoneNotificationCategory category,
-        OverlaySource source,
-        string appName,
-        string title,
-        string? body)
-    {
-        var dedupKey = PhoneNotificationClassifier.DedupKey(
-            title,
-            body);
-        if (active.TryGetValue(id, out var previous) &&
-            !string.Equals(
-                previous.DedupKey,
-                dedupKey,
-                StringComparison.Ordinal))
+        foreach (var request in requests)
         {
-            EndActive(id);
+            var accepted = publicationGate.TryPublish(
+                () => publisher.Publish(request));
+            if (request.IsActive &&
+                request.Kind is OverlayKind.PhoneNotification or
+                    OverlayKind.PhoneDynamic)
+            {
+                RuntimeLog.Write(
+                    $"Phone notification event: " +
+                    $"source={SourceLabel(request.Source)}, " +
+                    $"result={(accepted ? "published" : "deduplicated")}.");
+            }
         }
-
-        var kind = category switch
-        {
-            PhoneNotificationCategory.Call => OverlayKind.PhoneCall,
-            PhoneNotificationCategory.Transfer => OverlayKind.PhoneTransfer,
-            _ => throw new ArgumentOutOfRangeException(nameof(category)),
-        };
-        _ = publisher.Publish(OverlayRequest.End(
-            EventId(id),
-            OverlayKind.PhoneNotification,
-            source));
-        _ = publisher.Publish(OverlayRequest.Active(
-            ActiveEventId(dedupKey),
-            kind,
-            source,
-            title,
-            body,
-            visual: new OverlayVisualData(
-                Eyebrow: category switch
-                {
-                    PhoneNotificationCategory.Call =>
-                        "手机来电 / CALL",
-                    _ => "跨设备传输 / TRANSFER",
-                },
-                Subtitle: appName,
-                AccentHex: category ==
-                           PhoneNotificationCategory.Call
-                    ? "#FF9EAE"
-                    : "#70F0B2")));
-        active[id] = new ActivePhoneNotification(
-            kind,
-            source,
-            dedupKey);
-    }
-
-    private void EndActive(uint id)
-    {
-        if (!active.Remove(id, out var existing))
-        {
-            return;
-        }
-
-        if (active.Values.Any(candidate =>
-                string.Equals(
-                    candidate.DedupKey,
-                    existing.DedupKey,
-                    StringComparison.Ordinal)))
-        {
-            return;
-        }
-
-        _ = publisher.Publish(OverlayRequest.End(
-            ActiveEventId(existing.DedupKey),
-            existing.Kind,
-            existing.Source));
     }
 
     private static bool TryRead(
@@ -377,26 +257,38 @@ internal sealed class PhoneNotificationSourceCoordinator : IDisposable
         _ => "unknown",
     };
 
-    private static string EventId(uint id) =>
-        $"phone-notification:{id}";
-
-    private static string ActiveEventId(string dedupKey)
-    {
-        var hash = SHA256.HashData(
-            Encoding.UTF8.GetBytes(dedupKey));
-        return $"phone-active:{Convert.ToHexStringLower(hash)[..20]}";
-    }
-
     public void Dispose()
     {
-        if (disposed)
+        if (!publicationGate.Close())
         {
             return;
         }
 
-        disposed = true;
         cancellation.Cancel();
         timer.Dispose();
-        cancellation.Dispose();
+        var completed = false;
+        try
+        {
+            completed = loop.Wait(TimeSpan.FromSeconds(5));
+        }
+        catch
+        {
+        }
+
+        if (completed)
+        {
+            cancellation.Dispose();
+            return;
+        }
+
+        _ = loop.ContinueWith(
+            completedLoop =>
+            {
+                _ = completedLoop.Exception;
+                cancellation.Dispose();
+            },
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
     }
 }

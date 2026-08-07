@@ -5,8 +5,10 @@ param(
     [string]$Id,
 
     [Parameter(Mandatory)]
+    [ValidateLength(1, 256)]
     [string]$Title,
 
+    [ValidateLength(0, 1024)]
     [string]$Detail,
 
     [ValidateRange(0, 100)]
@@ -14,6 +16,9 @@ param(
 
     [ValidateRange(0, 525600)]
     [double]$RemainingMinutes,
+
+    [ValidateRange(0.1, 1440)]
+    [double]$LeaseMinutes = 5,
 
     [ValidateSet('active', 'completed', 'cancelled')]
     [string]$State = 'active'
@@ -28,10 +33,13 @@ if ($PSBoundParameters.ContainsKey('Detail')) {
     $payload.detail = $Detail
 }
 if ($PSBoundParameters.ContainsKey('ProgressPercent')) {
-    $payload.progress = $ProgressPercent / 100
+    $payload.progress_percent = $ProgressPercent
 }
 if ($PSBoundParameters.ContainsKey('RemainingMinutes')) {
     $payload.remaining_seconds = $RemainingMinutes * 60
+}
+if ($State -eq 'active') {
+    $payload.lease_seconds = $LeaseMinutes * 60
 }
 
 $pipe = [System.IO.Pipes.NamedPipeClientStream]::new(

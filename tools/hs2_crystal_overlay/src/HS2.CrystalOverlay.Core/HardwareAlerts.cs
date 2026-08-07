@@ -21,7 +21,142 @@ public sealed record HardwareAlertFinding(
     string Title,
     string Body,
     string SuggestedAction,
-    int Severity);
+    int Severity,
+    string? EvidenceKey = null);
+
+public static class HardwareAlertContinuity
+{
+    public const int PumpStoppedSeverity = 110;
+
+    public static bool ShouldRetainActive(
+        string? activeFindingKey,
+        bool pumpTelemetryAvailable,
+        HardwareAlertFinding? nextFinding) =>
+        !pumpTelemetryAvailable &&
+        string.Equals(
+            activeFindingKey,
+            "pump-stopped",
+            StringComparison.Ordinal) &&
+        (nextFinding?.Severity ?? int.MinValue) <= PumpStoppedSeverity;
+
+    public static bool ShouldRetainActive(
+        HardwareAlertFinding? activeFinding,
+        bool recoveryEvidenceAvailable,
+        HardwareAlertFinding? nextFinding) =>
+        activeFinding is not null &&
+        !recoveryEvidenceAvailable &&
+        (nextFinding?.Severity ?? int.MinValue) <= activeFinding.Severity;
+}
+
+public sealed class ConsecutiveEvidenceGate
+{
+    private readonly int requiredSamples;
+    private int samples;
+
+    public ConsecutiveEvidenceGate(int requiredSamples)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(requiredSamples, 1);
+        this.requiredSamples = requiredSamples;
+    }
+
+    public bool Observe(bool hasEvidence)
+    {
+        if (!hasEvidence)
+        {
+            samples = 0;
+            return false;
+        }
+
+        samples++;
+        if (samples < requiredSamples)
+        {
+            return false;
+        }
+
+        samples = 0;
+        return true;
+    }
+
+    public void Reset() => samples = 0;
+}
+
+public static class HardwareAlertRecovery
+{
+    public static bool HasRecoveryEvidence(
+        HardwareAlertFinding activeFinding,
+        HardwareTelemetry telemetry,
+        bool pumpTelemetryAvailable)
+    {
+        ArgumentNullException.ThrowIfNull(activeFinding);
+        ArgumentNullException.ThrowIfNull(telemetry);
+        return activeFinding.Key switch
+        {
+            "cpu-overheat" => telemetry.CpuTemperatureCelsius.HasValue,
+            "gpu-overheat" => telemetry.GpuTemperatureCelsius.HasValue,
+            "gpu-hotspot" =>
+                telemetry.GpuHotspotTemperatureCelsius.HasValue,
+            "memory-overheat" =>
+                HasExpectedSensorCount(
+                    activeFinding.EvidenceKey,
+                    "memory-count:",
+                    telemetry.MemoryModuleTemperaturesCelsius.Count),
+            "pump-stopped" =>
+                pumpTelemetryAvailable &&
+                HasExpectedSensorCount(
+                    activeFinding.EvidenceKey,
+                    "pump-count:",
+                    telemetry.PumpRpms.Count(value =>
+                        value >= 0 && value < 20000)),
+            "network-down" => true,
+            _ when activeFinding.Key.StartsWith(
+                "disk-",
+                StringComparison.Ordinal) =>
+                HasDiskRecoveryEvidence(activeFinding, telemetry.Disks),
+            _ => false,
+        };
+    }
+
+    private static bool HasDiskRecoveryEvidence(
+        HardwareAlertFinding activeFinding,
+        IReadOnlyList<HardwareDiskTelemetry> disks)
+    {
+        if (string.IsNullOrWhiteSpace(activeFinding.EvidenceKey))
+        {
+            return false;
+        }
+
+        var disk = disks.FirstOrDefault(candidate => string.Equals(
+            candidate.Name,
+            activeFinding.EvidenceKey,
+            StringComparison.OrdinalIgnoreCase));
+        return activeFinding.Key switch
+        {
+            "disk-overheat" => disk?.TemperatureCelsius.HasValue == true,
+            "disk-health" =>
+                !string.IsNullOrWhiteSpace(disk?.HealthStatus),
+            "disk-space" =>
+                disk?.FreeGigabytes.HasValue == true &&
+                disk.CapacityGigabytes.HasValue,
+            _ => false,
+        };
+    }
+
+    private static bool HasExpectedSensorCount(
+        string? evidenceKey,
+        string prefix,
+        int actualCount)
+    {
+        if (evidenceKey?.StartsWith(
+                prefix,
+                StringComparison.Ordinal) == true &&
+            int.TryParse(evidenceKey[prefix.Length..], out var expectedCount))
+        {
+            return actualCount >= expectedCount;
+        }
+
+        return actualCount > 0;
+    }
+}
 
 public static class HardwareAlertEvaluator
 {
@@ -68,7 +203,8 @@ public static class HardwareAlertEvaluator
                 hottestMemory,
                 85,
                 "检查内存区域风道",
-                75);
+                75,
+                $"memory-count:{telemetry.MemoryModuleTemperaturesCelsius.Count}");
         }
 
         foreach (var disk in telemetry.Disks)
@@ -80,7 +216,8 @@ public static class HardwareAlertEvaluator
                     $"{disk.Name} 温度过高",
                     $"{disk.TemperatureCelsius:0.#}°C",
                     "降低持续读写并检查硬盘散热",
-                    80));
+                    80,
+                    disk.Name));
             }
 
             if (IsUnhealthy(disk.HealthStatus))
@@ -90,7 +227,8 @@ public static class HardwareAlertEvaluator
                     $"{disk.Name} 健康异常",
                     disk.HealthStatus!,
                     "立即备份重要数据并检查 SMART",
-                    100));
+                    100,
+                    disk.Name));
             }
 
             if (IsCriticallyLowOnSpace(disk))
@@ -100,7 +238,8 @@ public static class HardwareAlertEvaluator
                     $"{disk.Name} 空间严重不足",
                     $"仅剩 {disk.FreeGigabytes:0.#} GB",
                     "清理或迁移数据，至少保留 5% 空间",
-                    70));
+                    70,
+                    disk.Name));
             }
         }
 
@@ -115,7 +254,8 @@ public static class HardwareAlertEvaluator
                 "水泵转速异常",
                 $"泵速 {string.Join(" / ", validPumpRpms.Select(value => $"{value:0} RPM"))}",
                 "立即检查水泵供电、接线与 L-Connect",
-                110));
+                HardwareAlertContinuity.PumpStoppedSeverity,
+                $"pump-count:{validPumpRpms.Length}"));
         }
 
         if (telemetry.NetworkDownFor is { } networkDown &&
@@ -142,7 +282,8 @@ public static class HardwareAlertEvaluator
         double? temperature,
         double threshold,
         string action,
-        int severity)
+        int severity,
+        string? evidenceKey = null)
     {
         if (temperature is null ||
             temperature.Value < threshold ||
@@ -156,7 +297,8 @@ public static class HardwareAlertEvaluator
             title,
             $"{temperature.Value:0.#}°C",
             action,
-            severity));
+            severity,
+            evidenceKey));
     }
 
     private static bool IsUnhealthy(string? value)

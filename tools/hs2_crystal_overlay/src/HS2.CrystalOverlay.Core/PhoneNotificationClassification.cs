@@ -11,6 +11,12 @@ public enum PhoneNotificationCategory
     Transfer,
 }
 
+public sealed record PhoneActiveNotificationIdentity(
+    string EventId,
+    OverlayKind Kind,
+    string Title,
+    string? Body);
+
 public static partial class PhoneNotificationClassifier
 {
     private const int MinimumApproximateLength = 12;
@@ -106,6 +112,31 @@ public static partial class PhoneNotificationClassifier
         return NGramDice(firstRunes, secondRunes, NGramSize) >=
                NGramDiceThreshold;
     }
+
+    public static string ResolveActiveEventId(
+        IEnumerable<PhoneActiveNotificationIdentity> existing,
+        OverlayKind kind,
+        string title,
+        string? body,
+        string fallbackEventId)
+    {
+        ArgumentNullException.ThrowIfNull(existing);
+        ArgumentException.ThrowIfNullOrWhiteSpace(fallbackEventId);
+        return existing.FirstOrDefault(candidate =>
+                   candidate.Kind == kind &&
+                   AreApproximatelyEquivalent(
+                       candidate.Title,
+                       candidate.Body,
+                       title,
+                       body))
+               ?.EventId ?? fallbackEventId;
+    }
+
+    public static bool ShouldPublishPersistent(
+        bool known,
+        bool changed,
+        bool isActiveTracked) =>
+        !known || changed || !isActiveTracked;
 
     public static OverlaySource SourceForRelayApp(string? appName)
     {

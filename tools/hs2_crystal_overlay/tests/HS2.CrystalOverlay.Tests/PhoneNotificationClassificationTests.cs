@@ -82,6 +82,41 @@ public sealed class PhoneNotificationClassificationTests
             secondBody));
     }
 
+    [Fact]
+    public void ActiveRelayDuplicateReusesExistingCardIdentity()
+    {
+        PhoneActiveNotificationIdentity[] existing =
+        [
+            new(
+                "active-phone:first",
+                OverlayKind.PhoneTransfer,
+                "Fight for the Future",
+                "UPDATE: KOSA theater is a gift to Big Tech"),
+        ];
+
+        var eventId = PhoneNotificationClassifier.ResolveActiveEventId(
+            existing,
+            OverlayKind.PhoneTransfer,
+            "Fight for the Future",
+            "KOSA theater is a gift to Big Tech",
+            "active-phone:fallback");
+
+        Assert.Equal("active-phone:first", eventId);
+    }
+
+    [Fact]
+    public void PersistentNotificationIsRepublishedAfterSafetyLeaseExpiry()
+    {
+        Assert.True(PhoneNotificationClassifier.ShouldPublishPersistent(
+            known: true,
+            changed: false,
+            isActiveTracked: false));
+        Assert.False(PhoneNotificationClassifier.ShouldPublishPersistent(
+            known: true,
+            changed: false,
+            isActiveTracked: true));
+    }
+
     [Theory]
     [InlineData("Phone Link", OverlaySource.PhoneLink)]
     [InlineData("手机连接", OverlaySource.PhoneLink)]

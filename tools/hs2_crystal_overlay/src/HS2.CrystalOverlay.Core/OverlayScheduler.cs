@@ -8,6 +8,8 @@ public sealed class OverlayScheduler
         TimeSpan.FromMinutes(3);
     private static readonly TimeSpan MaximumQueuedNotificationAge =
         TimeSpan.FromMinutes(3);
+    private static readonly TimeSpan MaximumQueuedDeferredCardAge =
+        TimeSpan.FromMinutes(3);
     private static readonly TimeSpan MinimumDismissalSuppressionWindow =
         TimeSpan.FromSeconds(10);
 
@@ -33,6 +35,15 @@ public sealed class OverlayScheduler
         }
 
         var policy = OverlayPolicies.For(request.Kind);
+        if (!IsDismissible(request.Kind))
+        {
+            dismissalSuppressions.RemoveAll(previous =>
+                string.Equals(
+                    previous.Request.EventId,
+                    request.EventId,
+                    StringComparison.Ordinal));
+        }
+
         if (IsDismissalSuppressed(request, policy))
         {
             return false;
@@ -267,6 +278,20 @@ public sealed class OverlayScheduler
             RemoveItem(eventId);
         }
 
+        foreach (var eventId in items
+                     .Where(pair =>
+                         UsesVisibleTimer(
+                             pair.Value.Request,
+                             pair.Value.Policy) &&
+                         !IsStackedNotification(pair.Value.Policy) &&
+                         now - pair.Value.PublishedAt >=
+                             MaximumQueuedDeferredCardAge)
+                     .Select(pair => pair.Key)
+                     .ToArray())
+        {
+            RemoveItem(eventId);
+        }
+
         foreach (var eventId in visibleTimers
                      .Where(pair =>
                          pair.Value.Remaining is { } remaining &&
@@ -460,14 +485,16 @@ public sealed class OverlayScheduler
         OverlayRequest request,
         OverlayPresentationPolicy policy) =>
         policy.Lifetime == OverlayLifetime.Timed &&
-        (IsStackedNotification(policy) ||
-         request.Kind == OverlayKind.GameSummary);
+        request.Kind != OverlayKind.SystemOperation;
 
     private static bool IsSameVisibleOccurrence(
         OverlayRequest previous,
         OverlayRequest current)
     {
-        if (current.Kind != OverlayKind.GameSummary)
+        if (current.Kind is
+            OverlayKind.PhoneConnection or
+            OverlayKind.PhoneNotification or
+            OverlayKind.PhoneDynamic)
         {
             return true;
         }

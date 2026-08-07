@@ -95,6 +95,40 @@ public sealed class VisibleCardSelectorTests
     }
 
     [Fact]
+    public void ActiveImportantTask_DisplacesPassiveMediaUnderMaximumPressure()
+    {
+        var scheduler = new OverlayScheduler();
+        scheduler.Publish(OverlayRequest.Active(
+            "media", OverlayKind.MediaActive, OverlaySource.NetEase, "歌曲"), Now);
+        scheduler.Publish(OverlayRequest.Active(
+            "game", OverlayKind.GameActive, OverlaySource.Steam, "游戏"), Now);
+        scheduler.Publish(OverlayRequest.Active(
+            "alert", OverlayKind.HardwareAlert, OverlaySource.Hardware, "硬件告警"), Now);
+        scheduler.Publish(OverlayRequest.Active(
+            "call", OverlayKind.PhoneCall, OverlaySource.PhoneLink, "来电"), Now);
+        scheduler.Publish(OverlayRequest.Active(
+            "transfer", OverlayKind.PhoneTransfer, OverlaySource.PhoneLink, "手机传输"), Now);
+        scheduler.Publish(OverlayRequest.Active(
+            "task", OverlayKind.ImportantTask, OverlaySource.Task, "文件复制"), Now);
+        scheduler.Publish(OverlayRequest.Timed(
+            "latest-phone",
+            OverlayKind.PhoneNotification,
+            OverlaySource.XiaomiHyperConnect,
+            "最新通知"), Now.AddSeconds(1));
+
+        var visible = scheduler.GetFrame(
+                Now.AddSeconds(1),
+                maxVisibleCards: 6,
+                maxVisibleNotifications: 3)
+            .VisibleCards;
+
+        Assert.Contains(visible, item =>
+            item.Request.Kind == OverlayKind.ImportantTask);
+        Assert.DoesNotContain(visible, item =>
+            item.Request.Kind == OverlayKind.MediaActive);
+    }
+
+    [Fact]
     public void IndependentOperationalCards_CompeteAsSeparateEventIds()
     {
         var scheduler = new OverlayScheduler();

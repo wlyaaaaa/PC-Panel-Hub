@@ -44,6 +44,20 @@ between desktop and monitor modes, so the watchdog polls for the new controller
 mode instead of assuming the switch is immediate. L-Connect failures are logged
 and isolated so they do not prevent the TURZX panel from being turned off.
 
+After an unclean restart, the watchdog also keeps `desired active` separate from
+`verified active`. It retries the read-back-verified Active request every 15
+seconds and does not launch the HS2 overlay until verification succeeds. If the
+HS2 USB display is present but L-Connect has not rebound it, the watchdog restarts
+only `LConnectService` once for that failure streak. If Windows instead reports
+the exact dedicated `VID_1A86&PID_8091` HS2 hub with its port-2 descriptor child
+in Code 43, recovery additionally requires the exact hub identity previously
+learned from a healthy HS2 display plus its LIAN LI LED sibling. It is then
+limited to one precise hub restart and, only if still needed, removal/rescan of
+that exact failed child. Missing or ambiguous binding fails closed; it never
+resets a root hub or the whole USB tree. A continuing descriptor failure is
+logged as a hardware cold-power boundary and subsequent probes use a slower
+retry interval instead of writing every few seconds.
+
 TURZX brightness control uses the same RJCP serial path as frame streaming.
 The watchdog releases the stream's COM-port ownership before sending the power
 command. A black frame remains as an explicit fallback only when the hardware

@@ -100,6 +100,25 @@ public sealed class PhoneBatteryTests
     }
 
     [Fact]
+    public void PhoneLinkCompanion_LeavesUnrecognizedConnectionTextUnknown()
+    {
+        const string json = """
+            {
+              "speak": "Android 手机",
+              "body": [
+                { "tooltip": "电池电量剩余 74%" }
+              ]
+            }
+            """;
+
+        var snapshot = PhoneLinkCompanionParser.Parse(json);
+
+        Assert.NotNull(snapshot);
+        Assert.Null(snapshot.IsConnected);
+        Assert.Equal(74, snapshot.Percentage);
+    }
+
+    [Fact]
     public void MissingDisconnectedOrStaleProviders_HideBattery()
     {
         var stale = new PhoneBatteryReading(
@@ -157,6 +176,26 @@ public sealed class PhoneBatteryTests
 
         Assert.NotNull(snapshot);
         Assert.Equal(97, snapshot.Percentage);
+        Assert.Null(snapshot.IsCharging);
+    }
+
+    [Fact]
+    public void XiaomiLogParser_DoesNotKeepChargingAfterOnlyRecentPlateauSamples()
+    {
+        const string log = """
+            2026-07-30 16:20:00,100 INFO HandleGetPhoneElectricQuantity,battery_level: 50
+            2026-07-30 16:21:00,100 INFO HandleGetPhoneElectricQuantity,battery_level: 51
+            2026-07-30 16:29:00,100 INFO HandleGetPhoneElectricQuantity,battery_level: 51
+            2026-07-30 16:30:00,100 INFO HandleGetPhoneElectricQuantity,battery_level: 51
+            """;
+
+        var snapshot = XiaomiBatteryLogParser.Parse(
+            log,
+            Now,
+            TimeSpan.FromMinutes(5));
+
+        Assert.NotNull(snapshot);
+        Assert.Equal(51, snapshot.Percentage);
         Assert.Null(snapshot.IsCharging);
     }
 

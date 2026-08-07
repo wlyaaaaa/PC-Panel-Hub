@@ -298,6 +298,7 @@ public sealed class OverlayDeckLayoutTests
             "audio-hud",
             "game",
             "media",
+            "task",
         };
 
         for (var mask = 0; mask < 1 << source.Length; mask++)
@@ -339,6 +340,15 @@ public sealed class OverlayDeckLayoutTests
                     OverlayCardWidthPreference.Wide));
             }
 
+            if (included.Contains("task"))
+            {
+                requests.Add(new(
+                    "task",
+                    OverlayCardKind.Progress,
+                    requests.Count,
+                    OverlayCardWidthPreference.Wide));
+            }
+
             var plan = CompositionPlanner.Plan(Hs2Display, requests);
             AssertPlanInvariants(plan, Hs2Display);
             var cards = plan.Cards.ToDictionary(card => card.EventId);
@@ -350,12 +360,16 @@ public sealed class OverlayDeckLayoutTests
             if (cards.TryGetValue("audio-hud", out var audio))
             {
                 Assert.Equal(0, audio.Row);
-                if (phones.Length == 0)
+                var wideFrontCards = included.Count(id =>
+                    id is "game" or "media" or "task");
+                if (phones.Length == 0 && wideFrontCards < 3)
                 {
-                    Assert.Equal(44, audio.Bounds.Left);
+                    Assert.True(
+                        audio.Bounds.Left == 44,
+                        $"Audio was not bottom-left for: {string.Join(", ", included)}");
                     Assert.Equal(OverlayDeckRegion.Front, audio.Region);
                 }
-                else
+                else if (phones.Length > 0)
                 {
                     Assert.Equal(0, cards[phones[0]].Row);
                     Assert.Equal(

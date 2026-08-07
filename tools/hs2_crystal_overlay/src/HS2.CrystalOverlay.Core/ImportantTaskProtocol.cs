@@ -16,7 +16,8 @@ public sealed record ImportantTaskUpdate(
     string? Detail,
     double? Progress,
     TimeSpan? Remaining,
-    ImportantTaskState State);
+    ImportantTaskState State,
+    TimeSpan? Lease = null);
 
 public static partial class ImportantTaskProtocol
 {
@@ -26,11 +27,23 @@ public static partial class ImportantTaskProtocol
         {
             using var document = JsonDocument.Parse(json);
             var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object)
+            {
+                return null;
+            }
+
             var id = Text(root, "id");
             var title = Text(root, "title");
             if (id is null ||
                 title is null ||
+                title.Length > 256 ||
                 !SafeId().IsMatch(id))
+            {
+                return null;
+            }
+
+            var detail = Text(root, "detail");
+            if (detail?.Length > 1024)
             {
                 return null;
             }
@@ -41,33 +54,66 @@ public static partial class ImportantTaskProtocol
                 return null;
             }
 
-            var progress = Number(root, "progress");
-            if (progress is > 1 and <= 100)
+            if (!OptionalNumber(root, "progress_percent", out var progressPercent) ||
+                !OptionalNumber(root, "progress", out var normalizedProgress) ||
+                !OptionalNumber(
+                    root,
+                    "remaining_seconds",
+                    out var remainingSeconds) ||
+                !OptionalNumber(root, "lease_seconds", out var leaseSeconds))
             {
-                progress /= 100;
+                return null;
             }
 
-            if (progress is < 0 or > 1)
+            if (progressPercent is not null &&
+                normalizedProgress is not null)
             {
-                progress = null;
+                return null;
             }
 
-            var remainingSeconds = Number(
-                root,
-                "remaining_seconds");
-            TimeSpan? remaining =
-                remainingSeconds is >= 0 and <= 31_536_000
-                    ? TimeSpan.FromSeconds(remainingSeconds.Value)
-                    : null;
+            double? progress = null;
+            if (progressPercent is not null)
+            {
+                if (progressPercent is < 0 or > 100)
+                {
+                    return null;
+                }
+
+                progress = progressPercent / 100;
+            }
+            else if (normalizedProgress is not null)
+            {
+                if (normalizedProgress is < 0 or > 1)
+                {
+                    return null;
+                }
+
+                progress = normalizedProgress;
+            }
+
+            if (remainingSeconds is < 0 or > 31_536_000 ||
+                leaseSeconds is < 5 or > 86_400)
+            {
+                return null;
+            }
+
+            TimeSpan? remaining = remainingSeconds is null
+                ? null
+                : TimeSpan.FromSeconds(remainingSeconds.Value);
+            TimeSpan? lease = leaseSeconds is null
+                ? null
+                : TimeSpan.FromSeconds(leaseSeconds.Value);
             return new ImportantTaskUpdate(
                 id,
                 title,
-                Text(root, "detail"),
+                detail,
                 progress,
                 remaining,
-                state.Value);
+                state.Value,
+                lease);
         }
-        catch (JsonException)
+        catch (Exception exception) when (
+            exception is JsonException or InvalidOperationException)
         {
             return null;
         }
@@ -97,12 +143,26 @@ public static partial class ImportantTaskProtocol
         return string.IsNullOrWhiteSpace(text) ? null : text;
     }
 
-    private static double? Number(JsonElement root, string name)
+    private static bool OptionalNumber(
+        JsonElement root,
+        string name,
+        out double? number)
     {
-        return root.TryGetProperty(name, out var value) &&
-               value.TryGetDouble(out var number)
-            ? number
-            : null;
+        number = null;
+        if (!root.TryGetProperty(name, out var value))
+        {
+            return true;
+        }
+
+        if (value.ValueKind != JsonValueKind.Number ||
+            !value.TryGetDouble(out var parsed) ||
+            !double.IsFinite(parsed))
+        {
+            return false;
+        }
+
+        number = parsed;
+        return true;
     }
 
     [GeneratedRegex(

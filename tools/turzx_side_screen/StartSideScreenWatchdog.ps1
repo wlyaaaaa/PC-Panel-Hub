@@ -17,6 +17,10 @@ param(
     [int]$MaxConsecutiveHeartbeatFailures = 3,
     [int]$MaxConsecutiveFailures = 3,
     [ValidateRange(5, 3600)][int]$HS2OverlayRetrySeconds = 30,
+    [ValidateRange(5, 300)][int]$HS2ActiveRetrySeconds = 15,
+    [ValidateRange(30, 3600)][int]$HS2ActiveSlowRetrySeconds = 60,
+    [ValidateRange(10, 3600)][int]$HS2ActiveVerifySeconds = 30,
+    [ValidateRange(1, 10)][int]$HS2UsbRecoveryAfterFailures = 3,
     [ValidateRange(0, 255)][int]$ActiveBrightness = 170,
     [ValidateRange(1, 65535)][int]$LConnectServicePort = 11021,
     [switch]$NoWindowPreservationPolicy,
@@ -30,6 +34,7 @@ $Root = (Resolve-Path -LiteralPath $Root).Path
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $outDir = Join-Path $scriptDir "out"
 $logPath = Join-Path $outDir "side-screen-watchdog.log"
+$hs2UsbTopologyBindingPath = Join-Path $outDir "hs2-usb-topology-binding.json"
 $childPidPath = Join-Path $outDir "side-screen-stack-child.pid"
 $watchdogPidPath = Join-Path $outDir "side-screen-watchdog.pid"
 $pausedPath = Join-Path $outDir "side-screen-watchdog.paused"
@@ -46,6 +51,7 @@ $blankScript = Join-Path $scriptDir "SendBlankFrame.ps1"
 $brightnessScript = Join-Path $scriptDir "SetTurzxBrightness.ps1"
 $shutdownPolicy = Join-Path $scriptDir "SideScreenWatchdogPolicy.ps1"
 $displayPowerPolicy = Join-Path $scriptDir "SideScreenDisplayPowerPolicy.ps1"
+$activeRecoveryPolicy = Join-Path $scriptDir "HS2ActiveRecoveryPolicy.ps1"
 $windowPreservationPolicy = Join-Path $scriptDir "WindowsDisplayWindowPolicy.ps1"
 $overlayWatchdogPolicy = Join-Path $scriptDir "HS2OverlayWatchdogPolicy.ps1"
 $powerSourceId = "TURZXSideScreenPower"
@@ -54,6 +60,13 @@ $watchdogStartedUtc = [DateTime]::UtcNow
 $script:hs2OverlayLastAttemptUtc = [DateTime]::MinValue
 $script:hs2OverlayWasRunning = $false
 $script:hs2DisplayStateActive = $false
+$script:hs2DisplayStateDesiredActive = $false
+$script:hs2ActiveLastAttemptUtc = [DateTime]::MinValue
+$script:hs2ActiveLastVerifiedUtc = [DateTime]::MinValue
+$script:hs2ActiveConsecutiveFailures = 0
+$script:hs2ActiveCurrentRetrySeconds = $HS2ActiveRetrySeconds
+$script:hs2UsbRecoveryAttempted = $false
+$script:hs2LConnectRecoveryAttempted = $false
 $script:hs2WindowGuardTargetMonitorDevice = $null
 $script:hs2WindowGuardSafeMonitorDevice = $null
 $script:hs2WindowGuardLastStatus = $null
@@ -62,6 +75,7 @@ $script:hs2WindowGuardLastFailure = $null
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 . $shutdownPolicy
 . $displayPowerPolicy
+. $activeRecoveryPolicy
 . $windowPreservationPolicy
 . $overlayWatchdogPolicy
 
@@ -141,17 +155,145 @@ function Set-TurzxPanelBrightness {
     }
 }
 
+function Invoke-HS2ActiveMaintenance {
+    param([string]$Reason = "watchdog-loop")
+
+    $nowUtc = [DateTime]::UtcNow
+    $decision = Get-HS2ActiveRecoveryDecision `
+        -DesiredActive $script:hs2DisplayStateDesiredActive `
+        -VerifiedActive $script:hs2DisplayStateActive `
+        -LastAttemptUtc $script:hs2ActiveLastAttemptUtc `
+        -LastVerifiedUtc $script:hs2ActiveLastVerifiedUtc `
+        -NowUtc $nowUtc `
+        -RetrySeconds $script:hs2ActiveCurrentRetrySeconds `
+        -VerifySeconds $HS2ActiveVerifySeconds
+    if ($decision.Action -ne "Activate" -and $decision.Action -ne "Verify") {
+        return
+    }
+
+    $wasVerified = $script:hs2DisplayStateActive
+    $script:hs2ActiveLastAttemptUtc = $nowUtc
+    try {
+        $result = Invoke-HS2PowerState -State Active -ServicePort $LConnectServicePort
+        if ($null -eq $result -or -not [bool]$result.Verified) {
+            throw "L-Connect did not return a verified HS2 Active state."
+        }
+
+        $script:hs2DisplayStateActive = $true
+        $script:hs2ActiveLastVerifiedUtc = [DateTime]::UtcNow
+        $script:hs2ActiveConsecutiveFailures = 0
+        $script:hs2ActiveCurrentRetrySeconds = $HS2ActiveRetrySeconds
+        $script:hs2UsbRecoveryAttempted = $false
+        $script:hs2LConnectRecoveryAttempted = $false
+        try {
+            if (Save-HS2UsbTopologyBinding -Path $hs2UsbTopologyBindingPath) {
+                if (-not $wasVerified) {
+                    Write-WatchdogLog "HS2 USB topology binding verified"
+                }
+            }
+            elseif (-not $wasVerified) {
+                Write-WatchdogLog "HS2 USB topology binding unavailable; Code 43 recovery will fail closed"
+            }
+        }
+        catch {
+            Write-WatchdogLog (
+                "HS2 USB topology binding failed safely: {0}" -f `
+                    $_.Exception.Message)
+        }
+        if (-not $wasVerified) {
+            Write-WatchdogLog ("HS2 power state=Active reason={0} verified=true" -f $Reason)
+        }
+        return
+    }
+    catch {
+        $script:hs2DisplayStateActive = $false
+        $script:hs2ActiveConsecutiveFailures++
+        Write-WatchdogLog (
+            "HS2 power state=Active reason={0} failed count={1}: {2}" -f `
+                $Reason,
+                $script:hs2ActiveConsecutiveFailures,
+                $_.Exception.Message)
+    }
+
+    if ($script:hs2ActiveConsecutiveFailures -lt $HS2UsbRecoveryAfterFailures) {
+        return
+    }
+
+    try {
+        $binding = Read-HS2UsbTopologyBinding `
+            -Path $hs2UsbTopologyBindingPath
+        $snapshot = Get-HS2UsbRecoverySnapshot
+        $usbPlan = if ($null -eq $binding) {
+            [pscustomobject]@{
+                Applicable = $false
+                Reason = "verified-hub-binding-missing"
+            }
+        }
+        else {
+            Get-HS2UsbRecoveryPlan `
+                -BoundHubInstanceId ([string]$binding.HubInstanceId) `
+                -Hubs $snapshot.Hubs `
+                -Children $snapshot.Children
+        }
+
+        if ($usbPlan.Applicable) {
+            if (-not $script:hs2UsbRecoveryAttempted) {
+                $script:hs2UsbRecoveryAttempted = $true
+                $usbRecovery = Invoke-HS2UsbRecovery `
+                    -BindingPath $hs2UsbTopologyBindingPath
+                Write-WatchdogLog (
+                    "HS2 USB recovery attempted={0} recovered={1} reason={2} operations={3}" -f `
+                        $usbRecovery.Attempted,
+                        $usbRecovery.Recovered,
+                        $usbRecovery.Reason,
+                        (@($usbRecovery.Operations) -join ","))
+                $script:hs2ActiveCurrentRetrySeconds = $HS2ActiveRetrySeconds
+                $script:hs2ActiveLastAttemptUtc = [DateTime]::MinValue
+                return
+            }
+        }
+        elseif (Test-HS2UsbDisplayHealthy) {
+            if (-not $script:hs2LConnectRecoveryAttempted) {
+                $script:hs2LConnectRecoveryAttempted = $true
+                $serviceRecovery = Invoke-HS2LConnectServiceRecovery
+                Write-WatchdogLog (
+                    "HS2 L-Connect recovery attempted={0} recovered={1} reason={2}" -f `
+                        $serviceRecovery.Attempted,
+                        $serviceRecovery.Recovered,
+                        $serviceRecovery.Reason)
+                $script:hs2ActiveCurrentRetrySeconds = $HS2ActiveRetrySeconds
+                $script:hs2ActiveLastAttemptUtc = [DateTime]::MinValue
+                return
+            }
+        }
+
+        $script:hs2ActiveCurrentRetrySeconds = $HS2ActiveSlowRetrySeconds
+        Write-WatchdogLog (
+            "HS2 recovery exhausted; slowRetrySeconds={0} usbReason={1}" -f `
+                $HS2ActiveSlowRetrySeconds,
+                $usbPlan.Reason)
+    }
+    catch {
+        $script:hs2ActiveCurrentRetrySeconds = $HS2ActiveSlowRetrySeconds
+        Write-WatchdogLog (
+            "HS2 recovery helper failed safely; slowRetrySeconds={0}: {1}" -f `
+                $HS2ActiveSlowRetrySeconds,
+                $_.Exception.Message)
+    }
+}
+
 function Set-ActiveDisplayState {
     param([string]$Reason)
 
-    $script:hs2DisplayStateActive = $true
-    try {
-        Invoke-HS2PowerState -State Active -ServicePort $LConnectServicePort | Out-Null
-        Write-WatchdogLog ("HS2 power state=Active reason={0} verified=true" -f $Reason)
-    }
-    catch {
-        Write-WatchdogLog ("HS2 power state=Active reason={0} failed: {1}" -f $Reason, $_.Exception.Message)
-    }
+    $script:hs2DisplayStateDesiredActive = $true
+    $script:hs2DisplayStateActive = $false
+    $script:hs2ActiveLastAttemptUtc = [DateTime]::MinValue
+    $script:hs2ActiveLastVerifiedUtc = [DateTime]::MinValue
+    $script:hs2ActiveConsecutiveFailures = 0
+    $script:hs2ActiveCurrentRetrySeconds = $HS2ActiveRetrySeconds
+    $script:hs2UsbRecoveryAttempted = $false
+    $script:hs2LConnectRecoveryAttempted = $false
+    Invoke-HS2ActiveMaintenance -Reason $Reason
 }
 
 function Enable-DesktopWindowPreservation {
@@ -317,6 +459,7 @@ function Invoke-HS2ExclusiveWindowProtection {
 }
 
 function Enter-SleepDisplayState {
+    $script:hs2DisplayStateDesiredActive = $false
     $script:hs2DisplayStateActive = $false
     $hs2TransitionStarted = $false
     try {
@@ -346,6 +489,7 @@ function Enter-SleepDisplayState {
 }
 
 function Enter-ShutdownDisplayState {
+    $script:hs2DisplayStateDesiredActive = $false
     $script:hs2DisplayStateActive = $false
     $hs2TransitionStarted = $false
     try {
@@ -534,6 +678,11 @@ if (-not $NoPowerEvents) {
 Write-WatchdogLog ("display power policy=hs2-transition-first/turzx-brightness-123 activeBrightness={0} lconnectPort={1}" -f `
     $ActiveBrightness, $LConnectServicePort)
 Write-WatchdogLog ("HS2 overlay watchdog=enabled retrySeconds={0}" -f $HS2OverlayRetrySeconds)
+Write-WatchdogLog (
+    "HS2 active recovery=enabled retrySeconds={0} verifySeconds={1} usbAfterFailures={2}" -f `
+        $HS2ActiveRetrySeconds,
+        $HS2ActiveVerifySeconds,
+        $HS2UsbRecoveryAfterFailures)
 
 $child = $null
 $consecutiveFailures = 0
@@ -609,6 +758,7 @@ try {
             continue
         }
 
+        Invoke-HS2ActiveMaintenance
         Invoke-HS2OverlayHealthCheck
         Invoke-HS2ExclusiveWindowProtection
 

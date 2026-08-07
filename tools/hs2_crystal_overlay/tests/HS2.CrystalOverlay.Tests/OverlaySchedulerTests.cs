@@ -41,6 +41,37 @@ public sealed class OverlaySchedulerTests
     }
 
     [Fact]
+    public void ReversedDeviceState_ReplacesOldCardAndGetsFreshVisibleTime()
+    {
+        var scheduler = new OverlayScheduler();
+        scheduler.Publish(OverlayRequest.Timed(
+            "network-state",
+            OverlayKind.DeviceOrNetwork,
+            OverlaySource.System,
+            "网络已断开",
+            dedupKey: "network-disconnected"), Now);
+        Assert.Equal(
+            "网络已断开",
+            Assert.Single(scheduler.GetFrame(Now, 6, 3).VisibleCards)
+                .Request.Title);
+
+        scheduler.Publish(OverlayRequest.Timed(
+            "network-state",
+            OverlayKind.DeviceOrNetwork,
+            OverlaySource.System,
+            "网络已恢复",
+            dedupKey: "network-restored"), Now.AddSeconds(5));
+        var replacement = Assert.Single(
+            scheduler.GetFrame(Now.AddSeconds(5), 6, 3).VisibleCards);
+
+        Assert.Equal("网络已恢复", replacement.Request.Title);
+        Assert.Single(scheduler.GetFrame(
+            Now.AddSeconds(16.9), 6, 3).VisibleCards);
+        Assert.Empty(scheduler.GetFrame(
+            Now.AddSeconds(17.1), 6, 3).VisibleCards);
+    }
+
+    [Fact]
     public void DirectPhoneBattery_RemainsVisibleAlongsidePhoneNotification()
     {
         var scheduler = new OverlayScheduler();
@@ -88,6 +119,34 @@ public sealed class OverlaySchedulerTests
         Assert.Empty(scheduler.GetFrame(
             Now.AddSeconds(60.1),
             maxVisibleNotifications: 1).NotificationCards);
+    }
+
+    [Fact]
+    public void SamePhoneNotificationId_UpdatesTextWithoutResettingVisibleTime()
+    {
+        var scheduler = new OverlayScheduler();
+        scheduler.Publish(OverlayRequest.Timed(
+            "phone-toast",
+            OverlayKind.PhoneNotification,
+            OverlaySource.PhoneLink,
+            "传输中",
+            "已完成 20%"), Now);
+        Assert.Single(scheduler.GetFrame(Now, 6, 3).VisibleCards);
+
+        scheduler.Publish(OverlayRequest.Timed(
+            "phone-toast",
+            OverlayKind.PhoneNotification,
+            OverlaySource.PhoneLink,
+            "传输中",
+            "已完成 80%"), Now.AddSeconds(20));
+        var updated = Assert.Single(
+            scheduler.GetFrame(Now.AddSeconds(20), 6, 3).VisibleCards);
+
+        Assert.Equal("已完成 80%", updated.Request.Body);
+        Assert.Single(scheduler.GetFrame(
+            Now.AddSeconds(59.9), 6, 3).VisibleCards);
+        Assert.Empty(scheduler.GetFrame(
+            Now.AddSeconds(60.1), 6, 3).VisibleCards);
     }
 
     [Fact]
@@ -564,6 +623,58 @@ public sealed class OverlaySchedulerTests
             maxVisibleNotifications: 0).VisibleCards);
     }
 
+    [Theory]
+    [InlineData(OverlayKind.ImportantTaskComplete, 15)]
+    [InlineData(OverlayKind.DeviceOrNetwork, 12)]
+    [InlineData(OverlayKind.HardwareResolved, 10)]
+    public void DeferredStatusCard_ReceivesFullVisibleTimeAfterPressureClears(
+        OverlayKind kind,
+        int visibleSeconds)
+    {
+        var scheduler = new OverlayScheduler();
+        scheduler.Publish(OverlayRequest.Active(
+            "alert-1", OverlayKind.HardwareAlert, OverlaySource.Hardware, "告警 1"), Now);
+        scheduler.Publish(OverlayRequest.Active(
+            "alert-2", OverlayKind.HardwareAlert, OverlaySource.Hardware, "告警 2"), Now);
+        scheduler.Publish(OverlayRequest.Active(
+            "call-1", OverlayKind.PhoneCall, OverlaySource.PhoneLink, "来电 1"), Now);
+        scheduler.Publish(OverlayRequest.Active(
+            "call-2", OverlayKind.PhoneCall, OverlaySource.PhoneLink, "来电 2"), Now);
+        scheduler.Publish(OverlayRequest.Active(
+            "transfer", OverlayKind.PhoneTransfer, OverlaySource.PhoneLink, "传输"), Now);
+        scheduler.Publish(OverlayRequest.Timed(
+            "phone", OverlayKind.PhoneNotification, OverlaySource.PhoneLink,
+            "最新通知"), Now);
+        scheduler.Publish(OverlayRequest.Timed(
+            "deferred-status",
+            kind,
+            kind == OverlayKind.ImportantTaskComplete
+                ? OverlaySource.Task
+                : kind == OverlayKind.HardwareResolved
+                    ? OverlaySource.Hardware
+                    : OverlaySource.System,
+            "状态提示"), Now);
+
+        Assert.DoesNotContain(
+            scheduler.GetFrame(Now, 6, 3).VisibleCards,
+            item => item.Request.EventId == "deferred-status");
+
+        scheduler.Publish(OverlayRequest.End(
+            "alert-1", OverlayKind.HardwareAlert, OverlaySource.Hardware),
+            Now.AddSeconds(10));
+        Assert.Contains(
+            scheduler.GetFrame(Now.AddSeconds(10), 6, 3).VisibleCards,
+            item => item.Request.EventId == "deferred-status");
+        Assert.Contains(
+            scheduler.GetFrame(
+                Now.AddSeconds(10 + visibleSeconds - 0.1), 6, 3).VisibleCards,
+            item => item.Request.EventId == "deferred-status");
+        Assert.DoesNotContain(
+            scheduler.GetFrame(
+                Now.AddSeconds(10 + visibleSeconds + 0.1), 6, 3).VisibleCards,
+            item => item.Request.EventId == "deferred-status");
+    }
+
     [Fact]
     public void ClearDismissible_PreservesActiveWorkAndSuppressesRelayResurrection()
     {
@@ -663,5 +774,31 @@ public sealed class OverlaySchedulerTests
         Assert.Equal(
             OverlayKind.HardwareAlert,
             scheduler.GetFrame(Now).PrimaryCard?.Request.Kind);
+    }
+
+    [Fact]
+    public void HardwareRecoveryCanReplaceSameEventAfterEarlierRecoveryWasDismissed()
+    {
+        var scheduler = new OverlayScheduler();
+        var recovered = OverlayRequest.Timed(
+            "hardware-alert",
+            OverlayKind.HardwareResolved,
+            OverlaySource.Hardware,
+            "硬件状态已恢复",
+            dedupKey: "resolved:pump-stopped");
+        Assert.True(scheduler.Publish(recovered, Now));
+        Assert.Equal(1, scheduler.ClearDismissible(Now.AddSeconds(1)));
+        Assert.True(scheduler.Publish(OverlayRequest.Active(
+            "hardware-alert",
+            OverlayKind.HardwareAlert,
+            OverlaySource.Hardware,
+            "水泵转速异常",
+            dedupKey: "pump-stopped"), Now.AddSeconds(2)));
+
+        Assert.True(scheduler.Publish(recovered, Now.AddSeconds(3)));
+        Assert.Equal(
+            OverlayKind.HardwareResolved,
+            scheduler.GetFrame(Now.AddSeconds(3))
+                .PrimaryCard?.Request.Kind);
     }
 }

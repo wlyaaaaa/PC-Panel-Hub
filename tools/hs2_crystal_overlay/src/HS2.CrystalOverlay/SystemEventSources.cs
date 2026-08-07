@@ -388,30 +388,42 @@ internal sealed class DeviceNetworkSourceCoordinator : IDisposable
         TimeSpan.FromSeconds(1);
 
     private readonly IOverlayPublisher publisher;
+    private readonly LifetimePublicationGate publicationGate = new();
     private readonly HttpClient client = new()
     {
         Timeout = TimeSpan.FromSeconds(2),
     };
     private readonly CancellationTokenSource cancellation = new();
-    private readonly Timer timer;
+    private readonly PeriodicTimer timer;
+    private readonly Task loop;
     private readonly NetworkConnectivityTracker networkTracker = new();
     private IReadOnlyDictionary<string, UsbStorageDevice>? previousUsb;
-    private int polling;
-    private bool disposed;
 
     internal DeviceNetworkSourceCoordinator(IOverlayPublisher publisher)
     {
         this.publisher = publisher;
-        timer = new Timer(
-            Poll,
-            null,
-            TimeSpan.Zero,
-            PollInterval);
+        timer = new PeriodicTimer(PollInterval);
+        loop = Task.Run(PollLoopAsync);
     }
 
-    private async void Poll(object? state)
+    private async Task PollLoopAsync()
     {
-        if (disposed || Interlocked.Exchange(ref polling, 1) != 0)
+        try
+        {
+            await PollOnceAsync();
+            while (await timer.WaitForNextTickAsync(cancellation.Token))
+            {
+                await PollOnceAsync();
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
+    private async Task PollOnceAsync()
+    {
+        if (publicationGate.IsClosed)
         {
             return;
         }
@@ -421,6 +433,11 @@ internal sealed class DeviceNetworkSourceCoordinator : IDisposable
             var json = await client.GetStringAsync(
                 SnapshotUri,
                 cancellation.Token);
+            if (publicationGate.IsClosed)
+            {
+                return;
+            }
+
             PublishUsbChanges(
                 SideScreenSnapshotParser.ParseUsbDevices(json));
             PublishNetworkChange(
@@ -441,10 +458,6 @@ internal sealed class DeviceNetworkSourceCoordinator : IDisposable
             RuntimeLog.Write(
                 $"Device/network probe failed: {exception.GetType().Name}");
         }
-        finally
-        {
-            Interlocked.Exchange(ref polling, 0);
-        }
     }
 
     private void PublishUsbChanges(
@@ -463,6 +476,7 @@ internal sealed class DeviceNetworkSourceCoordinator : IDisposable
                      !previousUsb.ContainsKey(device.Key)))
         {
             PublishDevice(
+                $"usb-state:{device.Key}",
                 $"usb-connected:{device.Key}",
                 "USB 存储已接入",
                 DeviceText(device),
@@ -473,6 +487,7 @@ internal sealed class DeviceNetworkSourceCoordinator : IDisposable
                      !current.ContainsKey(device.Key)))
         {
             PublishDevice(
+                $"usb-state:{device.Key}",
                 $"usb-disconnected:{device.Key}",
                 "USB 存储已断开",
                 DeviceText(device),
@@ -494,6 +509,7 @@ internal sealed class DeviceNetworkSourceCoordinator : IDisposable
             transition == NetworkConnectivityTransition.Restored;
 
         PublishDevice(
+            "network-state",
             online ? "network-restored" : "network-disconnected",
             online ? "网络已恢复" : "网络已断开",
             online
@@ -504,20 +520,22 @@ internal sealed class DeviceNetworkSourceCoordinator : IDisposable
 
     private void PublishDevice(
         string eventId,
+        string occurrenceKey,
         string title,
         string body,
         string accent)
     {
-        _ = publisher.Publish(OverlayRequest.Timed(
+        _ = publicationGate.TryPublish(() => publisher.Publish(
+            OverlayRequest.Timed(
             eventId,
             OverlayKind.DeviceOrNetwork,
             OverlaySource.System,
             title,
             body,
-            dedupKey: eventId,
+            dedupKey: occurrenceKey,
             visual: new OverlayVisualData(
                 Eyebrow: "设备状态",
-                AccentHex: accent)));
+                AccentHex: accent))));
     }
 
     private static string DeviceText(UsbStorageDevice device)
@@ -535,16 +553,39 @@ internal sealed class DeviceNetworkSourceCoordinator : IDisposable
 
     public void Dispose()
     {
-        if (disposed)
+        if (!publicationGate.Close())
         {
             return;
         }
 
-        disposed = true;
         cancellation.Cancel();
         timer.Dispose();
-        client.Dispose();
-        cancellation.Dispose();
+        var completed = false;
+        try
+        {
+            completed = loop.Wait(TimeSpan.FromSeconds(5));
+        }
+        catch
+        {
+        }
+
+        if (completed)
+        {
+            client.Dispose();
+            cancellation.Dispose();
+            return;
+        }
+
+        _ = loop.ContinueWith(
+            completedLoop =>
+            {
+                _ = completedLoop.Exception;
+                client.Dispose();
+                cancellation.Dispose();
+            },
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
     }
 }
 

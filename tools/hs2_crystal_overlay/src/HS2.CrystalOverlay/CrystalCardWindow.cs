@@ -469,7 +469,8 @@ internal sealed class CrystalCardWindow : IDisposable
         var scrollProgress = NotificationScrollProgress(item, now);
         var offset = overflow <= 0
             ? 0
-            : overflow * SmoothHeldProgress(scrollProgress);
+            : overflow * SmoothHeldProgress(
+                MarqueeMotion.SpeedUpHeldProgress(scrollProgress));
 
         var state = graphics.Save();
         graphics.SetClip(viewport);
