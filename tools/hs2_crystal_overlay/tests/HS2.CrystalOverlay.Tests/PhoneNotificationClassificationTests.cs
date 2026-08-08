@@ -32,6 +32,41 @@ public sealed class PhoneNotificationClassificationTests
             PhoneNotificationClassifier.Classify(title, body));
     }
 
+    [Theory]
+    [InlineData("微信", "新消息")]
+    [InlineData("微信", "你有一个新消息")]
+    [InlineData("Messages", "You have a new message")]
+    [InlineData("New message", null)]
+    [InlineData("Ｎｅｗ　ｍｅｓｓａｇｅ", null)]
+    [InlineData("微信", "1条新消息")]
+    [InlineData("微信", "你有2条新消息")]
+    [InlineData("Messages", "You have 2 new messages")]
+    [InlineData("Messages", "YOU'VE GOT A NEW MESSAGE")]
+    public void RecognizesRelayPlaceholderWithoutMessageBody(
+        string title,
+        string? body)
+    {
+        Assert.True(
+            PhoneNotificationClassifier.IsPlaceholderNotification(
+                title,
+                body));
+    }
+
+    [Theory]
+    [InlineData("微信", "你有一个新消息：会议改到三点")]
+    [InlineData("微信", "新消息，验证码 123456")]
+    [InlineData("Messages", "You have a new message: server is down")]
+    [InlineData("New message", "Hello from Alice")]
+    public void DoesNotTreatPlaceholderPrefixWithActualBodyAsEmpty(
+        string title,
+        string body)
+    {
+        Assert.False(
+            PhoneNotificationClassifier.IsPlaceholderNotification(
+                title,
+                body));
+    }
+
     [Fact]
     public void DedupKeyUsesPayloadAndIgnoresRelaySourceCaseAndWhitespace()
     {

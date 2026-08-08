@@ -20,6 +20,35 @@ public sealed record PhoneActiveNotificationIdentity(
 
 public static partial class PhoneNotificationClassifier
 {
+    private static readonly HashSet<string> PlaceholderTexts =
+        new[]
+        {
+            "新消息",
+            "有新消息",
+            "你有新消息",
+            "你有一个新消息",
+            "你有一条新消息",
+            "有一个新消息",
+            "有一条新消息",
+            "1条新消息",
+            "1 条新消息",
+            "你有1条新消息",
+            "你有 1 条新消息",
+            "new message",
+            "new messages",
+            "a new message",
+            "one new message",
+            "1 new message",
+            "you have new message",
+            "you have new messages",
+            "you have a new message",
+            "you have one new message",
+            "you have 1 new message",
+            "you've got a new message",
+        }
+        .Select(Normalize)
+        .ToHashSet(StringComparer.Ordinal);
+
     private const int MinimumApproximateLength = 12;
     private const double ContainmentLengthRatio = 0.72;
     private const double NGramDiceThreshold = 0.82;
@@ -60,6 +89,18 @@ public static partial class PhoneNotificationClassifier
         return DynamicText().IsMatch(text)
             ? PhoneNotificationCategory.Dynamic
             : PhoneNotificationCategory.Ordinary;
+    }
+
+    public static bool IsPlaceholderNotification(
+        string? title,
+        string? body)
+    {
+        var normalizedBody = Normalize(body);
+        var candidate = normalizedBody.Length > 0
+            ? normalizedBody
+            : Normalize(title);
+        return PlaceholderTexts.Contains(candidate) ||
+               NumericPlaceholderText().IsMatch(candidate);
     }
 
     public static string DedupKey(
@@ -325,4 +366,9 @@ public static partial class PhoneNotificationClassifier
         @"导航|计时器|倒计时|配送中|行程中|录音中|运动中|navigation|timer|countdown|delivery|trip\s+in\s+progress|recording",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex DynamicText();
+
+    [GeneratedRegex(
+        @"^(?:\d+ ?条新消息|(?:你|您)有 ?\d+ ?(?:条|个)新消息|\d+ new messages?|you have \d+ new messages?|you ve got \d+ new messages?)$",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex NumericPlaceholderText();
 }

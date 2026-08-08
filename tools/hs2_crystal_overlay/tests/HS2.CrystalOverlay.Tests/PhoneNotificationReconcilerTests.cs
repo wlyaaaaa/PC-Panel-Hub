@@ -26,6 +26,51 @@ public sealed class PhoneNotificationReconcilerTests
     }
 
     [Fact]
+    public void PlaceholderNotificationsAreFilteredBeforeTimedQueue()
+    {
+        var reconciler = new PhoneNotificationSnapshotReconciler(
+            TimeSpan.FromMinutes(5));
+        _ = reconciler.Reconcile(
+            [Item(1, "微信", "旧消息", OverlaySource.PhoneLink)],
+            Start);
+
+        var requests = reconciler.Reconcile(
+            [
+                Item(2, "微信", "新消息", OverlaySource.PhoneLink),
+                Item(3, "Messages", "You have a new message", OverlaySource.PhoneLink),
+                Item(4, "微信", "会议改到三点", OverlaySource.PhoneLink),
+            ],
+            Start + TimeSpan.FromSeconds(1));
+
+        var request = Assert.Single(requests);
+        Assert.Equal(OverlayKind.PhoneNotification, request.Kind);
+        Assert.Equal("会议改到三点", request.Body);
+    }
+
+    [Fact]
+    public void PlaceholderUpdateEndsPreviouslyQueuedTimedNotification()
+    {
+        var reconciler = new PhoneNotificationSnapshotReconciler(
+            TimeSpan.FromMinutes(5));
+        _ = reconciler.Reconcile(
+            [Item(5, "微信", "旧消息", OverlaySource.PhoneLink)],
+            Start);
+
+        var first = Assert.Single(reconciler.Reconcile(
+            [Item(5, "微信", "会议改到三点", OverlaySource.PhoneLink)],
+            Start + TimeSpan.FromSeconds(1)));
+
+        var ended = Assert.Single(reconciler.Reconcile(
+            [Item(5, "微信", "新消息", OverlaySource.PhoneLink)],
+            Start + TimeSpan.FromSeconds(2)));
+
+        Assert.False(ended.IsActive);
+        Assert.Equal(first.EventId, ended.EventId);
+        Assert.Equal(first.Kind, ended.Kind);
+        Assert.Equal(first.Source, ended.Source);
+    }
+
+    [Fact]
     public void ExpiredPersistentItemIsEndedThenRestoredFromSameSnapshot()
     {
         var reconciler = new PhoneNotificationSnapshotReconciler(

@@ -52,16 +52,37 @@ public sealed class PhoneNotificationSnapshotReconciler
                 Category = PhoneNotificationClassifier.Classify(
                     item.Title,
                     item.Body),
+                IsPlaceholder = PhoneNotificationClassifier.
+                    IsPlaceholderNotification(item.Title, item.Body),
             })
             .OrderBy(candidate => candidate.Item.CreationTime)
             .ThenBy(candidate => candidate.Item.Id)
             .ToArray();
         var newestVerification = ordered.LastOrDefault(candidate =>
+            !candidate.IsPlaceholder &&
             candidate.Category ==
             PhoneNotificationCategory.VerificationCode);
         foreach (var candidate in ordered)
         {
             var item = candidate.Item;
+            if (candidate.IsPlaceholder)
+            {
+                if (fingerprints.ContainsKey(item.Id))
+                {
+                    var previousCategory = categories[item.Id];
+                    EndActive(item.Id, requests);
+                    EndTimed(
+                        item.Id,
+                        previousCategory,
+                        item.Source,
+                        requests);
+                    fingerprints.Remove(item.Id);
+                    categories.Remove(item.Id);
+                }
+
+                continue;
+            }
+
             currentIds.Add(item.Id);
             var category = candidate.Category;
             var isTimed = category is
@@ -143,6 +164,31 @@ public sealed class PhoneNotificationSnapshotReconciler
         }
 
         return requests;
+    }
+
+    private static void EndTimed(
+        uint id,
+        PhoneNotificationCategory category,
+        OverlaySource source,
+        ICollection<OverlayRequest> requests)
+    {
+        var kind = category switch
+        {
+            PhoneNotificationCategory.Ordinary =>
+                OverlayKind.PhoneNotification,
+            PhoneNotificationCategory.Dynamic =>
+                OverlayKind.PhoneDynamic,
+            _ => (OverlayKind?)null,
+        };
+        if (kind is null)
+        {
+            return;
+        }
+
+        requests.Add(OverlayRequest.End(
+            TimedEventId(id),
+            kind.Value,
+            source));
     }
 
     public IReadOnlyList<OverlayRequest> ExpireStale(DateTimeOffset now)
