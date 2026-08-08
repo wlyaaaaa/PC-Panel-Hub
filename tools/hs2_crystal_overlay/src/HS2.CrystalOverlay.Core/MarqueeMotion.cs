@@ -7,9 +7,10 @@ public static class MarqueeMotion
     private const double NotificationStartHold = 0.16;
     private const double NotificationEndHold = 0.16;
 
-    // Long phone notifications should remain readable without taking the
-    // entire 60-second lifetime to reveal their final lines.
-    public const double NotificationScrollSpeedMultiplier = 1.45;
+    // Body scrolling is a short, repeatable visual affordance. It must not
+    // take the full 60-second notification lifetime to reveal the final line.
+    public const double NotificationScrollPeriodSeconds = 12;
+    public const double NotificationScrollSpeedMultiplier = 2.4;
 
     public static double OffsetForLine(
         double overflow,
@@ -58,5 +59,29 @@ public static class MarqueeMotion
             travel,
             (normalized - NotificationStartHold) * speedMultiplier);
         return NotificationStartHold + accelerated;
+    }
+
+    public static double NotificationProgress(
+        double elapsedSeconds,
+        double periodSeconds = NotificationScrollPeriodSeconds)
+    {
+        if (!double.IsFinite(elapsedSeconds))
+        {
+            return 0;
+        }
+
+        if (!double.IsFinite(periodSeconds) || periodSeconds <= 0)
+        {
+            periodSeconds = NotificationScrollPeriodSeconds;
+        }
+
+        var elapsed = Math.Max(0, elapsedSeconds);
+        var phase = elapsed % periodSeconds / periodSeconds;
+        // A triangular wave keeps the offset continuous at cycle boundaries:
+        // the body reaches its tail, holds, and then returns to the leading
+        // line instead of jumping from the tail back to the top.
+        return phase <= 0.5
+            ? phase * 2
+            : (1 - phase) * 2;
     }
 }

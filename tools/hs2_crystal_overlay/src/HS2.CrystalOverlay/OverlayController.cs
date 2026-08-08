@@ -269,7 +269,20 @@ internal sealed class OverlayController : IOverlayPublisher, IDisposable
 
         if (contentChanged || sizeChanged)
         {
-            binding.Window.RenderExact(item, target, now);
+            if (contentChanged)
+            {
+                // Scheduler intentionally preserves PublishedAt when a
+                // notification with the same ID updates its body. Reset the
+                // visual marquee epoch independently so the new body starts
+                // at its readable leading position.
+                binding.NotificationScrollStartedAt = now;
+            }
+
+            binding.Window.RenderExact(
+                item,
+                target,
+                now,
+                binding.NotificationScrollStartedAt);
             binding.CurrentBounds = target;
             binding.TargetBounds = target;
             binding.MovementStartedAt = null;
@@ -288,7 +301,11 @@ internal sealed class OverlayController : IOverlayPublisher, IDisposable
 
         if (animatedPaintDue && binding.MovementStartedAt is null)
         {
-            binding.Window.RenderExact(item, target, now);
+            binding.Window.RenderExact(
+                item,
+                target,
+                now,
+                binding.NotificationScrollStartedAt);
             binding.CurrentBounds = target;
             binding.LastPaintedAt = now;
         }
@@ -469,5 +486,7 @@ internal sealed class OverlayController : IOverlayPublisher, IDisposable
         internal DateTimeOffset? MovementStartedAt { get; set; }
 
         internal DateTimeOffset LastPaintedAt { get; set; } = now;
+
+        internal DateTimeOffset NotificationScrollStartedAt { get; set; } = now;
     }
 }

@@ -65,7 +65,8 @@ internal sealed class CrystalCardWindow : IDisposable
     internal void RenderExact(
         OverlayItem? item,
         PixelRect target,
-        DateTimeOffset now)
+        DateTimeOffset now,
+        DateTimeOffset? notificationScrollStartedAt = null)
     {
         ObjectDisposedException.ThrowIf(disposed, this);
         if (item is null)
@@ -124,7 +125,8 @@ internal sealed class CrystalCardWindow : IDisposable
                     item,
                     target.Width,
                     target.Height,
-                    now);
+                    now,
+                    notificationScrollStartedAt ?? item.PublishedAt);
             }
             else
             {
@@ -414,15 +416,12 @@ internal sealed class CrystalCardWindow : IDisposable
         OverlayItem item,
         int width,
         int height,
-        DateTimeOffset now)
+        DateTimeOffset now,
+        DateTimeOffset scrollStartedAt)
     {
         var visual = item.Request.Visual;
-        var narrow = width < 900;
-        var shortCard = narrow && height < 230;
-        var padding = shortCard ? 28f : narrow ? 32f : 42f;
-        var titleSize = shortCard ? 44f : narrow ? 52f : 58f;
-        var bodySize = shortCard ? 36f : narrow ? 42f : 46f;
-        var headerHeight = shortCard ? 54f : narrow ? 58f : 64f;
+        var sizing = NotificationSizing(width, height);
+        var padding = sizing.Padding;
         var accent = ParseColor(
             visual?.AccentHex,
             Color.FromArgb(244, 112, 240, 178));
@@ -437,7 +436,7 @@ internal sealed class CrystalCardWindow : IDisposable
                 12,
                 width * 0.52f,
                 48),
-            narrow ? 21 : 24,
+            sizing.Narrow ? 21 : 24,
             FontStyle.Bold,
             Color.FromArgb(238, 122, 245, 184));
         DrawFittedText(
@@ -448,22 +447,41 @@ internal sealed class CrystalCardWindow : IDisposable
                 12,
                 width - width * 0.54f - padding,
                 48),
-            narrow ? 20 : 23,
+            sizing.Narrow ? 20 : 23,
             17,
             FontStyle.Regular,
             Color.FromArgb(220, 169, 238, 204));
 
         var viewport = new RectangleF(
             padding,
-            headerHeight,
+            sizing.HeaderHeight,
             width - padding * 2,
-            height - headerHeight - (shortCard ? 18f : 24f));
-        var titleHeight = MeasureWrappedText(
+            height - sizing.HeaderHeight - sizing.BottomReserve);
+        // Titles stay on one fixed line so the body viewport is stable even
+        // when a notification carries a very long mixed-language title.
+        var titleHeight = MeasureLineHeight(
             graphics,
             item.Request.Title,
             viewport.Width,
-            titleSize,
+            sizing.TitleSize,
             FontStyle.Bold);
+        var preferredBodyLineHeight = MeasureWrappedText(
+            graphics,
+            "字",
+            viewport.Width,
+            sizing.BodySize,
+            FontStyle.Regular);
+        var bodyLayout = NotificationBodyLayout.Create(
+            height,
+            sizing.HeaderHeight,
+            titleHeight,
+            sizing.TitleBodyGap,
+            sizing.BottomReserve,
+            preferredBodyLineHeight);
+        var bodySize = preferredBodyLineHeight <= 0
+            ? sizing.BodySize
+            : sizing.BodySize *
+                (float)(bodyLayout.LineHeight / preferredBodyLineHeight);
         var bodyHeight = string.IsNullOrWhiteSpace(item.Request.Body)
             ? 0
             : MeasureWrappedText(
@@ -472,46 +490,52 @@ internal sealed class CrystalCardWindow : IDisposable
                 viewport.Width,
                 bodySize,
                 FontStyle.Regular);
-        var contentHeight = titleHeight +
-            (bodyHeight > 0 ? 14 + bodyHeight : 0);
-        var overflow = Math.Max(0, contentHeight - viewport.Height);
-        var scrollProgress = NotificationScrollProgress(item, now);
-        var offset = overflow <= 0
-            ? 0
-            : overflow * SmoothHeldProgress(
-                MarqueeMotion.SpeedUpHeldProgress(scrollProgress));
 
-        var state = graphics.Save();
-        graphics.SetClip(viewport);
-        var y = viewport.Top - offset;
-        DrawWrappedText(
+        DrawFittedText(
             graphics,
             item.Request.Title,
             new RectangleF(
                 viewport.Left,
-                y,
+                viewport.Top,
                 viewport.Width,
                 titleHeight + 4),
-            titleSize,
+            sizing.TitleSize,
+            sizing.TitleSize * 0.62f,
             FontStyle.Bold,
             Color.FromArgb(252, 225, 255, 239));
-        y += titleHeight + 14;
+
         if (bodyHeight > 0)
         {
+            var scrollProgress = NotificationScrollProgress(
+                scrollStartedAt,
+                now);
+            var bodyProgress = SmoothHeldProgress(
+                MarqueeMotion.SpeedUpHeldProgress(scrollProgress));
+            var offset = bodyLayout.ShouldScroll(bodyHeight)
+                ? (float)bodyLayout.OffsetForProgress(
+                    bodyProgress,
+                    bodyHeight)
+                : 0;
+            var bodyViewport = new RectangleF(
+                viewport.Left,
+                (float)bodyLayout.BodyTop,
+                viewport.Width,
+                (float)bodyLayout.ViewportHeight);
+            var state = graphics.Save();
+            graphics.SetClip(bodyViewport);
             DrawWrappedText(
                 graphics,
                 item.Request.Body!,
                 new RectangleF(
                     viewport.Left,
-                    y,
+                    bodyViewport.Top - offset,
                     viewport.Width,
                     bodyHeight + 4),
                 bodySize,
                 FontStyle.Regular,
                 Color.FromArgb(242, 174, 247, 211));
+            graphics.Restore(state);
         }
-
-        graphics.Restore(state);
     }
 
     private static void DrawVerificationCode(
@@ -954,6 +978,25 @@ internal sealed class CrystalCardWindow : IDisposable
         return Math.Max(size * 1.22f, measured.Height);
     }
 
+    private static float MeasureLineHeight(
+        Graphics graphics,
+        string text,
+        float width,
+        float size,
+        FontStyle style)
+    {
+        using var font = UiFont(size, style);
+        using var format = Typographic();
+        format.FormatFlags |= StringFormatFlags.NoWrap;
+        format.Trimming = StringTrimming.None;
+        var measured = graphics.MeasureString(
+            text,
+            font,
+            new SizeF(Math.Max(1, width), 10_000),
+            format);
+        return Math.Max(size * 1.22f, measured.Height);
+    }
+
     private static void DrawWrappedText(
         Graphics graphics,
         string text,
@@ -1009,24 +1052,13 @@ internal sealed class CrystalCardWindow : IDisposable
     }
 
     private static double NotificationScrollProgress(
-        OverlayItem item,
+        DateTimeOffset scrollStartedAt,
         DateTimeOffset now)
     {
-        if (item.ExpiresAt is { } expiresAt &&
-            item.Policy.Duration is { } duration &&
-            duration > TimeSpan.Zero)
-        {
-            var remaining = Math.Clamp(
-                (expiresAt - now).TotalMilliseconds,
-                0,
-                duration.TotalMilliseconds);
-            return 1 - remaining / duration.TotalMilliseconds;
-        }
-
         var elapsed = Math.Max(
             0,
-            (now - item.PublishedAt).TotalSeconds);
-        return elapsed % 9 / 9;
+            (now - scrollStartedAt).TotalSeconds);
+        return MarqueeMotion.NotificationProgress(elapsed);
     }
 
     private static double AmbientMarqueeProgress(DateTimeOffset now)
@@ -1281,33 +1313,88 @@ internal sealed class CrystalCardWindow : IDisposable
         using var bitmap = new Bitmap(1, 1, PixelFormat.Format32bppArgb);
         using var graphics = Graphics.FromImage(bitmap);
         ConfigureGraphics(graphics);
-        var narrow = width < 900;
-        var padding = narrow ? 32f : 42f;
-        var titleSize = narrow ? 52f : 58f;
-        var bodySize = narrow ? 42f : 46f;
+        var sizing = NotificationSizing(width, maximumHeight);
+        var padding = sizing.Padding;
         var contentWidth = Math.Max(1, width - padding * 2);
-        var titleHeight = MeasureWrappedText(
+        var titleHeight = MeasureLineHeight(
             graphics,
             item.Request.Title,
             contentWidth,
-            titleSize,
+            sizing.TitleSize,
             FontStyle.Bold);
+        var preferredBodyLineHeight = MeasureWrappedText(
+            graphics,
+            "字",
+            contentWidth,
+            sizing.BodySize,
+            FontStyle.Regular);
         var bodyHeight = string.IsNullOrWhiteSpace(item.Request.Body)
             ? 0
             : MeasureWrappedText(
                 graphics,
                 item.Request.Body!,
                 contentWidth,
-                bodySize,
+                sizing.BodySize,
                 FontStyle.Regular);
+        var visibleBodyHeight = Math.Min(
+            bodyHeight,
+            preferredBodyLineHeight *
+            NotificationBodyLayout.DefaultVisibleLines);
         var desired = (int)Math.Ceiling(
-            (narrow ? 58 : 64) +
+            sizing.HeaderHeight +
             titleHeight +
-            (bodyHeight > 0 ? 14 + bodyHeight : 0) +
-            24);
+            (bodyHeight > 0
+                ? sizing.TitleBodyGap + visibleBodyHeight
+                : 0) +
+            sizing.BottomReserve);
         var minimum = Math.Min(190, maximumHeight);
         return Math.Clamp(desired, minimum, maximumHeight);
     }
+
+    private static NotificationCardSizing NotificationSizing(
+        int width,
+        int height)
+    {
+        var narrow = width < 900;
+        // Three stacked notifications are compressed to roughly 230–240px;
+        // both heights need the compact geometry to retain two body lines.
+        var shortCard = height <= 240;
+        return shortCard
+            ? new(
+                Padding: 28,
+                TitleSize: 44,
+                BodySize: 36,
+                HeaderHeight: 52,
+                TitleBodyGap: 8,
+                BottomReserve: 12,
+                Narrow: narrow)
+            : narrow
+                ? new(
+                    Padding: 32,
+                    TitleSize: 50,
+                    BodySize: 40,
+                    HeaderHeight: 56,
+                    TitleBodyGap: 10,
+                    BottomReserve: 16,
+                    Narrow: true)
+                : new(
+                    Padding: 42,
+                    TitleSize: 52,
+                    BodySize: 42,
+                    HeaderHeight: 58,
+                    TitleBodyGap: 10,
+                    BottomReserve: 16,
+                    Narrow: false);
+    }
+
+    private readonly record struct NotificationCardSizing(
+        float Padding,
+        float TitleSize,
+        float BodySize,
+        float HeaderHeight,
+        float TitleBodyGap,
+        float BottomReserve,
+        bool Narrow);
 
     private static Color ParseColor(string? value, Color fallback)
     {
