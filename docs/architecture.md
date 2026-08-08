@@ -1,6 +1,6 @@
 # Architecture
 
-TURZX SideScreen is intentionally split into small local processes:
+PC Panel Hub is intentionally split into small local processes:
 
 1. `turzx_weather_shim.py`
    - Provides short weather text for the dashboard.

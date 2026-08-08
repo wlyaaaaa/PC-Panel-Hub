@@ -1,139 +1,152 @@
-# TURZX SideScreen
+# PC Panel Hub
 
-Self-hosted realtime dashboard for 480x1920 TURZX USB side screens, plus an
-optional event-driven overlay for the LIAN LI HS2 2288x1048 curved OLED.
+面向 Windows 的本地副屏方案，包含两套职责明确、彼此独立的显示界面：
 
-This project replaces the stock TURZX monitoring page with a custom local stack:
+- **TURZX 480×1920 USB 机箱屏**：显示 CPU/GPU 温度、核心平均频率与电压、FPS、天气、物理磁盘 I/O、网络质量、前台应用和进程排行等密集遥测信息。
+- **LIAN LI HS2 2288×1048 曲面 OLED**：可选的事件型透明叠加层，用于速览、媒体信息、Steam 会话、手机状态、运维、任务和可操作告警；它不是另一块密集遥测面板。
 
-- Python metrics agents for CPU/GPU thermals, live average core clocks and voltages, FPS, weather, physical-disk I/O, network quality, foreground app, and process ranking.
-- C# / GDI+ renderer for a dense 480x1920 dashboard.
-- Two guarded COM7 modes: verified command-200 full frames at 3 seconds, and an explicit
-  1Hz hybrid candidate that uses a vendor-shaped command-200 startup/recovery baseline
-  plus bounded command-204 deltas. Host heartbeats never claim to prove physical pixels.
-- Coordinated sleep/shutdown handling: HS2 uses its native offline clock during sleep, while the TURZX panel uses the verified hardware brightness-off command; both panels turn off for shutdown/restart.
-- Bounded JSONL diagnostics and explicit source/error states.
-- Windows Scheduled Task startup support with highest privilege.
-- A separate click-through HS2 crystal overlay for glance, media lyrics,
-  Steam sessions, phone status, operations, tasks, and actionable alerts.
+HS2 的设计、数据来源、配置方法和明确限制见 [docs/hs2-crystal-overlay.md](docs/hs2-crystal-overlay.md)。
 
-The HS2 overlay is intentionally not another dense telemetry dashboard. Its
-design, supported sources, setup, and explicit limitations are documented in
-[docs/hs2-crystal-overlay.md](docs/hs2-crystal-overlay.md).
+## 主要组成
 
-## Current Status
+- Python 指标代理：采集硬件、网络、磁盘、天气、FPS、前台应用和进程排行。
+- C# / GDI+ 渲染器：生成 `480x1920` 仪表盘并发送到 TURZX 屏幕。
+- 两种受控的 `COM7` 传输模式：
+  - 已验证的 command `200` 全帧路径，默认周期为 3 秒；
+  - 显式启用的 1 Hz 混合候选路径：按厂商行为完成 command `200` 启动/恢复基线，再发送有界的 command `204` 差分数据。
+- 睡眠与关机协调：睡眠时 HS2 使用原生离线时钟，TURZX 使用已验证的亮度关闭命令；关机或重启时关闭两块屏幕输出。
+- 有界 JSONL 诊断，以及明确的数据来源、陈旧和错误状态。
+- 以最高运行级别启动的 Windows 计划任务。
 
-This is an early Windows-first project extracted from a working local setup. The protocol and UI are practical, not polished SDK abstractions yet.
+## 协议与证据边界
 
-Known assumptions:
+本项目的协议实现来自本地黑盒验证和厂商程序行为观察，并不是厂商发布的正式 SDK。
 
-- Display size: `480x1920`.
-- Serial port: `COM7` by default.
-- Runtime OS: Windows.
-- Python 3.11+ recommended.
-- .NET Framework compiler `csc.exe` is required for the renderer/stream binaries.
-- Hardware metrics work best with NVIDIA NVML and LibreHardwareMonitor.
-- FPS comes from the optional TimeAudit/PresentMon chain enabled with `TIMEAUDIT_DSN`; no RTSS integration is required.
-- Optional TimeAudit FPS source is enabled with `TIMEAUDIT_DSN`; no database password is stored in this repository.
-- A fresh all-zero FPS sample means “waiting for a game”, not a collection fault. Connecting, stale, and error states are shown separately.
-- The displayed DPC value is Windows `Processor Information(_Total)\% DPC Time`, not a synthetic scheduler-delay measurement.
-- Physical disks are merged across their drive letters. Volumes named `RECOVER`, virtual/RAM disks, and USB/removable media smaller than 32,000,000,000 bytes are excluded.
+- command `200` 全帧发送和 command `123` 亮度控制已有本机协议验证，是保守路径。
+- command `204` 仅是设备特定的混合刷新候选。它是有界、可关闭、可回退的实现，不应描述为通用且已验证的公开协议。
+- 串口写入成功、进程存活、计划任务运行或心跳递增，只能证明主机侧发送链路在工作，**不等于设备 ACK，也不能单独证明实体像素已刷新或没有冻结**。
+- 1 Hz、画面冻结和睡眠/恢复等最终效果仍需在实体屏幕上观察验收。
+- `-AltHelper` 只保留用于隔离协议测试；现有现场证据不支持将它用于这块屏幕的日常链路。
 
-## Quick Start
+更底层的编码说明见 [tools/turzx_side_screen/README_protocol.md](tools/turzx_side_screen/README_protocol.md)。
 
-First check local runtime dependencies:
+## 当前状态与依赖
+
+这是从实际本地配置中整理出的早期 Windows 优先项目，协议与界面仍偏实用实现，不是成熟 SDK 抽象。
+
+已知前提：
+
+- TURZX 显示尺寸：`480x1920`。
+- 默认串口：`COM7`；运行时需要独占对应串口。
+- 操作系统：Windows。
+- 建议 Python 3.11 或更高版本。
+- 渲染器和串流程序需要 .NET Framework 编译器 `csc.exe`。
+- 硬件指标建议使用 NVIDIA NVML 和 LibreHardwareMonitor。
+- FPS 来自可选的 TimeAudit/PresentMon 链，通过 `TIMEAUDIT_DSN` 启用，不需要 RTSS 集成；仓库不保存数据库密码。
+- 新鲜但全为零的 FPS 样本表示“等待游戏帧”，不等于采集故障；连接中、陈旧和错误状态会单独显示。
+- DPC 显示值来自 Windows `Processor Information(_Total)\% DPC Time`，不是合成的调度延迟指标。
+- 物理磁盘会按其盘符合并；名称为 `RECOVER` 的卷、虚拟盘、RAM 盘，以及小于 `32,000,000,000` 字节的 USB/可移动介质会被排除。
+
+公开仓库不包含原版 TURZX 二进制。启动串流前，需在仓库根目录旁准备：
+
+- `RJCP.SerialPortStream.dll`
+- `TURZX.exe` 或 `TURZX.weatherfix.metrics.exe`
+
+## 快速开始
+
+先检查本机运行依赖：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\check-runtime.ps1
 ```
 
-The public repository does not include stock TURZX binaries. Put these files next to the repository root before starting the COM stream:
-
-- `RJCP.SerialPortStream.dll`
-- `TURZX.exe` or `TURZX.weatherfix.metrics.exe`
-
-Run directly:
+直接启动：
 
 ```text
 start-side-screen.cmd
 ```
 
-Or from PowerShell:
+或从 PowerShell 启动：
 
 ```powershell
-cd E:\Projects\Tools\TURZX-SideScreen
+Set-Location 'C:\path\to\PC-Panel-Hub'
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start.ps1 -Port COM7 -IntervalMs 3000
 ```
 
-Install startup task:
+个人启动/安装包装脚本默认启用受控的 1 Hz 混合模式。若需要保守的 command `200` 全帧回退，可显式传入 `-HybridRefresh:$false`。
+
+为兼容既有安装，Windows 计划任务、快捷方式及本机脚本中的内部标识仍保留 `TURZX SideScreen`；这不再是公开项目名称，也无需为改名迁移现有运行路径。
+
+安装开机启动任务：
 
 ```text
 install-startup.cmd
 ```
 
-Or from elevated PowerShell:
+或从管理员 PowerShell 安装：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-startup-admin.ps1 -Port COM7 -IntervalMs 3000
 ```
 
-The personal start/install wrappers enable the guarded 1Hz hybrid mode. Pass
-`-HybridRefresh:$false` for the conservative command-200-only fallback. `-AltHelper`
-is retained only for isolated protocol testing; live evidence rejects it for this panel.
-
-Uninstall startup task:
+卸载开机启动任务：
 
 ```text
 uninstall-startup.cmd
 ```
 
-Or from elevated PowerShell:
+或从管理员 PowerShell 卸载：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\uninstall-startup-admin.ps1
 ```
 
-## Useful Commands
+## 测试、构建与状态检查
 
-Run tests and render previews:
+运行测试并生成渲染预览：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\test.ps1
 ```
 
-Build a release zip:
+构建源码发布包：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-release.ps1
 ```
 
-Check startup state:
+查看启动任务状态：
 
 ```powershell
 Get-ScheduledTask | Where-Object { $_.TaskName -like '*TURZX*' } |
   Select-Object TaskName,State,@{Name='RunLevel';Expression={$_.Principal.RunLevel}}
 ```
 
-## Runtime Logs
+测试通过只能证明代码和主机侧契约满足预期；涉及串流、断电、睡眠、恢复或画面刷新的结论，仍需另做实体验收。
 
-Generated files stay out of git:
+## 运行日志
+
+生成文件不会纳入 Git：
 
 - `tools\turzx_side_screen\out\stream\stream-last.png`
 - `tools\turzx_side_screen\out\data-trust.jsonl`
 - `tools\turzx_side_screen\out\side-screen-stack.log`
 - `tools\turzx_side_screen\out\top-processes.json`
 
-## Repository Layout
+日志和心跳可用于诊断主机侧状态，但不要将其中的机器标识、设备拓扑或本地路径原文提交到公开仓库。
+
+## 目录结构
 
 ```text
-scripts/                       public install/start/test/release wrappers
-docs/                          public documentation
-tools/turzx_side_screen/       metrics agent, renderer, streamer, tests
-tools/turzx_weather_shim/      weather shim used by local weather requests
-tools/hs2_crystal_overlay/     HS2 overlay, NetEase bridge, and tests
+scripts/                       安装、启动、测试和发布包装脚本
+docs/                          项目文档
+tools/turzx_side_screen/       指标代理、渲染器、串流程序和测试
+tools/turzx_weather_shim/      本地天气请求使用的天气适配器
+tools/hs2_crystal_overlay/     HS2 叠加层、网易云桥接和测试
 ```
 
-The original TURZX vendor binaries and local runtime folders are intentionally excluded from git.
+原版 TURZX 厂商二进制和本机运行目录会被有意排除在 Git 之外。
 
-## License
+## 许可
 
-Repository source code is MIT licensed. Third-party/vendor binaries and TURZX stock application files are not part of the public source license and should not be committed.
+仓库中的源码采用 MIT License，见 [LICENSE](LICENSE)。第三方/厂商二进制及 TURZX 原版应用文件不属于本仓库的开源许可范围，不应提交或随源码发布。

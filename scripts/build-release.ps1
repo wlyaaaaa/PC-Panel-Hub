@@ -10,7 +10,7 @@ $ErrorActionPreference = "Stop"
 $Root = (Resolve-Path $Root).Path
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 
-$zipPath = Join-Path $OutputDir ("TURZX-SideScreen-{0}.zip" -f $Version)
+$zipPath = Join-Path $OutputDir ("PC-Panel-Hub-{0}.zip" -f $Version)
 if (Test-Path -LiteralPath $zipPath) {
     Remove-Item -LiteralPath $zipPath -Force
 }
@@ -19,7 +19,7 @@ $staging = Join-Path ([System.IO.Path]::GetTempPath()) ("turzx_side_screen_relea
 New-Item -ItemType Directory -Force -Path $staging | Out-Null
 
 try {
-    foreach ($item in @("README.md", "LICENSE", ".gitignore", "start-side-screen.cmd", "install-startup.cmd", "uninstall-startup.cmd")) {
+    foreach ($item in @("README.md", "AGENTS.md", "LICENSE", ".gitignore", "start-side-screen.cmd", "install-startup.cmd", "uninstall-startup.cmd")) {
         Copy-Item -LiteralPath (Join-Path $Root $item) -Destination (Join-Path $staging $item) -Force
     }
 

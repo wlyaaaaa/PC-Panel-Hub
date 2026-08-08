@@ -9,12 +9,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-release.ps1
 Default output:
 
 ```text
-dist\TURZX-SideScreen-source.zip
+dist\PC-Panel-Hub-source.zip
 ```
 
 The release package intentionally includes:
 
 - `README.md`
+- `AGENTS.md`
 - `LICENSE`
 - `docs\`
 - `scripts\`
