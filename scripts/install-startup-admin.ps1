@@ -4,6 +4,8 @@ param(
     [string]$ResumeTaskName = "TURZX SideScreen Resume",
     [string]$Port = "COM7",
     [int]$IntervalMs = 3000,
+    [switch]$HybridRefresh = $true,
+    [switch]$AltHelper,
     [switch]$DoNotDisableOldTasks
 )
 
@@ -43,9 +45,12 @@ if (Test-Path -LiteralPath $checker) {
 }
 
 $workingDir = Split-Path -Parent $script
+$refreshArguments = ""
+if ($HybridRefresh) { $refreshArguments += " -HybridRefresh -PollSeconds 1" }
+if ($AltHelper) { $refreshArguments += " -AltHelper" }
 $action = New-ScheduledTaskAction `
     -Execute "powershell.exe" `
-    -Argument ('-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -Root "{1}" -Port "{2}" -IntervalMs {3}' -f $script, $Root, $Port, $IntervalMs) `
+    -Argument (('-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -Root "{1}" -Port "{2}" -IntervalMs {3}{4}') -f $script, $Root, $Port, $IntervalMs, $refreshArguments) `
     -WorkingDirectory $workingDir
 
 $trigger = New-ScheduledTaskTrigger -AtLogOn
@@ -71,7 +76,12 @@ Register-ScheduledTask `
     -Description ("Start TURZX SideScreen from {0}" -f $Root) `
     -Force | Out-Null
 
-$resumeAction = 'wscript.exe "{0}" -Root "{1}" -Port {2} -IntervalMs {3}' -f $resumeLauncher, $Root, $Port, $IntervalMs
+$resumeRefreshArguments = ""
+if ($HybridRefresh) { $resumeRefreshArguments += " -HybridRefresh" }
+else { $resumeRefreshArguments += " -NoHybridRefresh" }
+if ($AltHelper) { $resumeRefreshArguments += " -AltHelper" }
+else { $resumeRefreshArguments += " -NoAltHelper" }
+$resumeAction = 'wscript.exe "{0}" -Root "{1}" -Port {2} -IntervalMs {3}{4}' -f $resumeLauncher, $Root, $Port, $IntervalMs, $resumeRefreshArguments
 $resumeEventQuery = "*[System[(Provider[@Name='Microsoft-Windows-Power-Troubleshooter'] and EventID=1) or (Provider[@Name='Microsoft-Windows-Kernel-Power'] and EventID=107)]]"
 $resumeCreateOutput = & schtasks.exe /Create /TN $ResumeTaskName /SC ONEVENT /EC System /MO $resumeEventQuery /TR $resumeAction /RL HIGHEST /F 2>&1
 if ($LASTEXITCODE -ne 0) {

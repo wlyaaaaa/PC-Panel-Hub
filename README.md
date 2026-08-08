@@ -7,7 +7,9 @@ This project replaces the stock TURZX monitoring page with a custom local stack:
 
 - Python metrics agents for CPU/GPU thermals, live average core clocks and voltages, FPS, weather, physical-disk I/O, network quality, foreground app, and process ranking.
 - C# / GDI+ renderer for a dense 480x1920 dashboard.
-- COM7 verified full-frame streaming with 1s metric sampling and stale-data fallback; the unverified differential protocol is isolated behind an explicit experimental gate so the host cannot report false health while the panel is frozen.
+- Two guarded COM7 modes: verified command-200 full frames at 3 seconds, and an explicit
+  1Hz hybrid candidate that uses a vendor-shaped command-200 startup/recovery baseline
+  plus bounded command-204 deltas. Host heartbeats never claim to prove physical pixels.
 - Coordinated sleep/shutdown handling: HS2 uses its native offline clock during sleep, while the TURZX panel uses the verified hardware brightness-off command; both panels turn off for shutdown/restart.
 - Bounded JSONL diagnostics and explicit source/error states.
 - Windows Scheduled Task startup support with highest privilege.
@@ -73,6 +75,10 @@ Or from elevated PowerShell:
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-startup-admin.ps1 -Port COM7 -IntervalMs 3000
 ```
+
+The personal start/install wrappers enable the guarded 1Hz hybrid mode. Pass
+`-HybridRefresh:$false` for the conservative command-200-only fallback. `-AltHelper`
+is retained only for isolated protocol testing; live evidence rejects it for this panel.
 
 Uninstall startup task:
 

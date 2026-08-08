@@ -476,6 +476,83 @@ if (-not $validUsbPlan.Applicable -or
     throw "HS2 USB recovery must target only the dedicated hub and its exact port-two Code 43 child."
 }
 
+$initialUsbDispatch = Get-HS2UsbRecoveryDispatchDecision `
+    -RecoveryAttempted $false `
+    -ContinuationPending $false
+if ($initialUsbDispatch.Action -cne "RestartDedicatedHub") {
+    throw "The first verified HS2 recovery pass must restart only the dedicated hub."
+}
+
+$continuationUsbDispatch = Get-HS2UsbRecoveryDispatchDecision `
+    -RecoveryAttempted $true `
+    -ContinuationPending $true
+if ($continuationUsbDispatch.Action -cne "RemoveExactChild") {
+    throw "A post-restart topology gap must continue with the revalidated exact child, not restart the hub again."
+}
+
+$exhaustedUsbDispatch = Get-HS2UsbRecoveryDispatchDecision `
+    -RecoveryAttempted $true `
+    -ContinuationPending $false
+if ($exhaustedUsbDispatch.Action -cne "Wait") {
+    throw "HS2 USB recovery must remain bounded after its hub and exact-child passes are consumed."
+}
+
+# Restarting the dedicated hub gives the same physical port-two failure a new
+# transient VID_0000 instance id.  That must not abort recovery: the immutable
+# safety identity is the previously verified dedicated hub + exact port 2,
+# which Get-HS2UsbRecoveryPlan revalidates on the fresh snapshot.
+$freshChild = [pscustomobject]@{
+    InstanceId = "USB\VID_0000&PID_0002\fresh-failed-port-two"
+    ParentInstanceId = $validHub.InstanceId
+    ProblemCode = 43
+    LocationInfo = "Port_#0002.Hub_#0012"
+    Present = $true
+}
+$freshUsbPlan = Get-HS2UsbRecoveryPlan `
+    -BoundHubInstanceId $validHub.InstanceId `
+    -Hubs @($validHub) `
+    -Children @($freshChild)
+if (-not (Test-HS2UsbRecoveryPlanContinuity `
+        -InitialPlan $validUsbPlan `
+        -FreshPlan $freshUsbPlan)) {
+    throw "HS2 recovery must accept a new transient child id on the same verified hub and exact port two."
+}
+
+$differentHubPlan = [pscustomobject]@{
+    Applicable = $true
+    HubInstanceId = "USB\VID_1A86&PID_8091\different-hub"
+    ChildInstanceId = $freshChild.InstanceId
+}
+if (Test-HS2UsbRecoveryPlanContinuity `
+        -InitialPlan $validUsbPlan `
+        -FreshPlan $differentHubPlan) {
+    throw "HS2 recovery continuity must reject a fresh plan on a different hub."
+}
+
+$script:postRestartSnapshotAttempts = 0
+$eventualFreshPlan = Wait-HS2UsbRecoveryPlan `
+    -BoundHubInstanceId $validHub.InstanceId `
+    -TimeoutSeconds 1 `
+    -PollMilliseconds 1 `
+    -SnapshotProvider {
+        $script:postRestartSnapshotAttempts++
+        [pscustomobject]@{
+            Hubs = @($validHub)
+            Children = if ($script:postRestartSnapshotAttempts -lt 2) {
+                @()
+            }
+            else {
+                @($freshChild)
+            }
+        }
+    } `
+    -DelayAction { param($Milliseconds) }
+if ($null -eq $eventualFreshPlan -or
+    $eventualFreshPlan.ChildInstanceId -cne $freshChild.InstanceId -or
+    $script:postRestartSnapshotAttempts -ne 2) {
+    throw "HS2 recovery must tolerate the post-restart gap before the exact failed child reappears."
+}
+
 $rejectedUsbCases = @(
     [pscustomobject]@{
         Name = "wrong hub"
@@ -816,10 +893,21 @@ Assert-OrderAfter `
 
 Assert-OrderAfter `
     -Text $watchdogText `
-    -Anchor 'if (-not $script:hs2UsbRecoveryAttempted)' `
-    -First '$script:hs2UsbRecoveryAttempted = $true' `
+    -Anchor 'if ($usbPlan.Applicable)' `
+    -First 'Get-HS2UsbRecoveryDispatchDecision' `
     -Second 'Invoke-HS2UsbRecovery' `
-    -Message "USB recovery must be consumed before the destructive call."
+    -Message "USB recovery must choose a bounded phase before invoking the destructive helper."
+
+Assert-OrderAfter `
+    -Text $watchdogText `
+    -Anchor 'if ($usbDispatch.Action -ne "Wait")' `
+    -First '$script:hs2UsbRecoveryContinuationPending = $false' `
+    -Second 'Invoke-HS2UsbRecovery' `
+    -Message "The bounded exact-child continuation must be consumed before it can invoke recovery."
+
+if ($watchdogText -notmatch [regex]::Escape('-SkipDedicatedHubRestart:$skipDedicatedHubRestart')) {
+    throw "The exact-child continuation must not restart the dedicated hub a second time."
+}
 
 Assert-OrderAfter `
     -Text $watchdogText `

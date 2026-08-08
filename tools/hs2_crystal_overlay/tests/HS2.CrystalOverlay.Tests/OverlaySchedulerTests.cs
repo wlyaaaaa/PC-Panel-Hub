@@ -506,6 +506,95 @@ public sealed class OverlaySchedulerTests
     }
 
     [Fact]
+    public void SameVerificationCodeAcrossRelaysDoesNotRestartVisibleTimer()
+    {
+        var scheduler = new OverlayScheduler();
+        Assert.True(scheduler.Publish(VerificationCode(
+            "482731",
+            OverlaySource.XiaomiHyperConnect), Now));
+        Assert.Single(scheduler.GetFrame(
+            Now,
+            maxVisibleCards: 1,
+            maxVisibleNotifications: 0).VisibleCards);
+
+        Assert.True(scheduler.Publish(VerificationCode(
+            "482731",
+            OverlaySource.PhoneLink), Now.AddSeconds(5)));
+
+        Assert.Single(scheduler.GetFrame(
+            Now.AddSeconds(14.9),
+            maxVisibleCards: 1,
+            maxVisibleNotifications: 0).VisibleCards);
+        Assert.Empty(scheduler.GetFrame(
+            Now.AddSeconds(15.1),
+            maxVisibleCards: 1,
+            maxVisibleNotifications: 0).VisibleCards);
+    }
+
+    [Fact]
+    public void NewVerificationCodeReplacesOldCodeAndReceivesFreshTimer()
+    {
+        var scheduler = new OverlayScheduler();
+        Assert.True(scheduler.Publish(VerificationCode(
+            "482731",
+            OverlaySource.XiaomiHyperConnect), Now));
+        Assert.Single(scheduler.GetFrame(
+            Now,
+            maxVisibleCards: 1,
+            maxVisibleNotifications: 0).VisibleCards);
+
+        Assert.True(scheduler.Publish(VerificationCode(
+            "735194",
+            OverlaySource.PhoneLink), Now.AddSeconds(5)));
+        var immediate = Assert.Single(scheduler.GetFrame(
+            Now.AddSeconds(5),
+            maxVisibleCards: 1,
+            maxVisibleNotifications: 0).VisibleCards);
+        Assert.Equal("735194", immediate.Request.Visual?.VerificationCode);
+
+        var replacement = Assert.Single(scheduler.GetFrame(
+            Now.AddSeconds(19.9),
+            maxVisibleCards: 1,
+            maxVisibleNotifications: 0).VisibleCards);
+        Assert.Equal("735194", replacement.Request.Visual?.VerificationCode);
+        Assert.Empty(scheduler.GetFrame(
+            Now.AddSeconds(20.1),
+            maxVisibleCards: 1,
+            maxVisibleNotifications: 0).VisibleCards);
+    }
+
+    [Fact]
+    public void ClearedVerificationCodeCannotReappearFromOtherRelay()
+    {
+        var scheduler = new OverlayScheduler();
+        Assert.True(scheduler.Publish(VerificationCode(
+            "482731",
+            OverlaySource.XiaomiHyperConnect), Now));
+        Assert.Single(scheduler.GetFrame(
+            Now,
+            maxVisibleCards: 1,
+            maxVisibleNotifications: 0).VisibleCards);
+
+        Assert.Equal(1, scheduler.ClearDismissible(Now.AddSeconds(2)));
+        Assert.False(scheduler.Publish(VerificationCode(
+            "482731",
+            OverlaySource.PhoneLink), Now.AddSeconds(3)));
+        Assert.Empty(scheduler.GetFrame(
+            Now.AddSeconds(3),
+            maxVisibleCards: 1,
+            maxVisibleNotifications: 0).VisibleCards);
+
+        Assert.True(scheduler.Publish(VerificationCode(
+            "735194",
+            OverlaySource.PhoneLink), Now.AddSeconds(4)));
+        var newCode = Assert.Single(scheduler.GetFrame(
+            Now.AddSeconds(4),
+            maxVisibleCards: 1,
+            maxVisibleNotifications: 0).VisibleCards);
+        Assert.Equal("735194", newCode.Request.Visual?.VerificationCode);
+    }
+
+    [Fact]
     public void CrossSourceApproximateDuplicate_IsDisplayedOnlyOnce()
     {
         var scheduler = new OverlayScheduler();
@@ -801,4 +890,18 @@ public sealed class OverlaySchedulerTests
             scheduler.GetFrame(Now.AddSeconds(3))
                 .PrimaryCard?.Request.Kind);
     }
+
+    private static OverlayRequest VerificationCode(
+        string code,
+        OverlaySource source) =>
+        OverlayRequest.Timed(
+            "phone-verification-code",
+            OverlayKind.PhoneVerificationCode,
+            source,
+            code,
+            dedupKey: $"verification-code:{code}",
+            visual: new OverlayVisualData(
+                Eyebrow: "验证码 / CODE",
+                Subtitle: "账户安全",
+                VerificationCode: code));
 }

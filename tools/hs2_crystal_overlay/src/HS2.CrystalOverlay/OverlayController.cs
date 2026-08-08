@@ -371,6 +371,8 @@ internal sealed class OverlayController : IOverlayPublisher, IDisposable
             OverlayKind.SystemOperation or
             OverlayKind.DeviceOrNetwork or
             OverlayKind.HardwareResolved => OverlayCardKind.Transient,
+            OverlayKind.PhoneVerificationCode =>
+                OverlayCardKind.Verification,
             OverlayKind.PhoneCall or
             OverlayKind.PhoneTransfer or
             OverlayKind.HardwareAlert => OverlayCardKind.Alert,
@@ -383,12 +385,16 @@ internal sealed class OverlayController : IOverlayPublisher, IDisposable
             OverlayCardKind.Progress or
             OverlayCardKind.Alert => OverlayCardWidthPreference.Wide,
             OverlayCardKind.Transient => OverlayCardWidthPreference.Compact,
+            OverlayCardKind.Verification =>
+                OverlayCardWidthPreference.Compact,
             _ => OverlayCardWidthPreference.Auto,
         };
         var placement = item.Policy.VisualTier ==
                         OverlayVisualTier.StackedNotification
             ? OverlayCardPlacementPreference.BottomStack
-            : item.Request.Kind == OverlayKind.SystemOperation
+            : item.Request.Kind is
+                OverlayKind.SystemOperation or
+                OverlayKind.PhoneVerificationCode
                 ? OverlayCardPlacementPreference.BottomLeft
                 : OverlayCardPlacementPreference.Auto;
         return new OverlayCardLayoutRequest(

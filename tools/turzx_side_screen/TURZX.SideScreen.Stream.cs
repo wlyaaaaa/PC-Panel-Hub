@@ -15,6 +15,10 @@ namespace TURZX.SideScreen
         private const string DefaultMetricsUrl = "http://127.0.0.1:18765/snapshot";
         private const int DefaultHttpTimeoutMs = 450;
         private const int DefaultPreviewIntervalSeconds = 45;
+        private const int DefaultSendTimeoutMilliseconds = 10000;
+        private const int DefaultDifferentialSendTimeoutMilliseconds = 900;
+        private const int DefaultMaxConsecutiveSendFailures = 1;
+        private static int previewWorkerActive;
 
         public static int Main(string[] args)
         {
@@ -22,6 +26,7 @@ namespace TURZX.SideScreen
             try
             {
                 options = StreamOptions.Parse(args);
+                options.IntervalMs = ResolveRefreshIntervalMilliseconds(options.HybridRefresh, options.IntervalMs);
                 if (options.ShowHelp)
                 {
                     PrintUsage();
@@ -34,6 +39,8 @@ namespace TURZX.SideScreen
                 PrintUsage();
                 return 2;
             }
+
+            ApplyCriticalScheduling();
 
             int frame = 0;
             int sent = 0;
@@ -53,6 +60,8 @@ namespace TURZX.SideScreen
                 ", previewIntervalSeconds=" + options.PreviewIntervalSeconds +
                 ", dryRun=" + options.DryRun +
                 ", diff=" + options.UseDiff +
+                ", hybridRefresh=" + options.HybridRefresh +
+                ", diffSendTimeoutMs=" + options.DiffSendTimeoutMs +
                 ", altHelper=" + options.AltHelper +
                 ", port=" + options.Port);
 
@@ -75,9 +84,12 @@ namespace TURZX.SideScreen
                     string snapshotStatus = "none";
                     long fetchMs = 0;
                     long renderMs = 0;
+                    long sendMs = 0;
                     bool sendAttempted = false;
+                    Stopwatch sendWatch = null;
                     string frameStatus = "ok";
                     string frameError = null;
+                    string frameTransport = "none";
                     try
                     {
                         Stopwatch fetchWatch = Stopwatch.StartNew();
@@ -90,25 +102,6 @@ namespace TURZX.SideScreen
                         {
                             renderWatch.Stop();
                             renderMs = renderWatch.ElapsedMilliseconds;
-                            long previewTicks = Stopwatch.GetTimestamp();
-                            if (!string.IsNullOrWhiteSpace(options.PreviewDir) &&
-                                ShouldWritePreview(lastPreviewTicks, previewTicks, Stopwatch.Frequency, options.PreviewIntervalSeconds))
-                            {
-                                // Preview is diagnostic only. A transient file lock or storage error
-                                // must never suppress the primary COM frame send.
-                                lastPreviewTicks = previewTicks;
-                                try
-                                {
-                                    Directory.CreateDirectory(options.PreviewDir);
-                                    string preview = Path.Combine(options.PreviewDir, "stream-last.png");
-                                    SavePreviewAtomically(bitmap, preview);
-                                }
-                                catch (Exception previewError)
-                                {
-                                    Console.WriteLine("preview warning: " + DescribeException(previewError));
-                                }
-                            }
-
                             if (options.DryRun)
                             {
                                 sent++;
@@ -118,28 +111,60 @@ namespace TURZX.SideScreen
                             else if (options.UseDiff)
                             {
                                 sendAttempted = true;
-                                Stopwatch sendWatch = Stopwatch.StartNew();
+                                sendWatch = Stopwatch.StartNew();
                                 byte[] currentFrameData = diffSession.Convert(bitmap);
                                 if (ShouldSendFullFrame(frame, previousFrameData != null, options.FullResyncEveryFrames))
                                 {
+                                    frameTransport = "full_200";
                                     if (previousFrameData != null)
                                     {
                                         diffSession.Dispose();
                                         diffSession = new TurzxHelperSender.DiffSession(options.Root, options.Port, options.DevCode);
                                     }
-                                    diffSession.SendFull(currentFrameData);
+                                    string fullMessage;
+                                    int baselineRepeats = options.HybridRefresh ? 2 : 1;
+                                    bool fullOk = diffSession.SendFullWithTimeout(
+                                        currentFrameData,
+                                        options.SendTimeoutMs,
+                                        baselineRepeats,
+                                        options.HybridRefresh ? 100 : 0,
+                                        options.HybridRefresh,
+                                        options.BaselineBrightness,
+                                        out fullMessage);
+                                    if (!fullOk)
+                                    {
+                                        throw new InvalidOperationException(fullMessage);
+                                    }
                                     sendWatch.Stop();
+                                    sendMs = sendWatch.ElapsedMilliseconds;
                                     sent++;
                                     consecutiveSendFailures = 0;
                                     diffSequence = 0;
                                     lastFullFrame = frame;
-                                    Console.WriteLine("frame " + frame + " FULL sent in " + sendWatch.ElapsedMilliseconds + "ms: frameBytes=" + currentFrameData.Length);
+                                    Console.WriteLine("frame " + frame + " FULL sent in " + sendWatch.ElapsedMilliseconds + "ms: frameBytes=" + currentFrameData.Length + ", repeats=" + baselineRepeats);
                                 }
                                 else
                                 {
+                                    frameTransport = "diff_204";
                                     long sequence = diffSequence++;
-                                    int result = diffSession.SendDiff(previousFrameData, currentFrameData, sequence, false, false, options.AltHelper);
+                                    int result;
+                                    string diffMessage;
+                                    bool diffOk = diffSession.SendDiffWithTimeout(
+                                        previousFrameData,
+                                        currentFrameData,
+                                        sequence,
+                                        false,
+                                        false,
+                                        options.AltHelper,
+                                        options.DiffSendTimeoutMs,
+                                        out result,
+                                        out diffMessage);
+                                    if (!diffOk)
+                                    {
+                                        throw new InvalidOperationException(diffMessage);
+                                    }
                                     sendWatch.Stop();
+                                    sendMs = sendWatch.ElapsedMilliseconds;
                                     sent++;
                                     consecutiveSendFailures = 0;
                                     Console.WriteLine("frame " + frame + " DIFF sent in " + sendWatch.ElapsedMilliseconds + "ms: seq=" + sequence + ", result=" + result);
@@ -149,11 +174,13 @@ namespace TURZX.SideScreen
                             }
                             else
                             {
+                                frameTransport = "full_200";
                                 sendAttempted = true;
                                 string message;
-                                Stopwatch sendWatch = Stopwatch.StartNew();
+                                sendWatch = Stopwatch.StartNew();
                                 bool ok = TurzxHelperSender.SendBitmap(options.Root, options.Port, bitmap, options.DevCode, options.SendTimeoutMs, out message);
                                 sendWatch.Stop();
+                                sendMs = sendWatch.ElapsedMilliseconds;
                                 if (!ok)
                                 {
                                     failed++;
@@ -164,7 +191,7 @@ namespace TURZX.SideScreen
                                     if (ShouldAbortAfterConsecutiveSendFailures(consecutiveSendFailures, options.MaxConsecutiveSendFailures))
                                     {
                                         frameWatch.Stop();
-                                        WriteHeartbeat(options, frame, sent, failed, consecutiveSendFailures, lastFullFrame, periodMs, fetchMs, renderMs, frameWatch.ElapsedMilliseconds, 0, snapshotStatus, "fatal", message);
+                                        WriteHeartbeat(options, frame, sent, failed, consecutiveSendFailures, lastFullFrame, periodMs, fetchMs, renderMs, sendAttempted, sendMs, frameWatch.ElapsedMilliseconds, 0, snapshotStatus, "fatal", message, frameTransport);
                                         Console.Error.WriteLine("stream fatal: consecutive send failures reached " + consecutiveSendFailures + "; exiting so watchdog can reopen " + options.Port);
                                         return 1;
                                     }
@@ -177,10 +204,28 @@ namespace TURZX.SideScreen
                                     Console.WriteLine("frame " + frame + " sent in " + sendWatch.ElapsedMilliseconds + "ms: " + message);
                                 }
                             }
+
+                            long previewTicks = Stopwatch.GetTimestamp();
+                            if (!string.IsNullOrWhiteSpace(options.PreviewDir) &&
+                                ShouldWritePreview(lastPreviewTicks, previewTicks, Stopwatch.Frequency, options.PreviewIntervalSeconds))
+                            {
+                                // Diagnostic PNG encoding and disk I/O are never allowed on the
+                                // primary COM send path. Overlapping previews are deliberately dropped.
+                                string preview = Path.Combine(options.PreviewDir, "stream-last.png");
+                                if (TryQueuePreview(bitmap, preview))
+                                {
+                                    lastPreviewTicks = previewTicks;
+                                }
+                            }
                         }
                     }
                     catch (Exception ex)
                     {
+                        if (sendWatch != null)
+                        {
+                            sendWatch.Stop();
+                            sendMs = sendWatch.ElapsedMilliseconds;
+                        }
                         failed++;
                         frameStatus = "exception";
                         frameError = DescribeException(ex);
@@ -189,10 +234,14 @@ namespace TURZX.SideScreen
                         {
                             consecutiveSendFailures++;
                             Console.WriteLine("frame " + frame + " consecutiveSendFailures=" + consecutiveSendFailures);
-                            if (ShouldAbortAfterConsecutiveSendFailures(consecutiveSendFailures, options.MaxConsecutiveSendFailures))
+                            if (ShouldAbortAfterSendFailure(
+                                options.HybridRefresh,
+                                sendAttempted,
+                                consecutiveSendFailures,
+                                options.MaxConsecutiveSendFailures))
                             {
                                 frameWatch.Stop();
-                                WriteHeartbeat(options, frame, sent, failed, consecutiveSendFailures, lastFullFrame, periodMs, fetchMs, renderMs, frameWatch.ElapsedMilliseconds, 0, snapshotStatus, "fatal", frameError);
+                                WriteHeartbeat(options, frame, sent, failed, consecutiveSendFailures, lastFullFrame, periodMs, fetchMs, renderMs, sendAttempted, sendMs, frameWatch.ElapsedMilliseconds, 0, snapshotStatus, "fatal", frameError, frameTransport);
                                 Console.Error.WriteLine("stream fatal: consecutive send failures reached " + consecutiveSendFailures + "; exiting so watchdog can reopen " + options.Port);
                                 return 1;
                             }
@@ -201,8 +250,8 @@ namespace TURZX.SideScreen
 
                     frameWatch.Stop();
                     int sleepMs = ComputeSleepMilliseconds(frameStartTicks, options.IntervalMs, Stopwatch.GetTimestamp(), Stopwatch.Frequency);
-                    WriteHeartbeat(options, frame, sent, failed, consecutiveSendFailures, lastFullFrame, periodMs, fetchMs, renderMs, frameWatch.ElapsedMilliseconds, sleepMs, snapshotStatus, frameStatus, frameError);
-                    Console.WriteLine("frame " + frame + " timing: periodMs=" + periodMs + ", fetchMs=" + fetchMs + ", renderMs=" + renderMs + ", elapsedMs=" + frameWatch.ElapsedMilliseconds + ", sleepMs=" + sleepMs + ", data=" + snapshotStatus);
+                    WriteHeartbeat(options, frame, sent, failed, consecutiveSendFailures, lastFullFrame, periodMs, fetchMs, renderMs, sendAttempted, sendMs, frameWatch.ElapsedMilliseconds, sleepMs, snapshotStatus, frameStatus, frameError, frameTransport);
+                    Console.WriteLine("frame " + frame + " timing: periodMs=" + periodMs + ", fetchMs=" + fetchMs + ", renderMs=" + renderMs + ", sendMs=" + sendMs + ", elapsedMs=" + frameWatch.ElapsedMilliseconds + ", sleepMs=" + sleepMs + ", data=" + snapshotStatus);
                     if (sleepMs > 0 && (options.FrameCount == 0 || frame < options.FrameCount))
                     {
                         SleepUntil(frameStartTicks + MillisecondsToStopwatchTicks(options.IntervalMs, Stopwatch.Frequency));
@@ -246,6 +295,66 @@ namespace TURZX.SideScreen
             return DefaultPreviewIntervalSeconds;
         }
 
+        internal static ProcessPriorityClass DesiredProcessPriorityForTest()
+        {
+            return ProcessPriorityClass.AboveNormal;
+        }
+
+        internal static ThreadPriority DesiredMainThreadPriorityForTest()
+        {
+            return ThreadPriority.AboveNormal;
+        }
+
+        internal static int DefaultSendTimeoutMillisecondsForTest()
+        {
+            return DefaultSendTimeoutMilliseconds;
+        }
+
+        internal static int DefaultDifferentialSendTimeoutMillisecondsForTest()
+        {
+            return DefaultDifferentialSendTimeoutMilliseconds;
+        }
+
+        internal static int DefaultMaxConsecutiveSendFailuresForTest()
+        {
+            return DefaultMaxConsecutiveSendFailures;
+        }
+
+        internal static bool IsSendTimeoutMillisecondsValidForTest(int timeoutMs)
+        {
+            return timeoutMs > 0;
+        }
+
+        internal static bool IsDifferentialSendTimeoutMillisecondsValidForTest(int timeoutMs)
+        {
+            return timeoutMs > 0;
+        }
+
+        internal static int ResolveRefreshIntervalMillisecondsForTest(bool hybridRefresh, int configuredIntervalMs)
+        {
+            return ResolveRefreshIntervalMilliseconds(hybridRefresh, configuredIntervalMs);
+        }
+
+        internal static string ResolveTransportModeForTest(bool hybridRefresh, bool useDiff)
+        {
+            return ResolveTransportMode(hybridRefresh, useDiff);
+        }
+
+        internal static bool TryReservePreviewWorkerForTest()
+        {
+            return TryReservePreviewWorker();
+        }
+
+        internal static void ReleasePreviewWorkerForTest()
+        {
+            ReleasePreviewWorker();
+        }
+
+        internal static bool TryQueuePreviewForTest(Bitmap bitmap, string path)
+        {
+            return TryQueuePreview(bitmap, path);
+        }
+
         internal static void WriteUtf8TextAtomicallyForTest(string path, string content)
         {
             WriteUtf8TextAtomically(path, content);
@@ -269,6 +378,19 @@ namespace TURZX.SideScreen
         internal static bool ShouldAbortAfterConsecutiveSendFailuresForTest(int consecutiveFailures, int maxConsecutiveFailures)
         {
             return ShouldAbortAfterConsecutiveSendFailures(consecutiveFailures, maxConsecutiveFailures);
+        }
+
+        internal static bool ShouldAbortAfterSendFailureForTest(
+            bool hybridRefresh,
+            bool sendAttempted,
+            int consecutiveFailures,
+            int maxConsecutiveFailures)
+        {
+            return ShouldAbortAfterSendFailure(
+                hybridRefresh,
+                sendAttempted,
+                consecutiveFailures,
+                maxConsecutiveFailures);
         }
 
         internal static bool ShouldSendFullFrameForTest(int frame, bool hasPreviousFrame, int fullResyncEveryFrames)
@@ -340,6 +462,97 @@ namespace TURZX.SideScreen
             return nowTicks - lastPreviewTicks >= intervalTicks;
         }
 
+        private static void ApplyCriticalScheduling()
+        {
+            try
+            {
+                using (Process current = Process.GetCurrentProcess())
+                {
+                    if (current.PriorityClass == ProcessPriorityClass.Idle ||
+                        current.PriorityClass == ProcessPriorityClass.BelowNormal ||
+                        current.PriorityClass == ProcessPriorityClass.Normal)
+                    {
+                        current.PriorityClass = DesiredProcessPriorityForTest();
+                    }
+                }
+            }
+            catch (Exception priorityError)
+            {
+                Console.Error.WriteLine("stream priority warning: " + DescribeException(priorityError));
+            }
+
+            try
+            {
+                if ((int)Thread.CurrentThread.Priority < (int)DesiredMainThreadPriorityForTest())
+                {
+                    Thread.CurrentThread.Priority = DesiredMainThreadPriorityForTest();
+                }
+            }
+            catch (Exception priorityError)
+            {
+                Console.Error.WriteLine("stream thread priority warning: " + DescribeException(priorityError));
+            }
+        }
+
+        private static bool TryReservePreviewWorker()
+        {
+            return Interlocked.CompareExchange(ref previewWorkerActive, 1, 0) == 0;
+        }
+
+        private static void ReleasePreviewWorker()
+        {
+            Volatile.Write(ref previewWorkerActive, 0);
+        }
+
+        private static bool TryQueuePreview(Bitmap bitmap, string path)
+        {
+            if (!TryReservePreviewWorker())
+            {
+                return false;
+            }
+
+            Bitmap previewBitmap = null;
+            try
+            {
+                previewBitmap = (Bitmap)bitmap.Clone();
+                Thread previewThread = new Thread(delegate()
+                {
+                    try
+                    {
+                        string directory = Path.GetDirectoryName(path);
+                        if (!string.IsNullOrWhiteSpace(directory))
+                        {
+                            Directory.CreateDirectory(directory);
+                        }
+                        SavePreviewAtomically(previewBitmap, path);
+                    }
+                    catch (Exception previewError)
+                    {
+                        Console.WriteLine("preview warning: " + DescribeException(previewError));
+                    }
+                    finally
+                    {
+                        previewBitmap.Dispose();
+                        ReleasePreviewWorker();
+                    }
+                });
+                previewThread.IsBackground = true;
+                previewThread.Priority = ThreadPriority.Lowest;
+                previewThread.Start();
+                return true;
+            }
+            catch (Exception previewSetupError)
+            {
+                if (previewBitmap != null)
+                {
+                    previewBitmap.Dispose();
+                }
+                ReleasePreviewWorker();
+                Console.WriteLine("preview setup warning: " + DescribeException(previewSetupError));
+                return false;
+            }
+        }
+
         private static void SleepUntil(long targetTicks)
         {
             while (true)
@@ -386,9 +599,35 @@ namespace TURZX.SideScreen
             return maxConsecutiveFailures > 0 && consecutiveFailures >= maxConsecutiveFailures;
         }
 
+        private static bool ShouldAbortAfterSendFailure(
+            bool hybridRefresh,
+            bool sendAttempted,
+            int consecutiveFailures,
+            int maxConsecutiveFailures)
+        {
+            // A bounded Hybrid send may leave an OS writer blocked after its
+            // timeout. Never reuse that COM session on a later frame.
+            return (hybridRefresh && sendAttempted) ||
+                ShouldAbortAfterConsecutiveSendFailures(consecutiveFailures, maxConsecutiveFailures);
+        }
+
         private static bool ShouldSendFullFrame(int frame, bool hasPreviousFrame, int fullResyncEveryFrames)
         {
             return !hasPreviousFrame || (fullResyncEveryFrames > 0 && frame > 1 && frame % fullResyncEveryFrames == 0);
+        }
+
+        private static int ResolveRefreshIntervalMilliseconds(bool hybridRefresh, int configuredIntervalMs)
+        {
+            return hybridRefresh ? 1000 : configuredIntervalMs;
+        }
+
+        private static string ResolveTransportMode(bool hybridRefresh, bool useDiff)
+        {
+            if (hybridRefresh)
+            {
+                return "hybrid_diff_204_full_200";
+            }
+            return useDiff ? "experimental_diff_204" : "verified_full_200";
         }
 
         private static bool IsDifferentialTransportAllowed(bool useDiff, bool dryRun, bool allowUnverifiedDiff)
@@ -452,11 +691,14 @@ namespace TURZX.SideScreen
             long periodMs,
             long fetchMs,
             long renderMs,
+            bool sendAttempted,
+            long sendMs,
             long elapsedMs,
             int sleepMs,
             string snapshotStatus,
             string frameStatus,
-            string frameError)
+            string frameError,
+            string frameTransport)
         {
             if (options == null || string.IsNullOrWhiteSpace(options.PreviewDir))
             {
@@ -470,7 +712,8 @@ namespace TURZX.SideScreen
             AppendJsonProperty(json, "status", frameStatus, true);
             AppendJsonProperty(json, "snapshot_status", snapshotStatus, true);
             AppendJsonProperty(json, "error", frameError, true);
-            AppendJsonProperty(json, "transport_mode", options.UseDiff ? "experimental_diff_204" : "verified_full_200", true);
+            AppendJsonProperty(json, "transport_mode", ResolveTransportMode(options.HybridRefresh, options.UseDiff), true);
+            AppendJsonProperty(json, "frame_transport", frameTransport, true);
             AppendJsonProperty(json, "frame", frame, true);
             AppendJsonProperty(json, "sent", sent, true);
             AppendJsonProperty(json, "failed", failed, true);
@@ -479,6 +722,8 @@ namespace TURZX.SideScreen
             AppendJsonProperty(json, "period_ms", periodMs, true);
             AppendJsonProperty(json, "fetch_ms", fetchMs, true);
             AppendJsonProperty(json, "render_ms", renderMs, true);
+            AppendJsonProperty(json, "send_attempted", sendAttempted, true);
+            AppendJsonProperty(json, "send_ms", sendMs, true);
             AppendJsonProperty(json, "elapsed_ms", elapsedMs, true);
             AppendJsonProperty(json, "sleep_ms", sleepMs, false);
             json.AppendLine("}");
@@ -594,6 +839,20 @@ namespace TURZX.SideScreen
             json.Append(JsonEscape(name));
             json.Append("\": ");
             json.Append(value);
+            if (comma)
+            {
+                json.Append(",");
+            }
+
+            json.AppendLine();
+        }
+
+        private static void AppendJsonProperty(StringBuilder json, string name, bool value, bool comma)
+        {
+            json.Append("  \"");
+            json.Append(JsonEscape(name));
+            json.Append("\": ");
+            json.Append(value ? "true" : "false");
             if (comma)
             {
                 json.Append(",");
@@ -806,8 +1065,8 @@ namespace TURZX.SideScreen
 
         private static void PrintUsage()
         {
-            Console.WriteLine("TURZX.SideScreen.Stream.exe [--sample] [--dry-run] [--diff --allow-unverified-diff] [--alt-helper] [--frames N] [--interval-ms 3000] [--preview-interval-seconds 45] [--full-resync-every-frames 300] [--max-consecutive-send-failures 5] [--metrics-url URL] [--root TURZX_ROOT] [--port COM7]");
-            Console.WriteLine("frames=0 means infinite. Live --diff uses unverified command 204 and requires --allow-unverified-diff; production uses verified full-frame command 200.");
+            Console.WriteLine("TURZX.SideScreen.Stream.exe [--sample] [--dry-run] [--hybrid-refresh] [--diff --allow-unverified-diff] [--alt-helper] [--frames N] [--interval-ms 3000] [--send-timeout-ms 10000] [--diff-send-timeout-ms 900] [--baseline-brightness 170] [--preview-interval-seconds 45] [--full-resync-every-frames 0] [--max-consecutive-send-failures 1] [--metrics-url URL] [--root TURZX_ROOT] [--port COM7]");
+            Console.WriteLine("frames=0 means infinite. --hybrid-refresh is an explicit 1Hz command-204 candidate with command-200 startup/recovery baselines; default production remains verified command 200 at 3 seconds.");
         }
 
         private sealed class StreamOptions
@@ -815,16 +1074,19 @@ namespace TURZX.SideScreen
             public bool ShowHelp;
             public bool UseSample;
             public bool DryRun;
+            public bool HybridRefresh;
             public bool UseDiff;
             public bool AllowUnverifiedDiff;
             public bool AltHelper;
             public int FrameCount = 0;
             public int IntervalMs = 3000;
             public int HttpTimeoutMs = DefaultHttpTimeoutMs;
-            public int SendTimeoutMs = 240000;
-            public int MaxConsecutiveSendFailures = 5;
-            public int FullResyncEveryFrames = 300;
+            public int SendTimeoutMs = DefaultSendTimeoutMilliseconds;
+            public int DiffSendTimeoutMs = DefaultDifferentialSendTimeoutMilliseconds;
+            public int MaxConsecutiveSendFailures = DefaultMaxConsecutiveSendFailures;
+            public int FullResyncEveryFrames = 0;
             public int PreviewIntervalSeconds = DefaultPreviewIntervalSeconds;
+            public byte BaselineBrightness = 170;
             public string MetricsUrl = DefaultMetricsUrl;
             public string Root = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "..", ".."));
             public string Port = "COM7";
@@ -840,6 +1102,7 @@ namespace TURZX.SideScreen
                     if (arg == "--help" || arg == "-h") options.ShowHelp = true;
                     else if (arg == "--sample") options.UseSample = true;
                     else if (arg == "--dry-run") options.DryRun = true;
+                    else if (arg == "--hybrid-refresh") options.HybridRefresh = true;
                     else if (arg == "--diff") options.UseDiff = true;
                     else if (arg == "--allow-unverified-diff") options.AllowUnverifiedDiff = true;
                     else if (arg == "--alt-helper") options.AltHelper = true;
@@ -847,6 +1110,8 @@ namespace TURZX.SideScreen
                     else if (arg == "--interval-ms") options.IntervalMs = int.Parse(Next(args, ref i, arg));
                     else if (arg == "--timeout-ms") options.HttpTimeoutMs = int.Parse(Next(args, ref i, arg));
                     else if (arg == "--send-timeout-ms") options.SendTimeoutMs = int.Parse(Next(args, ref i, arg));
+                    else if (arg == "--diff-send-timeout-ms") options.DiffSendTimeoutMs = int.Parse(Next(args, ref i, arg));
+                    else if (arg == "--baseline-brightness") options.BaselineBrightness = byte.Parse(Next(args, ref i, arg));
                     else if (arg == "--max-consecutive-send-failures") options.MaxConsecutiveSendFailures = int.Parse(Next(args, ref i, arg));
                     else if (arg == "--full-resync-every-frames") options.FullResyncEveryFrames = int.Parse(Next(args, ref i, arg));
                     else if (arg == "--preview-interval-seconds") options.PreviewIntervalSeconds = int.Parse(Next(args, ref i, arg));
@@ -860,10 +1125,16 @@ namespace TURZX.SideScreen
 
                 if (options.FrameCount < 0) throw new ArgumentOutOfRangeException("frames");
                 if (options.IntervalMs < 0) throw new ArgumentOutOfRangeException("interval-ms");
-                if (options.MaxConsecutiveSendFailures < 0) throw new ArgumentOutOfRangeException("max-consecutive-send-failures");
+                if (!IsSendTimeoutMillisecondsValidForTest(options.SendTimeoutMs)) throw new ArgumentOutOfRangeException("send-timeout-ms");
+                if (!IsDifferentialSendTimeoutMillisecondsValidForTest(options.DiffSendTimeoutMs)) throw new ArgumentOutOfRangeException("diff-send-timeout-ms");
+                if (options.MaxConsecutiveSendFailures <= 0) throw new ArgumentOutOfRangeException("max-consecutive-send-failures");
                 if (options.FullResyncEveryFrames < 0) throw new ArgumentOutOfRangeException("full-resync-every-frames");
                 if (options.PreviewIntervalSeconds < 0) throw new ArgumentOutOfRangeException("preview-interval-seconds");
-                if (!IsDifferentialTransportAllowed(options.UseDiff, options.DryRun, options.AllowUnverifiedDiff))
+                if (options.HybridRefresh)
+                {
+                    options.UseDiff = true;
+                }
+                if (!IsDifferentialTransportAllowed(options.UseDiff, options.DryRun, options.AllowUnverifiedDiff || options.HybridRefresh))
                 {
                     throw new InvalidOperationException("Live differential command 204 is unverified; use the full-frame transport or explicitly pass --allow-unverified-diff for isolated experiments.");
                 }

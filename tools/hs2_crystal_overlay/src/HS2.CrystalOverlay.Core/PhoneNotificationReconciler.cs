@@ -45,17 +45,29 @@ public sealed class PhoneNotificationSnapshotReconciler
         ArgumentNullException.ThrowIfNull(snapshot);
         var requests = new List<OverlayRequest>();
         var currentIds = new HashSet<uint>();
-        foreach (var item in snapshot
-                     .OrderBy(candidate => candidate.CreationTime)
-                     .ThenBy(candidate => candidate.Id))
+        var ordered = snapshot
+            .Select(item => new
+            {
+                Item = item,
+                Category = PhoneNotificationClassifier.Classify(
+                    item.Title,
+                    item.Body),
+            })
+            .OrderBy(candidate => candidate.Item.CreationTime)
+            .ThenBy(candidate => candidate.Item.Id)
+            .ToArray();
+        var newestVerification = ordered.LastOrDefault(candidate =>
+            candidate.Category ==
+            PhoneNotificationCategory.VerificationCode);
+        foreach (var candidate in ordered)
         {
+            var item = candidate.Item;
             currentIds.Add(item.Id);
-            var category = PhoneNotificationClassifier.Classify(
-                item.Title,
-                item.Body);
+            var category = candidate.Category;
             var isTimed = category is
                 PhoneNotificationCategory.Ordinary or
-                PhoneNotificationCategory.Dynamic;
+                PhoneNotificationCategory.Dynamic or
+                PhoneNotificationCategory.VerificationCode;
             var fingerprint = PhoneNotificationClassifier.DedupKey(
                 item.Title,
                 item.Body);
@@ -82,7 +94,11 @@ public sealed class PhoneNotificationSnapshotReconciler
             if (isTimed)
             {
                 EndActive(item.Id, requests);
-                if (!known || changed)
+                var isNewestVerification =
+                    category !=
+                        PhoneNotificationCategory.VerificationCode ||
+                    newestVerification?.Item.Id == item.Id;
+                if (isNewestVerification && (!known || changed))
                 {
                     requests.Add(TimedRequest(item, category));
                 }
@@ -218,8 +234,39 @@ public sealed class PhoneNotificationSnapshotReconciler
 
     private static OverlayRequest TimedRequest(
         PhoneNotificationSnapshotItem item,
-        PhoneNotificationCategory category) =>
-        OverlayRequest.Timed(
+        PhoneNotificationCategory category)
+    {
+        if (category == PhoneNotificationCategory.VerificationCode)
+        {
+            if (!PhoneVerificationCodeDetector.TryExtract(
+                    item.Title,
+                    item.Body,
+                    out var code))
+            {
+                throw new InvalidOperationException(
+                    "Verification notification did not contain a code.");
+            }
+
+            var codeIsInTitle = ContainsCode(item.Title, code);
+
+            return OverlayRequest.Timed(
+                VerificationCodeEventId,
+                OverlayKind.PhoneVerificationCode,
+                item.Source,
+                code,
+                body: null,
+                dedupKey: $"verification-code:{code}",
+                visual: new OverlayVisualData(
+                    Eyebrow: "验证码 / CODE",
+                    Subtitle: codeIsInTitle
+                        ? item.AppName
+                        : item.Title,
+                    Meta: codeIsInTitle ? null : item.AppName,
+                    AccentHex: "#70F0B2",
+                    VerificationCode: code));
+        }
+
+        return OverlayRequest.Timed(
             TimedEventId(item.Id),
             category == PhoneNotificationCategory.Dynamic
                 ? OverlayKind.PhoneDynamic
@@ -236,6 +283,16 @@ public sealed class PhoneNotificationSnapshotReconciler
                     : "手机通知 / PHONE",
                 Subtitle: item.AppName,
                 AccentHex: "#70F0B2"));
+    }
+
+    private const string VerificationCodeEventId =
+        "phone-verification-code";
+
+    private static bool ContainsCode(string value, string code) =>
+        string.Concat(value
+                .Normalize(NormalizationForm.FormKC)
+                .Where(char.IsAsciiDigit))
+            .Contains(code, StringComparison.Ordinal);
 
     private static string TimedEventId(uint id) =>
         $"phone-notification:{id}";

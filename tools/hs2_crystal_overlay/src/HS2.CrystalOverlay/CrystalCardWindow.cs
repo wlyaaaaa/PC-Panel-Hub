@@ -97,6 +97,15 @@ internal sealed class CrystalCardWindow : IDisposable
                     target.Width,
                     target.Height);
             }
+            else if (item.Request.Kind ==
+                     OverlayKind.PhoneVerificationCode)
+            {
+                DrawVerificationCode(
+                    graphics,
+                    item,
+                    target.Width,
+                    target.Height);
+            }
             else if (item.Request.Kind is
                 OverlayKind.MediaActive or OverlayKind.MediaTrackChange)
             {
@@ -503,6 +512,79 @@ internal sealed class CrystalCardWindow : IDisposable
         }
 
         graphics.Restore(state);
+    }
+
+    private static void DrawVerificationCode(
+        Graphics graphics,
+        OverlayItem item,
+        int width,
+        int height)
+    {
+        var visual = item.Request.Visual;
+        var narrow = width < 900;
+        var padding = narrow ? 30f : 40f;
+        var accent = ParseColor(
+            visual?.AccentHex,
+            Color.FromArgb(244, 112, 240, 178));
+
+        using var dot = new SolidBrush(accent);
+        graphics.FillEllipse(dot, padding, 27, 10, 10);
+        DrawText(
+            graphics,
+            visual?.Eyebrow ?? "验证码 / CODE",
+            new RectangleF(
+                padding + 22,
+                10,
+                width * 0.38f,
+                44),
+            narrow ? 20 : 23,
+            FontStyle.Bold,
+            Color.FromArgb(238, 122, 245, 184));
+
+        var source = string.Join(
+            " · ",
+            new[] { visual?.Subtitle, visual?.Meta }
+                .Where(value => !string.IsNullOrWhiteSpace(value)));
+        if (source.Length > 0)
+        {
+            DrawFittedText(
+                graphics,
+                source,
+                new RectangleF(
+                    width * 0.40f,
+                    10,
+                    width * 0.60f - padding,
+                    44),
+                narrow ? 20 : 22,
+                16,
+                FontStyle.Regular,
+                Color.FromArgb(220, 169, 238, 204),
+                StringAlignment.Far);
+        }
+
+        var code = visual?.VerificationCode ?? item.Request.Title;
+        var preferredSize = code.Length switch
+        {
+            <= 4 => 120f,
+            5 => 114f,
+            6 => 108f,
+            7 => 100f,
+            _ => 92f,
+        };
+        var codeTop = narrow ? 48f : 50f;
+        DrawFittedText(
+            graphics,
+            code,
+            new RectangleF(
+                padding,
+                codeTop,
+                width - padding * 2,
+                Math.Max(1, height - codeTop - 14)),
+            preferredSize,
+            72f,
+            FontStyle.Bold,
+            Color.FromArgb(252, 225, 255, 239),
+            StringAlignment.Center);
     }
 
     private static void DrawAudioHud(
@@ -986,7 +1068,8 @@ internal sealed class CrystalCardWindow : IDisposable
         float preferredSize,
         float minimumSize,
         FontStyle style,
-        Color fill)
+        Color fill,
+        StringAlignment alignment = StringAlignment.Near)
     {
         using var preferred = UiFont(preferredSize, style);
         using var format = Typographic();
@@ -1007,7 +1090,8 @@ internal sealed class CrystalCardWindow : IDisposable
             bounds,
             size,
             style,
-            fill);
+            fill,
+            alignment);
     }
 
     private static void DrawScrollingText(
@@ -1176,6 +1260,8 @@ internal sealed class CrystalCardWindow : IDisposable
             OverlayKind.MediaTrackChange => (Width: 940, Height: 210),
             OverlayKind.GameAchievement => (Width: 1180, Height: 380),
             OverlayKind.GameSummary => (Width: 1180, Height: 400),
+            OverlayKind.PhoneVerificationCode =>
+                (Width: 860, Height: 220),
             _ => (Width: maximum.Width, Height: maximum.Height),
         };
         var width = Math.Min(maximum.Width, desired.Width);
@@ -1260,6 +1346,7 @@ internal sealed class CrystalCardWindow : IDisposable
         OverlayKind.PhoneConnection => "手机连接",
         OverlayKind.PhoneNotification => "手机通知",
         OverlayKind.PhoneDynamic => "手机动态",
+        OverlayKind.PhoneVerificationCode => "验证码",
         OverlayKind.PhoneCall => "来电",
         OverlayKind.PhoneTransfer => "跨设备传输",
         _ => "HS2",

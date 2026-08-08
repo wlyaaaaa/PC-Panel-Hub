@@ -38,6 +38,45 @@ foreach ($relative in $hiddenLaunchers) {
     if ($text -notmatch [regex]::Escape('intervalMs = "3000"')) {
         throw "Hidden launcher must preserve the safe 3000ms full-frame interval: $relative"
     }
+    foreach ($pattern in @(
+        'hybridRefresh = False',
+        'altHelper = False',
+        'Case "-nohybridrefresh"',
+        'Case "-noalthelper"'
+    )) {
+        if ($text -notmatch [regex]::Escape($pattern)) {
+            throw "Hidden launcher must preserve and explicitly propagate safe false modes; missing '$pattern' in $relative"
+        }
+    }
+}
+
+$resumeHidden = Get-Content -Raw -LiteralPath (Join-Path $Root "tools\turzx_side_screen\RestartSideScreenAfterResume-Hidden.vbs")
+foreach ($pattern in @(
+    'If hybridRefresh Then',
+    'If altHelper Then'
+)) {
+    if ($resumeHidden -notmatch [regex]::Escape($pattern)) {
+        throw "Resume hidden launcher must explicitly pass both true and false modes; missing '$pattern'"
+    }
+}
+
+$explicitFalsePropagation = @(
+    "scripts\install-startup-admin.ps1",
+    "tools\turzx_side_screen\RestartSideScreenAfterResume.ps1"
+)
+foreach ($relative in $explicitFalsePropagation) {
+    $text = Get-Content -Raw -LiteralPath (Join-Path $Root $relative)
+    foreach ($pattern in @('-NoHybridRefresh', '-NoAltHelper')) {
+        if ($text -notmatch [regex]::Escape($pattern)) {
+            throw "Installer/resume fallback must explicitly propagate false mode '$pattern' in $relative"
+        }
+    }
+}
+
+$resumeText = Get-Content -Raw -LiteralPath (Join-Path $Root "tools\turzx_side_screen\RestartSideScreenAfterResume.ps1")
+if ($resumeText -notmatch [regex]::Escape('[switch]$HybridRefresh,') -or
+    $resumeText -match [regex]::Escape('[switch]$HybridRefresh = $true')) {
+    throw "Resume PowerShell worker must default HybridRefresh to false so the hidden launcher's safe false mode survives downstream."
 }
 
 $explicitEntries = @(

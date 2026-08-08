@@ -24,9 +24,13 @@ Verified from `tools\turzx_protocol_probe\TurzxProtocolProbe.cs` and local black
   - brightness `0` turns the panel/backlight off, and the watchdog restores the configured active value before streaming resumes.
 - `RJCP.SerialPortStream` is required for COM open/write. The ordinary `.NET SerialPort` probe path timed out.
 
-Not implemented in v1:
+Not implemented in the reusable v1 protocol layer:
 
-- Command `204` differential/partial refresh. The vendor assembly contains a `204` path, but `TurzxProtocolProbe.cs` did not verify its payload layout against the device. `WriteDifferentialFrame` intentionally throws `NotSupportedException` until that protocol is captured and tested.
+- Command `204` differential/partial refresh. `TurzxProtocolProbe.cs` did not verify a
+  reusable payload contract, so `WriteDifferentialFrame` intentionally throws
+  `NotSupportedException`. The separate device-specific HybridRefresh wrapper is an
+  explicit local candidate derived from the vendor assembly; it is bounded, reversible,
+  and must not be presented as a verified public protocol or a device ACK.
 
 Safe test command:
 

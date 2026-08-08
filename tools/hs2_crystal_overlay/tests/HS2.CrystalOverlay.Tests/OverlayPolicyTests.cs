@@ -29,6 +29,19 @@ public sealed class OverlayPolicyTests
     }
 
     [Fact]
+    public void VerificationCode_IsCompactFocusCardForFifteenVisibleSeconds()
+    {
+        var policy = OverlayPolicies.For(
+            OverlayKind.PhoneVerificationCode);
+
+        Assert.Equal(OverlayVisualTier.Crystal, policy.VisualTier);
+        Assert.Equal(OverlayLifetime.Timed, policy.Lifetime);
+        Assert.Equal(TimeSpan.FromSeconds(15), policy.Duration);
+        Assert.InRange(policy.Typography.TitlePx, 96, 128);
+        Assert.Equal(0, policy.Typography.MaxBodyLines);
+    }
+
+    [Fact]
     public void Glance_IsPersistentDirectOverlayControlledByHotkey()
     {
         var policy = OverlayPolicies.For(OverlayKind.Glance);
@@ -48,6 +61,7 @@ public sealed class OverlayPolicyTests
     [InlineData(OverlayKind.HardwareResolved, 10)]
     [InlineData(OverlayKind.PhoneConnection, 5)]
     [InlineData(OverlayKind.PhoneDynamic, 60)]
+    [InlineData(OverlayKind.PhoneVerificationCode, 15)]
     public void TimedPolicies_HaveApprovedDurations(OverlayKind kind, int seconds)
     {
         var policy = OverlayPolicies.For(kind);

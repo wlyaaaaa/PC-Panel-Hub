@@ -6,11 +6,26 @@ param(
     [int]$DelaySeconds = 10,
     [string]$DeviceIdPattern = "VID_0525&PID_A4A7",
     [int]$DeviceRestartSettleSeconds = 6,
+    [switch]$HybridRefresh,
+    [switch]$AltHelper,
     [switch]$SkipDeviceRestart
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+function Test-ScheduledTaskActionMode {
+    param(
+        [AllowEmptyString()][string]$Arguments,
+        [bool]$HybridRefreshEnabled,
+        [bool]$AltHelperEnabled
+    )
+
+    $hasHybridRefresh = [regex]::IsMatch($Arguments, '(?i)(?:^|\s)-HybridRefresh(?:\s|$)')
+    $hasAltHelper = [regex]::IsMatch($Arguments, '(?i)(?:^|\s)-AltHelper(?:\s|$)')
+    return ($hasHybridRefresh -eq $HybridRefreshEnabled) -and
+        ($hasAltHelper -eq $AltHelperEnabled)
+}
 
 $Root = (Resolve-Path -LiteralPath $Root).Path
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -109,26 +124,41 @@ Restart-TurzxUsbDevice
 Set-Content -LiteralPath $resumeFlag -Value (Get-Date -Format "o") -Encoding ASCII
 
 $taskExists = $false
-& schtasks.exe /Query /TN $TaskName *> $null
-if ($LASTEXITCODE -eq 0) {
+$scheduledTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+if ($null -ne $scheduledTask) {
     $taskExists = $true
-    & schtasks.exe /End /TN $TaskName *> $null
-    Start-Sleep -Milliseconds 800
-    & schtasks.exe /Run /TN $TaskName | Out-Null
-    if ($LASTEXITCODE -eq 0) {
-        Write-ResumeLog ("started scheduled task after resume: {0}" -f $TaskName)
-        exit 0
+    $registeredArguments = (($scheduledTask.Actions | ForEach-Object { [string]$_.Arguments }) -join ' ')
+    $modeMatches = Test-ScheduledTaskActionMode `
+        -Arguments $registeredArguments `
+        -HybridRefreshEnabled ([bool]$HybridRefresh) `
+        -AltHelperEnabled ([bool]$AltHelper)
+    if ($modeMatches) {
+        & schtasks.exe /End /TN $TaskName *> $null
+        Start-Sleep -Milliseconds 800
+        & schtasks.exe /Run /TN $TaskName | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            Write-ResumeLog ("started scheduled task after resume: {0}" -f $TaskName)
+            exit 0
+        }
+        Write-ResumeLog ("scheduled task start failed exit={0}; using direct hidden launcher" -f $LASTEXITCODE)
     }
-    Write-ResumeLog ("scheduled task start failed exit={0}; using direct hidden launcher" -f $LASTEXITCODE)
+    else {
+        Write-ResumeLog ("scheduled task mode mismatch; using direct hidden launcher requestedHybrid={0} requestedAlt={1}" -f [bool]$HybridRefresh, [bool]$AltHelper)
+    }
 }
 
 if (-not (Test-Path -LiteralPath $launcher)) {
     throw "Missing hidden launcher: $launcher"
 }
 
-$command = 'wscript.exe "{0}" -Root "{1}" -Port {2} -IntervalMs {3}' -f $launcher, $Root, $Port, $IntervalMs
+$launcherArguments = @($launcher, "-Root", $Root, "-Port", $Port, "-IntervalMs", [string]$IntervalMs)
+if ($HybridRefresh) { $launcherArguments += "-HybridRefresh" }
+else { $launcherArguments += "-NoHybridRefresh" }
+if ($AltHelper) { $launcherArguments += "-AltHelper" }
+else { $launcherArguments += "-NoAltHelper" }
+$command = 'wscript.exe "{0}" -Root "{1}" -Port {2} -IntervalMs {3} hybrid={4} altHelper={5}' -f $launcher, $Root, $Port, $IntervalMs, [bool]$HybridRefresh, [bool]$AltHelper
 Start-Process -FilePath "wscript.exe" `
-    -ArgumentList @($launcher, "-Root", $Root, "-Port", $Port, "-IntervalMs", [string]$IntervalMs) `
+    -ArgumentList $launcherArguments `
     -WorkingDirectory $scriptDir `
     -WindowStyle Hidden | Out-Null
 Write-ResumeLog ("started direct hidden launcher after resume taskExists={0}: {1}" -f $taskExists, $command)

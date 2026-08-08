@@ -87,6 +87,7 @@ public static class VisibleCardSelector
         item.Request.Kind is
             OverlayKind.HardwareAlert or
             OverlayKind.PhoneCall or
+            OverlayKind.PhoneVerificationCode or
             OverlayKind.PhoneTransfer or
             OverlayKind.ImportantTask or
             OverlayKind.ImportantTaskComplete or
@@ -99,6 +100,7 @@ public static class VisibleCardSelector
         {
             OverlayKind.HardwareAlert => 700,
             OverlayKind.PhoneCall => 600,
+            OverlayKind.PhoneVerificationCode => 590,
             OverlayKind.PhoneTransfer => 570,
             OverlayKind.ImportantTaskComplete => 550,
             OverlayKind.ImportantTask => 530,

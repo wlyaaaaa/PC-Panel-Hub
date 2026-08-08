@@ -7,7 +7,9 @@ The recommended startup path is a Windows Scheduled Task:
 - Trigger: user logon
 - Action: hidden `powershell.exe` -> `tools\turzx_side_screen\StartSideScreenWatchdog.ps1`
 - Default port: `COM7`
-- Default panel refresh: `3000ms` (metrics still sample every `1000ms`)
+- Installed personal mode: explicit hybrid refresh (`204` deltas at `1000ms`);
+  command-200-only fallback remains `3000ms`. The optional Alt helper is not enabled:
+  this panel accepted 18 frames and then rejected Alt command 204 plus subsequent writes.
 
 This is not a `SYSTEM` account task. It runs as the current interactive user with `Highest` run level, which is usually safer for COM ports, user-profile Python installs, RTSS/Afterburner, and other desktop telemetry tools.
 
@@ -19,6 +21,20 @@ The watchdog starts the render stack and coordinates both auxiliary displays acr
 Windows power transitions. At startup it also enables the Windows multi-monitor
 policies that remember window locations and minimize windows when a monitor is
 disconnected:
+
+For high-load resilience, the watchdog and stream run at `AboveNormal` priority and
+the serial write worker runs at `Highest`, without using realtime process priority.
+Full-frame writes are bounded to 10 seconds; hybrid delta writes are bounded to
+900 ms. The first send failure causes the
+worker to exit and reopen under the watchdog. Heartbeat timing checks also reject a
+live-but-stalled process. Diagnostic preview encoding is asynchronous and never sits
+on the COM7 send path.
+
+Hybrid startup/recovery follows the vendor 8.8-inch lifecycle: raw `0x2C` priming,
+brightness restore, then two identical command-200 baselines before command 204 begins.
+No periodic full baseline is enabled by default because each pair costs about 4.8 seconds
+and would visibly stop a seconds clock. If command 204 is not reliable on the physical
+panel, disable HybridRefresh and use the 3-second verified full-frame mode.
 
 | Windows state | LIAN LI HS2 curved OLED | TURZX case panel |
 | --- | --- | --- |

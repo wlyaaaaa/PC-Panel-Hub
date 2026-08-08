@@ -18,6 +18,7 @@ public enum OverlayKind
     PhoneConnection,
     PhoneNotification,
     PhoneDynamic,
+    PhoneVerificationCode,
     PhoneCall,
     PhoneTransfer,
 }
@@ -82,7 +83,8 @@ public sealed record OverlayVisualData(
     double? MarqueeProgress = null,
     string? TranslatedTitle = null,
     string? SecondaryBody = null,
-    AudioHudIcon? AudioIcon = null);
+    AudioHudIcon? AudioIcon = null,
+    string? VerificationCode = null);
 
 public sealed record OverlayRequest(
     string EventId,

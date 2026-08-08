@@ -433,7 +433,12 @@ public sealed class OverlayScheduler
                 continue;
             }
 
-            if (previous.Source == request.Source &&
+            var compatibleVerificationSources =
+                request.Kind == OverlayKind.PhoneVerificationCode &&
+                IsPhoneRelaySource(previous.Source) &&
+                IsPhoneRelaySource(request.Source);
+            if ((previous.Source == request.Source ||
+                 compatibleVerificationSources) &&
                 string.Equals(
                     SuppressionFingerprint(previous),
                     SuppressionFingerprint(request),
@@ -479,7 +484,8 @@ public sealed class OverlayScheduler
             OverlayKind.HardwareResolved or
             OverlayKind.PhoneConnection or
             OverlayKind.PhoneNotification or
-            OverlayKind.PhoneDynamic;
+            OverlayKind.PhoneDynamic or
+            OverlayKind.PhoneVerificationCode;
 
     private static bool UsesVisibleTimer(
         OverlayRequest request,

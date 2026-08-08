@@ -37,6 +37,12 @@ public static class TestStreamCadenceProgram
         Equal("sleep keeps one-second start cadence", 980, SideScreenStreamApp.ComputeSleepMillisecondsForTest(1000, 1000, 1020, 1000));
         Equal("sleep clamps overruns", 0, SideScreenStreamApp.ComputeSleepMillisecondsForTest(1000, 1000, 2050, 1000));
         Equal("zero interval does not sleep", 0, SideScreenStreamApp.ComputeSleepMillisecondsForTest(1000, 0, 1001, 1000));
+        Equal("default production refresh remains three seconds", 3000,
+            SideScreenStreamApp.ResolveRefreshIntervalMillisecondsForTest(false, 3000));
+        Equal("explicit hybrid refresh owns a one-second clock cadence", 1000,
+            SideScreenStreamApp.ResolveRefreshIntervalMillisecondsForTest(true, 3000));
+        Equal("hybrid cadence cannot be slowed by a caller's full-frame interval", 1000,
+            SideScreenStreamApp.ResolveRefreshIntervalMillisecondsForTest(true, 12000));
 
         Snapshot snapshot = new Snapshot
         {
@@ -88,12 +94,22 @@ public static class TestStreamCadenceProgram
             SideScreenStreamApp.ShouldAbortAfterConsecutiveSendFailuresForTest(3, 3));
         Equal("disabled send failure threshold never aborts", false,
             SideScreenStreamApp.ShouldAbortAfterConsecutiveSendFailuresForTest(99, 0));
-        Equal("first differential frame is always a full baseline", true,
-            SideScreenStreamApp.ShouldSendFullFrameForTest(1, false, 300));
+        Equal("hybrid aborts on its first attempted send failure even when threshold is two", true,
+            SideScreenStreamApp.ShouldAbortAfterSendFailureForTest(true, true, 1, 2));
+        Equal("verified full transport still honors a configured threshold of two", false,
+            SideScreenStreamApp.ShouldAbortAfterSendFailureForTest(false, true, 1, 2));
+        Equal("verified full transport aborts when its configured threshold is reached", true,
+            SideScreenStreamApp.ShouldAbortAfterSendFailureForTest(false, true, 2, 2));
+        Equal("a non-send hybrid exception does not impersonate a poisoned serial session", false,
+            SideScreenStreamApp.ShouldAbortAfterSendFailureForTest(true, false, 1, 2));
+        Equal("hybrid startup always sends a full baseline even when periodic resync is disabled", true,
+            SideScreenStreamApp.ShouldSendFullFrameForTest(1, false, 0));
         Equal("ordinary differential frame stays incremental", false,
             SideScreenStreamApp.ShouldSendFullFrameForTest(299, true, 300));
-        Equal("configured boundary sends a periodic full baseline", true,
+        Equal("an explicitly configured boundary sends an optional periodic full baseline", true,
             SideScreenStreamApp.ShouldSendFullFrameForTest(300, true, 300));
+        Equal("frame after the periodic baseline returns to command 204", false,
+            SideScreenStreamApp.ShouldSendFullFrameForTest(301, true, 300));
         Equal("zero disables periodic full baselines after startup", false,
             SideScreenStreamApp.ShouldSendFullFrameForTest(300, true, 0));
         Equal("verified full-frame transport is always allowed", true,
@@ -104,6 +120,12 @@ public static class TestStreamCadenceProgram
             SideScreenStreamApp.IsDifferentialTransportAllowedForTest(true, true, false));
         Equal("live differential transport requires explicit experimental opt-in", true,
             SideScreenStreamApp.IsDifferentialTransportAllowedForTest(true, false, true));
+        Equal("default production heartbeat identifies command 200", "verified_full_200",
+            SideScreenStreamApp.ResolveTransportModeForTest(false, false));
+        Equal("explicit hybrid heartbeat identifies command 204 plus command 200 baselines", "hybrid_diff_204_full_200",
+            SideScreenStreamApp.ResolveTransportModeForTest(true, false));
+        Equal("legacy differential mode remains experimental rather than impersonating hybrid", "experimental_diff_204",
+            SideScreenStreamApp.ResolveTransportModeForTest(false, true));
         Equal("preview writes the first frame", true,
             SideScreenStreamApp.ShouldWritePreviewForTest(-1, 1000, 1000, 45));
         Equal("preview is throttled before the configured interval", false,
@@ -114,6 +136,40 @@ public static class TestStreamCadenceProgram
             SideScreenStreamApp.ShouldWritePreviewForTest(1000, 1001, 1000, 0));
         Equal("default preview interval is diagnostic rather than per-frame", 45,
             SideScreenStreamApp.DefaultPreviewIntervalSecondsForTest());
+        Equal("stream process uses a load-resistant priority without entering realtime", System.Diagnostics.ProcessPriorityClass.AboveNormal,
+            SideScreenStreamApp.DesiredProcessPriorityForTest());
+        Equal("stream main thread stays responsive under CPU saturation", System.Threading.ThreadPriority.AboveNormal,
+            SideScreenStreamApp.DesiredMainThreadPriorityForTest());
+        Equal("serial sender gets the strongest managed thread priority", System.Threading.ThreadPriority.Highest,
+            TurzxHelperSender.DesiredSenderThreadPriorityForTest());
+        Equal("full-frame send timeout is bounded", 10000,
+            SideScreenStreamApp.DefaultSendTimeoutMillisecondsForTest());
+        Equal("command 204 has a sub-second send budget", 900,
+            SideScreenStreamApp.DefaultDifferentialSendTimeoutMillisecondsForTest());
+        Equal("one timed-out full frame reopens the stack", 1,
+            SideScreenStreamApp.DefaultMaxConsecutiveSendFailuresForTest());
+        Equal("zero cannot disable the full-frame send timeout", false,
+            SideScreenStreamApp.IsSendTimeoutMillisecondsValidForTest(0));
+        Equal("a positive full-frame send timeout is valid", true,
+            SideScreenStreamApp.IsSendTimeoutMillisecondsValidForTest(10000));
+        Equal("zero cannot disable the command 204 timeout", false,
+            SideScreenStreamApp.IsDifferentialSendTimeoutMillisecondsValidForTest(0));
+        Equal("the production command 204 timeout is valid", true,
+            SideScreenStreamApp.IsDifferentialSendTimeoutMillisecondsValidForTest(900));
+        VerifyBoundedDifferentialSendTimeout();
+        Equal("preview worker accepts the first diagnostic write", true,
+            SideScreenStreamApp.TryReservePreviewWorkerForTest());
+        Equal("preview worker drops overlapping diagnostic writes", false,
+            SideScreenStreamApp.TryReservePreviewWorkerForTest());
+        SideScreenStreamApp.ReleasePreviewWorkerForTest();
+        Equal("preview worker can accept a later diagnostic write", true,
+            SideScreenStreamApp.TryReservePreviewWorkerForTest());
+        SideScreenStreamApp.ReleasePreviewWorkerForTest();
+        Equal("preview setup failure is isolated from the stream loop", false,
+            SideScreenStreamApp.TryQueuePreviewForTest(null, "ignored.png"));
+        Equal("preview setup failure releases the single-flight gate", true,
+            SideScreenStreamApp.TryReservePreviewWorkerForTest());
+        SideScreenStreamApp.ReleasePreviewWorkerForTest();
 
         string atomicDir = System.IO.Path.Combine(
             System.IO.Path.GetTempPath(),
@@ -154,6 +210,60 @@ public static class TestStreamCadenceProgram
                 new InvalidOperationException("inner device detail")));
         Contains("target invocation description names wrapper", "TargetInvocationException:", described);
         Contains("target invocation description unwraps inner exception", "InvalidOperationException: inner device detail", described);
+    }
+
+    private static void VerifyBoundedDifferentialSendTimeout()
+    {
+        object session = System.Runtime.Serialization.FormatterServices.GetUninitializedObject(
+            typeof(TurzxHelperSender.DiffSession));
+        System.Reflection.MethodInfo boundedSend = typeof(TurzxHelperSender.DiffSession).GetMethod(
+            "RunBoundedSend",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+        if (boundedSend == null)
+        {
+            throw new Exception("bounded differential sender test hook is missing");
+        }
+
+        object[] arguments = new object[]
+        {
+            new Action(delegate() { System.Threading.Thread.Sleep(200); }),
+            20,
+            "DIFF",
+            null
+        };
+        System.Diagnostics.Stopwatch watch = System.Diagnostics.Stopwatch.StartNew();
+        bool completed = (bool)boundedSend.Invoke(session, arguments);
+        watch.Stop();
+        Equal("blocked command 204 returns a timeout result", false, completed);
+        Contains("command 204 timeout names its budget", "TIMEOUT after 20 ms", (string)arguments[3]);
+        if (watch.ElapsedMilliseconds >= 150)
+        {
+            throw new Exception("bounded command 204 did not return promptly: " + watch.ElapsedMilliseconds + "ms");
+        }
+
+        System.Reflection.FieldInfo abandoned = typeof(TurzxHelperSender.DiffSession).GetField(
+            "_abandoned",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+        if (abandoned == null || !(bool)abandoned.GetValue(session))
+        {
+            throw new Exception("timed-out command 204 session must be abandoned instead of synchronously closed or reused");
+        }
+
+        System.Reflection.MethodInfo throwIfDisposed = typeof(TurzxHelperSender.DiffSession).GetMethod(
+            "ThrowIfDisposed",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+        try
+        {
+            throwIfDisposed.Invoke(session, null);
+            throw new Exception("abandoned command-204 session was incorrectly reusable");
+        }
+        catch (System.Reflection.TargetInvocationException ex)
+        {
+            if (!(ex.InnerException is ObjectDisposedException))
+            {
+                throw;
+            }
+        }
     }
 
     private static void Equal(string name, object expected, object actual)

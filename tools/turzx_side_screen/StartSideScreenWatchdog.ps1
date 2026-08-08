@@ -2,7 +2,10 @@ param(
     [string]$Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path,
     [string]$Port = "COM7",
     [int]$IntervalMs = 3000,
-    [int]$FullResyncEveryFrames = 300,
+    [ValidateRange(3000, 60000)][int]$SendTimeoutMs = 10000,
+    [ValidateRange(100, 5000)][int]$DiffSendTimeoutMs = 900,
+    [ValidateRange(1, 10)][int]$MaxConsecutiveSendFailures = 1,
+    [int]$FullResyncEveryFrames = 0,
     [int]$PreviewIntervalSeconds = 45,
     [int64]$MaxStackLogBytes = 1048576,
     [int64]$MaxStreamLogBytes = 5242880,
@@ -12,6 +15,9 @@ param(
     [int]$QuickBlankTimeoutMs = 2500,
     [int]$PollSeconds = 2,
     [int]$HeartbeatStaleSeconds = 15,
+    [ValidateRange(3000, 60000)][int]$HeartbeatMaxSendMs = 10000,
+    [ValidateRange(3000, 120000)][int]$HeartbeatMaxElapsedMs = 12000,
+    [ValidateRange(3000, 120000)][int]$HeartbeatMaxPeriodMs = 15000,
     [int]$HeartbeatStartupGraceSeconds = 60,
     [int]$ShutdownStartupGraceSeconds = 180,
     [int]$MaxConsecutiveHeartbeatFailures = 3,
@@ -23,6 +29,8 @@ param(
     [ValidateRange(1, 10)][int]$HS2UsbRecoveryAfterFailures = 3,
     [ValidateRange(0, 255)][int]$ActiveBrightness = 170,
     [ValidateRange(1, 65535)][int]$LConnectServicePort = 11021,
+    [switch]$HybridRefresh,
+    [switch]$AltHelper,
     [switch]$NoWindowPreservationPolicy,
     [switch]$NoPowerEvents
 )
@@ -66,6 +74,7 @@ $script:hs2ActiveLastVerifiedUtc = [DateTime]::MinValue
 $script:hs2ActiveConsecutiveFailures = 0
 $script:hs2ActiveCurrentRetrySeconds = $HS2ActiveRetrySeconds
 $script:hs2UsbRecoveryAttempted = $false
+$script:hs2UsbRecoveryContinuationPending = $false
 $script:hs2LConnectRecoveryAttempted = $false
 $script:hs2WindowGuardTargetMonitorDevice = $null
 $script:hs2WindowGuardSafeMonitorDevice = $null
@@ -184,6 +193,7 @@ function Invoke-HS2ActiveMaintenance {
         $script:hs2ActiveConsecutiveFailures = 0
         $script:hs2ActiveCurrentRetrySeconds = $HS2ActiveRetrySeconds
         $script:hs2UsbRecoveryAttempted = $false
+        $script:hs2UsbRecoveryContinuationPending = $false
         $script:hs2LConnectRecoveryAttempted = $false
         try {
             if (Save-HS2UsbTopologyBinding -Path $hs2UsbTopologyBindingPath) {
@@ -237,12 +247,29 @@ function Invoke-HS2ActiveMaintenance {
         }
 
         if ($usbPlan.Applicable) {
-            if (-not $script:hs2UsbRecoveryAttempted) {
-                $script:hs2UsbRecoveryAttempted = $true
+            $usbDispatch = Get-HS2UsbRecoveryDispatchDecision `
+                -RecoveryAttempted $script:hs2UsbRecoveryAttempted `
+                -ContinuationPending $script:hs2UsbRecoveryContinuationPending
+            if ($usbDispatch.Action -ne "Wait") {
+                $skipDedicatedHubRestart =
+                    $usbDispatch.Action -eq "RemoveExactChild"
+                # Consume the continuation before the bounded exact-child
+                # attempt.  It is restored only by the explicit post-restart
+                # topology-gap result below, so a broken device cannot cycle
+                # the dedicated hub indefinitely.
+                $script:hs2UsbRecoveryContinuationPending = $false
                 $usbRecovery = Invoke-HS2UsbRecovery `
-                    -BindingPath $hs2UsbTopologyBindingPath
+                    -BindingPath $hs2UsbTopologyBindingPath `
+                    -SkipDedicatedHubRestart:$skipDedicatedHubRestart
+                if ($usbRecovery.Attempted) {
+                    $script:hs2UsbRecoveryAttempted = $true
+                }
+                if ($usbRecovery.Reason -eq "topology-changed-after-hub-restart") {
+                    $script:hs2UsbRecoveryContinuationPending = $true
+                }
                 Write-WatchdogLog (
-                    "HS2 USB recovery attempted={0} recovered={1} reason={2} operations={3}" -f `
+                    "HS2 USB recovery phase={0} attempted={1} recovered={2} reason={3} operations={4}" -f `
+                        $usbDispatch.Action,
                         $usbRecovery.Attempted,
                         $usbRecovery.Recovered,
                         $usbRecovery.Reason,
@@ -292,6 +319,7 @@ function Set-ActiveDisplayState {
     $script:hs2ActiveConsecutiveFailures = 0
     $script:hs2ActiveCurrentRetrySeconds = $HS2ActiveRetrySeconds
     $script:hs2UsbRecoveryAttempted = $false
+    $script:hs2UsbRecoveryContinuationPending = $false
     $script:hs2LConnectRecoveryAttempted = $false
     Invoke-HS2ActiveMaintenance -Reason $Reason
 }
@@ -528,7 +556,7 @@ function Start-Stack {
     foreach ($candidatePath in $heartbeatPaths) {
         Remove-Item -LiteralPath $candidatePath -Force -ErrorAction SilentlyContinue
     }
-    Write-WatchdogLog ("start stack reason={0} root={1} port={2} interval={3}" -f $Reason, $Root, $Port, $IntervalMs)
+    Write-WatchdogLog ("start stack reason={0} root={1} port={2} interval={3} hybrid={4} altHelper={5}" -f $Reason, $Root, $Port, $IntervalMs, $HybridRefresh.IsPresent, $AltHelper.IsPresent)
     $arguments = @(
         "-NoProfile",
         "-ExecutionPolicy", "Bypass",
@@ -536,13 +564,23 @@ function Start-Stack {
         "-Root", $Root,
         "-Port", $Port,
         "-IntervalMs", [string]$IntervalMs,
+        "-SendTimeoutMs", [string]$SendTimeoutMs,
+        "-DiffSendTimeoutMs", [string]$DiffSendTimeoutMs,
+        "-MaxConsecutiveSendFailures", [string]$MaxConsecutiveSendFailures,
         "-FullResyncEveryFrames", [string]$FullResyncEveryFrames,
+        "-BaselineBrightness", [string]$ActiveBrightness,
         "-PreviewIntervalSeconds", [string]$PreviewIntervalSeconds,
         "-MaxStackLogBytes", [string]$MaxStackLogBytes,
         "-MaxStreamLogBytes", [string]$MaxStreamLogBytes,
         "-LogBackupCount", [string]$LogBackupCount,
         "-Worker"
     )
+    if ($HybridRefresh) {
+        $arguments += "-HybridRefresh"
+    }
+    if ($AltHelper) {
+        $arguments += "-AltHelper"
+    }
     $process = Start-Process -FilePath "powershell.exe" -ArgumentList $arguments -WindowStyle Hidden -PassThru
     Set-Content -LiteralPath $childPidPath -Value $process.Id -Encoding ASCII
     Write-WatchdogLog ("stack child pid={0}" -f $process.Id)
@@ -583,10 +621,64 @@ function Get-StreamHeartbeatHealth {
                 }
             }
             $transportMode = [string]$heartbeat.transport_mode
-            if ($transportMode -ne "verified_full_200") {
+            $expectedTransportMode = if ($HybridRefresh) { "hybrid_diff_204_full_200" } else { "verified_full_200" }
+            if ($transportMode -ne $expectedTransportMode) {
                 return [pscustomobject]@{
                     Healthy = $false
-                    Reason = ("transport-unverified mode={0}" -f $transportMode)
+                    Reason = ("transport-unverified mode={0} expected={1}" -f $transportMode, $expectedTransportMode)
+                }
+            }
+            if ($null -eq $heartbeat.send_attempted -or
+                $null -eq $heartbeat.send_ms -or
+                $null -eq $heartbeat.elapsed_ms -or
+                $null -eq $heartbeat.period_ms) {
+                return [pscustomobject]@{
+                    Healthy = $false
+                    Reason = "timing-missing"
+                }
+            }
+            $sendAttempted = [bool]$heartbeat.send_attempted
+            $sendMs = [int64]$heartbeat.send_ms
+            $elapsedMs = [int64]$heartbeat.elapsed_ms
+            $periodMs = [int64]$heartbeat.period_ms
+            if (-not $sendAttempted) {
+                return [pscustomobject]@{
+                    Healthy = $false
+                    Reason = "send-not-attempted"
+                }
+            }
+            if ($sendMs -lt 0 -or $elapsedMs -lt 0 -or $periodMs -lt 0) {
+                return [pscustomobject]@{
+                    Healthy = $false
+                    Reason = ("timing-invalid sendMs={0} elapsedMs={1} periodMs={2}" -f `
+                        $sendMs, $elapsedMs, $periodMs)
+                }
+            }
+            $sendLimitMs = $HeartbeatMaxSendMs
+            if ($HybridRefresh) {
+                $frameTransport = [string]$heartbeat.frame_transport
+                if ($frameTransport -ne "diff_204" -and $frameTransport -ne "full_200") {
+                    return [pscustomobject]@{
+                        Healthy = $false
+                        Reason = ("frame-transport-invalid mode={0}" -f $frameTransport)
+                    }
+                }
+                if ($frameTransport -eq "diff_204") {
+                    $sendLimitMs = $DiffSendTimeoutMs
+                }
+            }
+            if ($sendMs -gt $sendLimitMs) {
+                return [pscustomobject]@{
+                    Healthy = $false
+                    Reason = ("send-overrun sendMs={0} limitMs={1}" -f $sendMs, $sendLimitMs)
+                }
+            }
+            if ($elapsedMs -gt $HeartbeatMaxElapsedMs -or
+                $periodMs -gt $HeartbeatMaxPeriodMs) {
+                return [pscustomobject]@{
+                    Healthy = $false
+                    Reason = ("frame-overrun elapsedMs={0}/{1} periodMs={2}/{3}" -f `
+                        $elapsedMs, $HeartbeatMaxElapsedMs, $periodMs, $HeartbeatMaxPeriodMs)
                 }
             }
             return [pscustomobject]@{
@@ -661,6 +753,19 @@ if (-not $watchdogMutexCreated) {
 }
 
 Set-Content -LiteralPath $watchdogPidPath -Value $PID -Encoding ASCII
+try {
+    $watchdogProcess = Get-Process -Id $PID -ErrorAction Stop
+    if ($watchdogProcess.PriorityClass -in @(
+        [Diagnostics.ProcessPriorityClass]::Idle,
+        [Diagnostics.ProcessPriorityClass]::BelowNormal,
+        [Diagnostics.ProcessPriorityClass]::Normal)) {
+        $watchdogProcess.PriorityClass = [Diagnostics.ProcessPriorityClass]::AboveNormal
+    }
+    Write-WatchdogLog ("watchdog process priority={0}" -f $watchdogProcess.PriorityClass)
+}
+catch {
+    Write-WatchdogLog ("watchdog priority warning: {0}" -f $_.Exception.Message)
+}
 
 foreach ($eventSourceId in @($powerSourceId, $shutdownSourceId)) {
     Get-EventSubscriber -SourceIdentifier $eventSourceId -ErrorAction SilentlyContinue |

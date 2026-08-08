@@ -10,6 +10,8 @@ public static class OverlayPolicies
         new(64, 48, 36, 2);
     private static readonly TypographyScale PhoneMessage =
         new(64, 48, 36, 0);
+    private static readonly TypographyScale VerificationCode =
+        new(112, 0, 28, 0);
     private static readonly TypographyScale Critical =
         new(76, 48, 36, 2);
 
@@ -51,6 +53,11 @@ public static class OverlayPolicies
                 PhoneMessage),
             [OverlayKind.PhoneDynamic] = Timed(
                 OverlayVisualTier.StackedNotification, 60, 850, Phone),
+            [OverlayKind.PhoneVerificationCode] = Timed(
+                OverlayVisualTier.Crystal,
+                15,
+                930,
+                VerificationCode),
             [OverlayKind.PhoneCall] = Active(
                 OverlayVisualTier.Emphasis, 950, Critical),
             [OverlayKind.PhoneTransfer] = Active(

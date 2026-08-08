@@ -48,7 +48,10 @@ PHYSICAL_DISK_TOPOLOGY_FAILURE_TTL_SECONDS = 10.0
 SMALL_REMOVABLE_DISK_BYTES = 32_000_000_000
 NETWORK_LATENCY_TTL_SECONDS = 2.0
 NETWORK_PING_TARGET = "223.5.5.5"
-TIMEAUDIT_CACHE_TTL_SECONDS = 2.0
+# The collector writes the hardware/FPS lane every second. Keep this cache
+# shorter than one display tick so a 1 Hz renderer never deliberately carries
+# the same database snapshot for a second extra tick.
+TIMEAUDIT_CACHE_TTL_SECONDS = 0.75
 TIMEAUDIT_CONNECT_TIMEOUT_SECONDS = 1.0
 TIMEAUDIT_QUERY_TIMEOUT_SECONDS = 1.0
 FPS_SAMPLE_FRESH_SECONDS = 10.0

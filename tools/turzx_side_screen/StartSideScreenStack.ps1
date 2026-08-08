@@ -2,11 +2,17 @@ param(
     [string]$Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path,
     [string]$Port = "COM7",
     [int]$IntervalMs = 3000,
-    [int]$FullResyncEveryFrames = 300,
+    [ValidateRange(3000, 60000)][int]$SendTimeoutMs = 10000,
+    [ValidateRange(100, 5000)][int]$DiffSendTimeoutMs = 900,
+    [ValidateRange(1, 10)][int]$MaxConsecutiveSendFailures = 1,
+    [int]$FullResyncEveryFrames = 0,
+    [ValidateRange(0, 255)][int]$BaselineBrightness = 170,
     [int]$PreviewIntervalSeconds = 45,
     [int64]$MaxStackLogBytes = 1048576,
     [int64]$MaxStreamLogBytes = 5242880,
     [ValidateRange(1, 32)][int]$LogBackupCount = 3,
+    [switch]$HybridRefresh,
+    [switch]$AltHelper,
     [switch]$Worker
 )
 
@@ -89,21 +95,32 @@ if (-not $Worker) {
         Start-Sleep -Seconds 2
     }
 
-    Write-StackLog ("delegating to watchdog root={0} port={1} interval={2}" -f $Root, $Port, $IntervalMs)
-    Start-Process -FilePath "powershell.exe" `
-        -ArgumentList @(
+    Write-StackLog ("delegating to watchdog root={0} port={1} interval={2} hybrid={3}" -f $Root, $Port, $IntervalMs, $HybridRefresh.IsPresent)
+    $watchdogArguments = @(
             "-NoProfile",
             "-ExecutionPolicy", "Bypass",
             "-File", $watchdog,
             "-Root", $Root,
             "-Port", $Port,
             "-IntervalMs", [string]$IntervalMs
+            "-SendTimeoutMs", [string]$SendTimeoutMs
+            "-DiffSendTimeoutMs", [string]$DiffSendTimeoutMs
+            "-MaxConsecutiveSendFailures", [string]$MaxConsecutiveSendFailures
             "-FullResyncEveryFrames", [string]$FullResyncEveryFrames
+            "-ActiveBrightness", [string]$BaselineBrightness
             "-PreviewIntervalSeconds", [string]$PreviewIntervalSeconds
             "-MaxStackLogBytes", [string]$MaxStackLogBytes
             "-MaxStreamLogBytes", [string]$MaxStreamLogBytes
             "-LogBackupCount", [string]$LogBackupCount
-        ) `
+        )
+    if ($HybridRefresh) {
+        $watchdogArguments += "-HybridRefresh"
+    }
+    if ($AltHelper) {
+        $watchdogArguments += "-AltHelper"
+    }
+    Start-Process -FilePath "powershell.exe" `
+        -ArgumentList $watchdogArguments `
         -WorkingDirectory $scriptDir `
         -WindowStyle Hidden | Out-Null
     exit 0
@@ -173,7 +190,7 @@ function Stop-ProcessByCommandLine {
         }
 }
 
-Write-StackLog ("starting stack root={0} port={1} interval={2}" -f $Root, $Port, $IntervalMs)
+Write-StackLog ("starting stack root={0} port={1} interval={2} hybrid={3} altHelper={4}" -f $Root, $Port, $IntervalMs, $HybridRefresh.IsPresent, $AltHelper.IsPresent)
 
 # Keep the custom side-screen stack authoritative.
 Get-Process "TURZX", "TURZX.weatherfix", "TURZX.weatherfix.metrics" -ErrorAction SilentlyContinue |
@@ -204,9 +221,9 @@ Start-Sleep -Milliseconds 900
 
 $streamScript = Join-Path $scriptDir "StartVideoStream.ps1"
 try {
-    # Command 204 can accept host writes while the physical panel stops refreshing.
-    # Production therefore stays on the verified command-200 full-frame path.
-    & $streamScript -Root $Root -Port $Port -IntervalMs $IntervalMs -Frames 0 -FullResyncEveryFrames $FullResyncEveryFrames -PreviewIntervalSeconds $PreviewIntervalSeconds -PythonPath $python *>&1 |
+    # HybridRefresh is explicit and reversible: it uses a vendor-shaped command-200
+    # baseline plus bounded command-204 deltas. The default remains full command 200.
+    & $streamScript -Root $Root -Port $Port -IntervalMs $IntervalMs -Frames 0 -SendTimeoutMs $SendTimeoutMs -DiffSendTimeoutMs $DiffSendTimeoutMs -MaxConsecutiveSendFailures $MaxConsecutiveSendFailures -FullResyncEveryFrames $FullResyncEveryFrames -BaselineBrightness $BaselineBrightness -PreviewIntervalSeconds $PreviewIntervalSeconds -PythonPath $python -HybridRefresh:$HybridRefresh -AltHelper:$AltHelper *>&1 |
         ForEach-Object {
             Write-BoundedLogLine -Path $stdoutPath -Message ([string]$_) -MaxBytes $MaxStreamLogBytes -BackupCount $LogBackupCount
         }

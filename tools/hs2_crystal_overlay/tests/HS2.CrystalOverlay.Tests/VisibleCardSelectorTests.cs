@@ -158,4 +158,48 @@ public sealed class VisibleCardSelectorTests
         Assert.Contains("usb", ids);
         Assert.Contains("network", ids);
     }
+
+    [Fact]
+    public void VerificationCodeSurvivesMaximumPressureWithoutUsingPhoneQuota()
+    {
+        var scheduler = new OverlayScheduler();
+        scheduler.Publish(OverlayRequest.Active(
+            "media", OverlayKind.MediaActive, OverlaySource.NetEase, "歌曲"), Now);
+        scheduler.Publish(OverlayRequest.Active(
+            "game", OverlayKind.GameActive, OverlaySource.Steam, "游戏"), Now);
+        scheduler.Publish(OverlayRequest.Active(
+            "alert", OverlayKind.HardwareAlert, OverlaySource.Hardware, "硬件告警"), Now);
+        scheduler.Publish(OverlayRequest.Active(
+            "task", OverlayKind.ImportantTask, OverlaySource.Task, "文件处理"), Now);
+        scheduler.Publish(OverlayRequest.Timed(
+            "verification",
+            OverlayKind.PhoneVerificationCode,
+            OverlaySource.PhoneLink,
+            "482731",
+            dedupKey: "verification-code:482731",
+            visual: new OverlayVisualData(VerificationCode: "482731")), Now);
+        for (var index = 1; index <= 3; index++)
+        {
+            scheduler.Publish(OverlayRequest.Timed(
+                $"phone-{index}",
+                OverlayKind.PhoneNotification,
+                OverlaySource.XiaomiHyperConnect,
+                $"手机通知 {index}"), Now.AddMilliseconds(index));
+        }
+
+        var frame = scheduler.GetFrame(
+            Now.AddSeconds(1),
+            maxVisibleCards: 6,
+            maxVisibleNotifications: 3);
+
+        Assert.Equal(6, frame.VisibleCards.Count);
+        Assert.Contains(frame.VisibleCards, item =>
+            item.Request.Kind == OverlayKind.PhoneVerificationCode);
+        Assert.Single(frame.VisibleCards, item =>
+            item.Request.Kind == OverlayKind.PhoneVerificationCode);
+        Assert.Contains(frame.NotificationCards, item =>
+            item.Request.EventId == "phone-3");
+        Assert.DoesNotContain(frame.NotificationCards, item =>
+            item.Request.Kind == OverlayKind.PhoneVerificationCode);
+    }
 }

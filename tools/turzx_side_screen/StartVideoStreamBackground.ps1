@@ -2,6 +2,11 @@
     [string]$Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path,
     [string]$Port = "COM7",
     [int]$IntervalMs = 3000,
+    [ValidateRange(3000, 60000)][int]$SendTimeoutMs = 10000,
+    [ValidateRange(100, 5000)][int]$DiffSendTimeoutMs = 900,
+    [ValidateRange(1, 10)][int]$MaxConsecutiveSendFailures = 1,
+    [int]$FullResyncEveryFrames = 0,
+    [switch]$HybridRefresh,
     [switch]$NoDiff,
     [switch]$ExperimentalDiff,
     [switch]$AltHelper
@@ -33,8 +38,15 @@ $arguments = @(
     "-Root", $Root,
     "-Port", $Port,
     "-IntervalMs", [string]$IntervalMs,
+    "-SendTimeoutMs", [string]$SendTimeoutMs,
+    "-DiffSendTimeoutMs", [string]$DiffSendTimeoutMs,
+    "-MaxConsecutiveSendFailures", [string]$MaxConsecutiveSendFailures,
+    "-FullResyncEveryFrames", [string]$FullResyncEveryFrames,
     "-Frames", "0"
 )
+if ($HybridRefresh) {
+    $arguments += "-HybridRefresh"
+}
 if ($ExperimentalDiff -and !$NoDiff) {
     $arguments += @("-Diff", "-AllowUnverifiedDifferentialProtocol")
 }

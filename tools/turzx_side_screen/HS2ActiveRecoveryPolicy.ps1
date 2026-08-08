@@ -94,6 +94,44 @@ function Get-HS2UsbRecoveryPlan {
     }
 }
 
+function Test-HS2UsbRecoveryPlanContinuity {
+    param(
+        [Parameter(Mandatory = $true)][object]$InitialPlan,
+        [Parameter(Mandatory = $true)][object]$FreshPlan
+    )
+
+    # A hub restart legitimately replaces the transient VID_0000 instance id.
+    # Both plans have already proved there is exactly one Code 43 child on port
+    # 2 of the previously verified dedicated HS2 hub, so requiring the old
+    # ephemeral child id makes the safe recovery path fail after every reboot.
+    return (
+        [bool]$InitialPlan.Applicable -and
+        [bool]$FreshPlan.Applicable -and
+        [string]$FreshPlan.HubInstanceId -ieq [string]$InitialPlan.HubInstanceId
+    )
+}
+
+function Get-HS2UsbRecoveryDispatchDecision {
+    param(
+        [Parameter(Mandatory = $true)][bool]$RecoveryAttempted,
+        [Parameter(Mandatory = $true)][bool]$ContinuationPending
+    )
+
+    if (-not $RecoveryAttempted) {
+        return [pscustomobject]@{ Action = "RestartDedicatedHub" }
+    }
+
+    if ($ContinuationPending) {
+        # The first pass already restarted the exact verified hub.  If Windows
+        # published the exact port-two Code 43 node only after that bounded
+        # wait, resume at the narrowly scoped child-removal phase instead of
+        # repeatedly power-cycling the hub.
+        return [pscustomobject]@{ Action = "RemoveExactChild" }
+    }
+
+    return [pscustomobject]@{ Action = "Wait" }
+}
+
 function Read-HS2UsbTopologyBinding {
     param([Parameter(Mandatory = $true)][string]$Path)
 
@@ -270,6 +308,43 @@ function Get-HS2UsbRecoverySnapshot {
     }
 }
 
+function Wait-HS2UsbRecoveryPlan {
+    param(
+        [Parameter(Mandatory = $true)][string]$BoundHubInstanceId,
+        [ValidateRange(1, 30)][int]$TimeoutSeconds = 10,
+        [ValidateRange(1, 5000)][int]$PollMilliseconds = 500,
+        [scriptblock]$SnapshotProvider = { Get-HS2UsbRecoverySnapshot },
+        [scriptblock]$DelayAction = {
+            param([int]$Milliseconds)
+            Start-Sleep -Milliseconds $Milliseconds
+        }
+    )
+
+    # A dedicated-hub restart can briefly remove the failed port node before
+    # Windows publishes its replacement.  Poll for the same already-verified
+    # hub + exact port-two Code 43 topology instead of consuming the one safe
+    # recovery attempt on a single transiently empty snapshot.
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    do {
+        $snapshot = & $SnapshotProvider
+        if ($null -ne $snapshot) {
+            $plan = Get-HS2UsbRecoveryPlan `
+                -BoundHubInstanceId $BoundHubInstanceId `
+                -Hubs @($snapshot.Hubs) `
+                -Children @($snapshot.Children)
+            if ($plan.Applicable) {
+                return $plan
+            }
+        }
+
+        if ([DateTime]::UtcNow -lt $deadline) {
+            & $DelayAction $PollMilliseconds
+        }
+    } while ([DateTime]::UtcNow -lt $deadline)
+
+    return $null
+}
+
 function Test-HS2UsbDisplayHealthy {
     $device = Get-PnpDevice -PresentOnly -ErrorAction Stop |
         Where-Object {
@@ -307,7 +382,8 @@ function Wait-HS2UsbDisplayHealthy {
 function Invoke-HS2UsbRecovery {
     param(
         [Parameter(Mandatory = $true)][string]$BindingPath,
-        [ValidateRange(1, 30)][int]$ReenumerationTimeoutSeconds = 10
+        [ValidateRange(1, 30)][int]$ReenumerationTimeoutSeconds = 10,
+        [switch]$SkipDedicatedHubRestart
     )
 
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -346,39 +422,41 @@ function Invoke-HS2UsbRecovery {
     }
 
     $operations = New-Object "System.Collections.Generic.List[string]"
-    $restart = Invoke-HS2PnPUtil -Arguments @("/restart-device", $plan.HubInstanceId)
-    [void]$operations.Add("RestartDedicatedHub")
-    if ($restart.ExitCode -ne 0) {
-        return [pscustomobject]@{
-            Attempted = $true
-            Recovered = $false
-            Reason = "dedicated-hub-restart-failed"
-            Operations = @($operations)
+    $freshPlan = $plan
+    if (-not $SkipDedicatedHubRestart) {
+        $restart = Invoke-HS2PnPUtil -Arguments @("/restart-device", $plan.HubInstanceId)
+        [void]$operations.Add("RestartDedicatedHub")
+        if ($restart.ExitCode -ne 0) {
+            return [pscustomobject]@{
+                Attempted = $true
+                Recovered = $false
+                Reason = "dedicated-hub-restart-failed"
+                Operations = @($operations)
+            }
         }
-    }
 
-    if (Wait-HS2UsbDisplayHealthy -TimeoutSeconds $ReenumerationTimeoutSeconds) {
-        return [pscustomobject]@{
-            Attempted = $true
-            Recovered = $true
-            Reason = "display-returned-after-hub-restart"
-            Operations = @($operations)
+        if (Wait-HS2UsbDisplayHealthy -TimeoutSeconds $ReenumerationTimeoutSeconds) {
+            return [pscustomobject]@{
+                Attempted = $true
+                Recovered = $true
+                Reason = "display-returned-after-hub-restart"
+                Operations = @($operations)
+            }
         }
-    }
 
-    $freshSnapshot = Get-HS2UsbRecoverySnapshot
-    $freshPlan = Get-HS2UsbRecoveryPlan `
-        -BoundHubInstanceId ([string]$binding.HubInstanceId) `
-        -Hubs $freshSnapshot.Hubs `
-        -Children $freshSnapshot.Children
-    if (-not $freshPlan.Applicable -or
-        $freshPlan.HubInstanceId -ine $plan.HubInstanceId -or
-        $freshPlan.ChildInstanceId -ine $plan.ChildInstanceId) {
-        return [pscustomobject]@{
-            Attempted = $true
-            Recovered = $false
-            Reason = "topology-changed-after-hub-restart"
-            Operations = @($operations)
+        $freshPlan = Wait-HS2UsbRecoveryPlan `
+            -BoundHubInstanceId ([string]$binding.HubInstanceId) `
+            -TimeoutSeconds $ReenumerationTimeoutSeconds
+        if ($null -eq $freshPlan -or
+            -not (Test-HS2UsbRecoveryPlanContinuity `
+                -InitialPlan $plan `
+                -FreshPlan $freshPlan)) {
+            return [pscustomobject]@{
+                Attempted = $true
+                Recovered = $false
+                Reason = "topology-changed-after-hub-restart"
+                Operations = @($operations)
+            }
         }
     }
 

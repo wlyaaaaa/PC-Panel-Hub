@@ -19,6 +19,9 @@ internal static class DemoSource
                 PublishMedia(publisher);
                 PublishLongNotification(publisher);
                 break;
+            case "verification":
+                PublishVerificationCode(publisher);
+                break;
             case "stack":
                 PublishMedia(publisher);
                 PublishNotificationBurst(publisher);
@@ -195,6 +198,23 @@ internal static class DemoSource
                 Eyebrow: "手机通知 / PHONE",
                 Subtitle: "小米妙享",
                 AccentHex: "#70F0B2")));
+    }
+
+    private static void PublishVerificationCode(
+        IOverlayPublisher publisher)
+    {
+        _ = publisher.Publish(OverlayRequest.Timed(
+            "phone-verification-code",
+            OverlayKind.PhoneVerificationCode,
+            OverlaySource.XiaomiHyperConnect,
+            "482731",
+            dedupKey: "verification-code:482731",
+            visual: new OverlayVisualData(
+                Eyebrow: "验证码 / CODE",
+                Subtitle: "账户安全",
+                Meta: "小米妙享",
+                AccentHex: "#70F0B2",
+                VerificationCode: "482731")));
     }
 
     private static void PublishCall(IOverlayPublisher publisher)

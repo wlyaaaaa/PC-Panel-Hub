@@ -12,6 +12,11 @@ namespace TURZX.SideScreen
         public const int Height = 1920;
         public const string DefaultDevCode = "VID_0525&PID_A4A7";
 
+        internal static ThreadPriority DesiredSenderThreadPriorityForTest()
+        {
+            return ThreadPriority.Highest;
+        }
+
         public static byte[] ConvertBitmapToFrameData(string root, Bitmap bitmap)
         {
             if (string.IsNullOrWhiteSpace(root))
@@ -80,6 +85,11 @@ namespace TURZX.SideScreen
                 throw new InvalidOperationException("Bitmap must be 480x1920; got " + bitmap.Width + "x" + bitmap.Height);
             }
 
+            if (timeoutMs <= 0)
+            {
+                throw new ArgumentOutOfRangeException("timeoutMs");
+            }
+
             if (string.IsNullOrWhiteSpace(devCode))
             {
                 devCode = DefaultDevCode;
@@ -87,69 +97,92 @@ namespace TURZX.SideScreen
 
             bool ok = false;
             string localMessage = "not started";
-            Thread thread = new Thread(delegate()
+            Bitmap senderBitmap = (Bitmap)bitmap.Clone();
+            Thread thread;
+            try
             {
-                try
+                thread = new Thread(delegate()
                 {
-                    Assembly asm = LoadTurzxAssembly(root);
-                    byte[] frameData = ConvertBitmapToFrameData(root, bitmap);
-
-                    Type driverType = asm.GetType("\u99DF", true);
-                    object driver = Activator.CreateInstance(driverType, new object[] { devCode });
-                    FieldInfo serialField = driverType.GetField("\u97D8", BindingFlags.Instance | BindingFlags.Public);
-                    if (serialField == null)
-                    {
-                        throw new MissingFieldException(driverType.FullName, "\u97D8");
-                    }
-
-                    object serial = serialField.GetValue(driver);
-                    MethodInfo open = serial.GetType().GetMethod("\u8A54", BindingFlags.Instance | BindingFlags.Public, null, new[] { typeof(string) }, null);
-                    if (open == null)
-                    {
-                        throw new MissingMethodException(serial.GetType().FullName, "\u8A54(string)");
-                    }
-
-                    bool opened = (bool)open.Invoke(serial, new object[] { comPort });
-                    if (!opened)
-                    {
-                        localMessage = "FAILED - TURZX serial helper could not open " + comPort;
-                        return;
-                    }
-
                     try
                     {
-                        MethodInfo send = driverType.GetMethod("\u8A54", BindingFlags.Instance | BindingFlags.Public, null, new[] { typeof(byte[]), typeof(int), typeof(bool) }, null);
-                        if (send == null)
+                        Assembly asm = LoadTurzxAssembly(root);
+                        byte[] frameData = ConvertBitmapToFrameData(root, senderBitmap);
+
+                        Type driverType = asm.GetType("\u99DF", true);
+                        object driver = Activator.CreateInstance(driverType, new object[] { devCode });
+                        FieldInfo serialField = driverType.GetField("\u97D8", BindingFlags.Instance | BindingFlags.Public);
+                        if (serialField == null)
                         {
-                            throw new MissingMethodException(driverType.FullName, "\u8A54(byte[],int,bool)");
+                            throw new MissingFieldException(driverType.FullName, "\u97D8");
                         }
 
-                        send.Invoke(driver, new object[] { frameData, frameData.Length, false });
+                        object serial = serialField.GetValue(driver);
+                        MethodInfo open = serial.GetType().GetMethod("\u8A54", BindingFlags.Instance | BindingFlags.Public, null, new[] { typeof(string) }, null);
+                        if (open == null)
+                        {
+                            throw new MissingMethodException(serial.GetType().FullName, "\u8A54(string)");
+                        }
+
+                        bool opened = (bool)open.Invoke(serial, new object[] { comPort });
+                        if (!opened)
+                        {
+                            localMessage = "FAILED - TURZX serial helper could not open " + comPort;
+                            return;
+                        }
+
+                        try
+                        {
+                            MethodInfo send = driverType.GetMethod("\u8A54", BindingFlags.Instance | BindingFlags.Public, null, new[] { typeof(byte[]), typeof(int), typeof(bool) }, null);
+                            if (send == null)
+                            {
+                                throw new MissingMethodException(driverType.FullName, "\u8A54(byte[],int,bool)");
+                            }
+
+                            send.Invoke(driver, new object[] { frameData, frameData.Length, false });
+                        }
+                        finally
+                        {
+                            MethodInfo close = serial.GetType().GetMethod("\u8FBC", BindingFlags.Instance | BindingFlags.Public, null, Type.EmptyTypes, null);
+                            if (close != null)
+                            {
+                                close.Invoke(serial, null);
+                            }
+                        }
+
+                        ok = true;
+                        localMessage = "OK frameBytes=" + frameData.Length;
+                    }
+                    catch (TargetInvocationException ex)
+                    {
+                        localMessage = "EXCEPTION - " + (ex.InnerException == null ? ex.Message : ex.InnerException.Message);
+                    }
+                    catch (Exception ex)
+                    {
+                        localMessage = "EXCEPTION - " + ex.GetType().Name + ": " + ex.Message;
                     }
                     finally
                     {
-                        MethodInfo close = serial.GetType().GetMethod("\u8FBC", BindingFlags.Instance | BindingFlags.Public, null, Type.EmptyTypes, null);
-                        if (close != null)
-                        {
-                            close.Invoke(serial, null);
-                        }
+                        senderBitmap.Dispose();
                     }
+                });
 
-                    ok = true;
-                    localMessage = "OK frameBytes=" + frameData.Length;
-                }
-                catch (TargetInvocationException ex)
+                thread.IsBackground = true;
+                try
                 {
-                    localMessage = "EXCEPTION - " + (ex.InnerException == null ? ex.Message : ex.InnerException.Message);
+                    thread.Priority = DesiredSenderThreadPriorityForTest();
                 }
-                catch (Exception ex)
+                catch
                 {
-                    localMessage = "EXCEPTION - " + ex.GetType().Name + ": " + ex.Message;
+                    // The bounded send timeout still protects the stream if the OS
+                    // refuses a priority change.
                 }
-            });
-
-            thread.IsBackground = true;
-            thread.Start();
+                thread.Start();
+            }
+            catch
+            {
+                senderBitmap.Dispose();
+                throw;
+            }
             if (!thread.Join(timeoutMs))
             {
                 message = "TIMEOUT after " + timeoutMs + " ms";
@@ -171,8 +204,11 @@ namespace TURZX.SideScreen
             private readonly MethodInfo _frameDiffAlt;
             private readonly MethodInfo _sendCommand;
             private readonly MethodInfo _sendBody;
+            private readonly MethodInfo _prime;
+            private readonly MethodInfo _setBrightness;
             private readonly MethodInfo _close;
             private bool _disposed;
+            private volatile bool _abandoned;
 
             public DiffSession(string root, string comPort, string devCode)
             {
@@ -267,6 +303,9 @@ namespace TURZX.SideScreen
                     throw new MissingMethodException(_serial.GetType().FullName, "\u8A54(byte[],int)");
                 }
 
+                _prime = _serial.GetType().GetMethod("\u8E62", BindingFlags.Instance | BindingFlags.Public, null, Type.EmptyTypes, null);
+                _setBrightness = driverType.GetMethod("\u931D", BindingFlags.Instance | BindingFlags.Public, null, new[] { typeof(byte) }, null);
+
                 _close = _serial.GetType().GetMethod("\u8FBC", BindingFlags.Instance | BindingFlags.Public, null, Type.EmptyTypes, null);
             }
 
@@ -281,6 +320,58 @@ namespace TURZX.SideScreen
                 ThrowIfDisposed();
                 if (frameData == null) throw new ArgumentNullException("frameData");
                 _sendFull.Invoke(_driver, new object[] { frameData, frameData.Length, false });
+            }
+
+            public bool SendFullWithTimeout(
+                byte[] frameData,
+                int timeoutMs,
+                int repeatCount,
+                int repeatDelayMs,
+                bool primeBaseline,
+                byte brightness,
+                out string message)
+            {
+                ThrowIfDisposed();
+                if (frameData == null) throw new ArgumentNullException("frameData");
+                if (timeoutMs <= 0) throw new ArgumentOutOfRangeException("timeoutMs");
+                if (repeatCount <= 0) throw new ArgumentOutOfRangeException("repeatCount");
+                if (repeatDelayMs < 0) throw new ArgumentOutOfRangeException("repeatDelayMs");
+
+                return RunBoundedSend(delegate()
+                {
+                    if (primeBaseline)
+                    {
+                        if (_prime == null)
+                        {
+                            throw new MissingMethodException(_serial.GetType().FullName, "\u8E62()");
+                        }
+                        if (_setBrightness == null)
+                        {
+                            throw new MissingMethodException(_driver.GetType().FullName, "\u931D(byte)");
+                        }
+
+                        // Match the vendor's 8.8-inch baseline lifecycle: raw
+                        // 0x2C priming, brightness restore, then duplicate full
+                        // command-200 frames before starting command 204.
+                        _prime.Invoke(_serial, null);
+                        Thread.Sleep(10);
+                        _setBrightness.Invoke(_driver, new object[] { brightness });
+                        Thread.Sleep(100);
+                    }
+
+                    for (int repeat = 0; repeat < repeatCount; repeat++)
+                    {
+                        _sendFull.Invoke(_driver, new object[] { frameData, frameData.Length, false });
+                        if (repeat + 1 < repeatCount && repeatDelayMs > 0)
+                        {
+                            Thread.Sleep(repeatDelayMs);
+                        }
+                    }
+                    if (primeBaseline)
+                    {
+                        Thread.Sleep(10);
+                    }
+                }, timeoutMs, "FULL", out message);
             }
 
             public int SendDiff(byte[] previousFrameData, byte[] currentFrameData, long sequence, bool swapOrder, bool flag)
@@ -306,12 +397,104 @@ namespace TURZX.SideScreen
                 return result == null ? 0 : System.Convert.ToInt32(result);
             }
 
+            public bool SendDiffWithTimeout(
+                byte[] previousFrameData,
+                byte[] currentFrameData,
+                long sequence,
+                bool swapOrder,
+                bool flag,
+                bool useAltHelper,
+                int timeoutMs,
+                out int result,
+                out string message)
+            {
+                ThrowIfDisposed();
+                if (previousFrameData == null) throw new ArgumentNullException("previousFrameData");
+                if (currentFrameData == null) throw new ArgumentNullException("currentFrameData");
+                if (timeoutMs <= 0) throw new ArgumentOutOfRangeException("timeoutMs");
+
+                int localResult = 0;
+                bool ok = RunBoundedSend(delegate()
+                {
+                    localResult = SendDiff(
+                        previousFrameData,
+                        currentFrameData,
+                        sequence,
+                        swapOrder,
+                        flag,
+                        useAltHelper);
+                }, timeoutMs, "DIFF", out message);
+                result = localResult;
+                return ok;
+            }
+
+            private bool RunBoundedSend(Action send, int timeoutMs, string operation, out string message)
+            {
+                Exception workerError = null;
+                Thread worker = null;
+                try
+                {
+                    worker = new Thread(delegate()
+                    {
+                        try
+                        {
+                            send();
+                        }
+                        catch (Exception ex)
+                        {
+                            workerError = ex;
+                        }
+                    });
+                    worker.IsBackground = true;
+                    try
+                    {
+                        worker.Priority = DesiredSenderThreadPriorityForTest();
+                    }
+                    catch
+                    {
+                        // The timeout remains authoritative if the OS refuses
+                        // the requested managed thread priority.
+                    }
+                    worker.Start();
+                }
+                catch
+                {
+                    throw;
+                }
+
+                if (!worker.Join(timeoutMs))
+                {
+                    // Never close or reuse a serial object while its writer may
+                    // still be blocked. The caller exits this process; Windows
+                    // then releases the abandoned COM handle atomically.
+                    _abandoned = true;
+                    message = operation + " TIMEOUT after " + timeoutMs + " ms";
+                    return false;
+                }
+
+                if (workerError != null)
+                {
+                    Exception detail = workerError is TargetInvocationException && workerError.InnerException != null
+                        ? workerError.InnerException
+                        : workerError;
+                    message = operation + " EXCEPTION - " + detail.GetType().Name + ": " + detail.Message;
+                    return false;
+                }
+
+                message = operation + " OK";
+                return true;
+            }
+
             private int SendDiffCommand204(byte[] previousFrameData, byte[] currentFrameData, long sequence, bool swapOrder, bool useAltHelper)
             {
                 byte[] from = swapOrder ? currentFrameData : previousFrameData;
                 byte[] to = swapOrder ? previousFrameData : currentFrameData;
                 object[] args = new object[] { from, to, 0, 4, 0, 65000 };
-                MethodInfo helper = useAltHelper && _frameDiffAlt != null ? _frameDiffAlt : _frameDiff;
+                if (useAltHelper && _frameDiffAlt == null)
+                {
+                    throw new MissingMethodException("Requested alternate TURZX diff helper is unavailable.");
+                }
+                MethodInfo helper = useAltHelper ? _frameDiffAlt : _frameDiff;
                 byte[] payload = (byte[])helper.Invoke(null, args);
                 int bodyLength = System.Convert.ToInt32(args[4]);
                 if (payload == null)
@@ -359,6 +542,10 @@ namespace TURZX.SideScreen
                 }
 
                 _disposed = true;
+                if (_abandoned)
+                {
+                    return;
+                }
                 if (_close != null)
                 {
                     _close.Invoke(_serial, null);
@@ -367,7 +554,7 @@ namespace TURZX.SideScreen
 
             private void ThrowIfDisposed()
             {
-                if (_disposed)
+                if (_disposed || _abandoned)
                 {
                     throw new ObjectDisposedException("DiffSession");
                 }

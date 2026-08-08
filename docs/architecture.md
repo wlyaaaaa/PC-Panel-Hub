@@ -23,7 +23,16 @@ TURZX SideScreen is intentionally split into small local processes:
 4. `TURZX.SideScreen.Stream.exe`
    - Fetches snapshots with a short timeout and reuses the last good snapshot if metrics are slow.
    - Renders 480x1920 bitmaps with `System.Drawing`.
-   - Sends verified full frames over COM7. TURZX command `204` differential frames remain experimental and are blocked by production entrypoints.
+   - Keeps verified command `200` as the conservative 3-second mode.
+   - Provides an explicit hybrid candidate for the required 1Hz clock: vendor-shaped
+     priming/brightness/two-frame command-200 baseline, followed by bounded command-204
+     deltas on one persistent COM session. The default hybrid configuration does not
+     interrupt the clock with periodic full frames; failures exit and rebuild the session.
+   - Runs at `AboveNormal` process/thread priority while the serial sender thread uses
+     `Highest`; neither the process nor the sender uses realtime scheduling.
+   - Writes the diagnostic PNG on a low-priority, single-flight background worker after
+     the frame send. Slow PNG encoding or file replacement can be dropped, but cannot
+     block the live panel stream.
 
 5. `StartSideScreenStack.ps1`
    - Starts/stops the full stack.
@@ -33,8 +42,21 @@ TURZX SideScreen is intentionally split into small local processes:
 
 ## Data Freshness
 
-- Main metrics sampling target: `1000ms` by default. Verified full-frame transfers are paced at `3000ms`, leaving COM7 idle headroom after the measured ~2.3s send instead of saturating the device continuously.
+- Main metrics sampling target: `1000ms`. Sources that are too expensive or inherently
+  slower (notably top-process ranking and some TimeAudit data) keep their own `3s` cadence.
+- Hybrid rendering is forced to `1000ms`; typical command-204 host writes are tens of
+  milliseconds and have a dedicated `900ms` bound. Verified full-frame fallback remains
+  `3000ms`, leaving COM7 idle headroom after the measured ~2.3s send.
+- A full-frame send has a `10000ms` bound. The first timeout or send failure exits the
+  worker so the watchdog can reopen the process and COM port instead of leaving a hung
+  sender alive for minutes.
+- Stream heartbeats include transport mode, per-frame transport, whether a send was attempted,
+  and its duration. The watchdog
+  also rejects send, frame, and period overruns, so a process that is alive but no longer
+  meeting the panel cadence is not treated as healthy.
 - The header clock is rendered from local Beijing time in the C# renderer, not from the metrics snapshot cache.
+- A successful host write is not a device ACK. Physical 1Hz/freeze acceptance remains a
+  visual hardware check until the vendor exposes a trustworthy panel-status response.
 - Metrics fetches are capped at a short timeout; stale hardware values are preferable to a visibly stalled screen.
 - Top process ranking refresh: `3s`.
 - Weather refresh: cached and much slower.

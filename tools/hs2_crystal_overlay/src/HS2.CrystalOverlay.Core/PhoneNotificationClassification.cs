@@ -7,6 +7,7 @@ public enum PhoneNotificationCategory
 {
     Ordinary,
     Dynamic,
+    VerificationCode,
     Call,
     Transfer,
 }
@@ -41,6 +42,14 @@ public static partial class PhoneNotificationClassifier
             ActiveCallBodyText().IsMatch(bodyText))
         {
             return PhoneNotificationCategory.Call;
+        }
+
+        if (PhoneVerificationCodeDetector.TryExtract(
+                titleText,
+                bodyText,
+                out _))
+        {
+            return PhoneNotificationCategory.VerificationCode;
         }
 
         if (TransferText().IsMatch(text))

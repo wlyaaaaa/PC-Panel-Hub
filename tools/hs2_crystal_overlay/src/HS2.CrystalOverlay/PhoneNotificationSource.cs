@@ -178,7 +178,8 @@ internal sealed class PhoneNotificationSourceCoordinator : IDisposable
                 () => publisher.Publish(request));
             if (request.IsActive &&
                 request.Kind is OverlayKind.PhoneNotification or
-                    OverlayKind.PhoneDynamic)
+                    OverlayKind.PhoneDynamic or
+                    OverlayKind.PhoneVerificationCode)
             {
                 RuntimeLog.Write(
                     $"Phone notification event: " +

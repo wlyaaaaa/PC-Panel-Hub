@@ -3,14 +3,18 @@
     [string]$Port = "COM7",
     [int]$IntervalMs = 3000,
     [int]$Frames = 0,
-    [int]$MaxConsecutiveSendFailures = 5,
-    [int]$FullResyncEveryFrames = 300,
+    [ValidateRange(3000, 60000)][int]$SendTimeoutMs = 10000,
+    [ValidateRange(100, 5000)][int]$DiffSendTimeoutMs = 900,
+    [ValidateRange(1, 10)][int]$MaxConsecutiveSendFailures = 1,
+    [int]$FullResyncEveryFrames = 0,
+    [ValidateRange(0, 255)][int]$BaselineBrightness = 170,
     [int]$PreviewIntervalSeconds = 45,
     [string]$PreviewDir,
     [string]$PythonPath,
     [string]$ExecutablePath,
     [switch]$Sample,
     [switch]$DryRun,
+    [switch]$HybridRefresh,
     [switch]$Diff,
     [switch]$AllowUnverifiedDifferentialProtocol,
     [switch]$AltHelper
@@ -21,6 +25,9 @@ $ErrorActionPreference = "Stop"
 
 if ($Diff -and -not $DryRun -and -not $AllowUnverifiedDifferentialProtocol) {
     throw "Live differential command 204 is unverified. Production must use the full-frame transport."
+}
+if ($HybridRefresh -and $Diff) {
+    throw "HybridRefresh is a distinct guarded mode; do not combine it with the legacy Diff switch."
 }
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -232,9 +239,10 @@ if (!$Sample -and !$DryRun) {
 }
 
 try {
-    $argsList = @("--root", $Root, "--port", $Port, "--interval-ms", [string]$IntervalMs, "--frames", [string]$Frames, "--max-consecutive-send-failures", [string]$MaxConsecutiveSendFailures, "--full-resync-every-frames", [string]$FullResyncEveryFrames, "--preview-dir", $PreviewDir, "--preview-interval-seconds", [string]$PreviewIntervalSeconds)
+    $argsList = @("--root", $Root, "--port", $Port, "--interval-ms", [string]$IntervalMs, "--frames", [string]$Frames, "--send-timeout-ms", [string]$SendTimeoutMs, "--diff-send-timeout-ms", [string]$DiffSendTimeoutMs, "--baseline-brightness", [string]$BaselineBrightness, "--max-consecutive-send-failures", [string]$MaxConsecutiveSendFailures, "--full-resync-every-frames", [string]$FullResyncEveryFrames, "--preview-dir", $PreviewDir, "--preview-interval-seconds", [string]$PreviewIntervalSeconds)
     if ($Sample) { $argsList += "--sample" }
     if ($DryRun) { $argsList += "--dry-run" }
+    if ($HybridRefresh) { $argsList += "--hybrid-refresh" }
     if ($Diff) { $argsList += "--diff" }
     if ($AllowUnverifiedDifferentialProtocol) { $argsList += "--allow-unverified-diff" }
     if ($AltHelper) { $argsList += "--alt-helper" }

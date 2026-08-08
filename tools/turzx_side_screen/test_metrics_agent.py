@@ -1500,6 +1500,10 @@ class MetricsAgentTests(unittest.TestCase):
         self.assertAlmostEqual(2.4, helper._loop_sleep_seconds(10.0, 10.6, 3.0), places=2)
         self.assertAlmostEqual(0.2, helper._loop_sleep_seconds(10.0, 13.5, 3.0), places=2)
 
+    def test_timeaudit_cache_ttl_allows_one_second_display_refresh(self):
+        self.assertGreater(metrics_agent.TIMEAUDIT_CACHE_TTL_SECONDS, 0.0)
+        self.assertLess(metrics_agent.TIMEAUDIT_CACHE_TTL_SECONDS, 1.0)
+
     def test_fps_snapshot_cold_cache_reports_connecting_not_idle(self):
         with patch.object(
             metrics_agent,

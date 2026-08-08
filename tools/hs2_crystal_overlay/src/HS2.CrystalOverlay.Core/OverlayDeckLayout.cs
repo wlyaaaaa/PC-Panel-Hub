@@ -7,6 +7,7 @@ public enum OverlayCardKind
     Activity,
     Progress,
     Transient,
+    Verification,
     Alert,
     Generic,
 }
@@ -436,6 +437,12 @@ public static class CompositionPlanner
                 SlotKind.Side => 360,
                 _ => 140,
             },
+            OverlayCardKind.Verification => slot switch
+            {
+                SlotKind.FrontWide => 80,
+                SlotKind.Side => -2000,
+                _ => 500,
+            },
             OverlayCardKind.Alert => slot switch
             {
                 SlotKind.FrontWide => 300,
@@ -554,6 +561,7 @@ public static class CompositionPlanner
             OverlayCardKind.Progress => 240,
             OverlayCardKind.Notification => 260,
             OverlayCardKind.Transient => 190,
+            OverlayCardKind.Verification => 190,
             OverlayCardKind.Alert => 240,
             _ => 220,
         };

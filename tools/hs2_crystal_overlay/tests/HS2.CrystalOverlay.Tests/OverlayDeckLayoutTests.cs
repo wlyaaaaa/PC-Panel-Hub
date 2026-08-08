@@ -288,6 +288,122 @@ public sealed class OverlayDeckLayoutTests
     }
 
     [Fact]
+    public void VerificationCodeStaysOnReadableFrontUnderMaximumPressure()
+    {
+        var plan = CompositionPlanner.Plan(
+            Hs2Display,
+            [
+                new(
+                    "verification",
+                    OverlayCardKind.Verification,
+                    0,
+                    OverlayCardWidthPreference.Compact,
+                    OverlayCardPlacementPreference.BottomLeft),
+                Phone("phone-latest", 0),
+                Phone("phone-second", 1),
+                new(
+                    "alert",
+                    OverlayCardKind.Alert,
+                    3,
+                    OverlayCardWidthPreference.Wide),
+                new(
+                    "game",
+                    OverlayCardKind.Activity,
+                    4,
+                    OverlayCardWidthPreference.Wide),
+                new(
+                    "media",
+                    OverlayCardKind.Media,
+                    5,
+                    OverlayCardWidthPreference.Wide),
+            ]);
+
+        var verification = Assert.Single(plan.Cards, card =>
+            card.EventId == "verification");
+        Assert.Equal(OverlayDeckRegion.Front, verification.Region);
+        Assert.InRange(verification.Bounds.Width, 675, 750);
+        AssertPlanInvariants(plan, Hs2Display);
+    }
+
+    [Fact]
+    public void VerificationCodeUsesCompactFrontCardAcrossAdaptiveContexts()
+    {
+        var code = new OverlayCardLayoutRequest(
+            "verification",
+            OverlayCardKind.Verification,
+            0,
+            OverlayCardWidthPreference.Compact,
+            OverlayCardPlacementPreference.BottomLeft);
+        OverlayCardLayoutRequest[][] contexts =
+        [
+            [code],
+            [
+                code,
+                new(
+                    "phone-latest",
+                    OverlayCardKind.Notification,
+                    1,
+                    PlacementPreference:
+                        OverlayCardPlacementPreference.BottomStack,
+                    StackOrder: 0),
+            ],
+            [
+                code,
+                new(
+                    "audio-hud",
+                    OverlayCardKind.Transient,
+                    1,
+                    OverlayCardWidthPreference.Compact,
+                    OverlayCardPlacementPreference.BottomLeft),
+            ],
+            [
+                code,
+                new(
+                    "phone-latest",
+                    OverlayCardKind.Notification,
+                    1,
+                    PlacementPreference:
+                        OverlayCardPlacementPreference.BottomStack,
+                    StackOrder: 0),
+                new(
+                    "phone-second",
+                    OverlayCardKind.Notification,
+                    2,
+                    PlacementPreference:
+                        OverlayCardPlacementPreference.BottomStack,
+                    StackOrder: 1),
+                new(
+                    "phone-third",
+                    OverlayCardKind.Notification,
+                    3,
+                    PlacementPreference:
+                        OverlayCardPlacementPreference.BottomStack,
+                    StackOrder: 2),
+                new(
+                    "media",
+                    OverlayCardKind.Media,
+                    4,
+                    OverlayCardWidthPreference.Wide),
+                new(
+                    "game",
+                    OverlayCardKind.Activity,
+                    5,
+                    OverlayCardWidthPreference.Wide),
+            ],
+        ];
+
+        foreach (var context in contexts)
+        {
+            var plan = CompositionPlanner.Plan(Hs2Display, context);
+            var verification = Assert.Single(plan.Cards, card =>
+                card.EventId == code.EventId);
+            Assert.Equal(OverlayDeckRegion.Front, verification.Region);
+            Assert.InRange(verification.Bounds.Width, 675, 750);
+            AssertPlanInvariants(plan, Hs2Display);
+        }
+    }
+
+    [Fact]
     public void EveryAdaptiveSubset_PreservesBottomOrderWithoutPlaceholders()
     {
         var source = new[]

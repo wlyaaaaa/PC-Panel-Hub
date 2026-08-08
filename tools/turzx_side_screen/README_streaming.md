@@ -9,9 +9,9 @@ Safety constraints used during this investigation:
 - No changes to `metrics_agent` or renderer files.
 - New investigation artifact: `tools\turzx_side_screen\InspectTurzxProtocol.ps1`.
 
-## Current Streaming Path
+## Current Streaming Paths
 
-The active video stream path is full-frame only:
+The conservative path remains full-frame only:
 
 1. `StartVideoStream.ps1` builds and runs `TURZX.SideScreen.Stream.exe`.
 2. `TURZX.SideScreen.Stream.cs` renders a 480x1920 bitmap for each loop.
@@ -20,7 +20,16 @@ The active video stream path is full-frame only:
 5. Reflection creates `駟(devCode)`, opens the `釃` serial helper field `韘`, and calls `駟.詔(byte[], int, false)`.
 6. The observed helper message is `OK frameBytes=3686400`.
 
-The production watchdog and background launcher fail closed on this verified command-200 full-frame transport. Command `204` remains available only behind an explicit experimental opt-in for isolated protocol work; it is never enabled by a production entrypoint by default.
+The explicit HybridRefresh path is a device-specific candidate for the required 1Hz
+clock. It does not redefine command 204 as a verified public protocol. It uses the
+field-tested default delta helper, a vendor-shaped priming/brightness/double-command-200
+baseline, one persistent serial writer, a 900ms delta timeout, and process exit/reopen
+on the first failure. The default hybrid resync interval is zero so a 4.8-second double
+baseline cannot periodically stall the seconds clock.
+
+Hybrid heartbeat success proves only that the local write returned within its bound.
+The current path has no device ACK and cannot prove that the OLED decoded or scanned
+the frame; physical acceptance therefore remains separate.
 
 The full frame size is:
 
@@ -64,7 +73,10 @@ Readable IL in `TURZX.weatherfix.metrics.exe` shows:
   - It writes command `204` through `釃.詔(204, length, payload, 0)`.
   - It also manipulates sequence/length bytes and the `0xEF69` marker, but the exact payload layout is not reliably reconstructable from static IL alone.
 
-Conclusion: command `204` exists, but this investigation did not find reliable evidence for a safe public payload contract. There is no confirmed rectangle/dirty-region API, no verified local-region command, and no verified serial compression/video-stream command for this side-screen path. Do not invent a differential protocol from the name or constant alone.
+Conclusion: command `204` exists and the private wrapper now mirrors the vendor
+`A3=false` packet shape closely enough for a guarded local hardware candidate. It is
+still not a safe public protocol contract: helper choice is firmware-dependent and no
+device ACK, rectangle API, or pixel-level health signal has been found.
 
 ## Measured Throughput
 
@@ -96,14 +108,24 @@ That is roughly 4.7x the observed payload rate, before accounting for 250-byte p
 
 ## Strategy
 
-v1:
+Conservative mode:
 
 - Keep the device path full-screen and low-frequency.
 - Treat `3000ms` as a realistic default for stable display.
 - Avoid UI animations that depend on sub-second device refresh.
 - Coalesce metric changes and skip sends when rendered content is materially unchanged.
 
-v1.1:
+Hybrid candidate:
+
+- Render/fetch at 1 second and send command-204 deltas on one persistent COM session.
+- Establish the baseline with the vendor 8.8-inch priming and two command-200 frames.
+- Use the default delta helper. Static 1.15 firmware evidence suggested Alt, but the
+  physical panel rejected the 19th Alt delta and then rejected all writes until recovery.
+- Abort the whole child after a 900ms delta timeout; never retry concurrently on the
+  possibly blocked session.
+- Keep periodic full resync disabled for a continuous seconds clock.
+
+Future protocol work:
 
 - Add an application-level card dirty API above the renderer/sender boundary.
 - Track dirty cards/rectangles in memory, but keep the wire format as verified full-frame until command `204` is captured and validated.
