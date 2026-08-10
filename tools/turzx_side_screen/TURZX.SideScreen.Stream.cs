@@ -650,25 +650,31 @@ namespace TURZX.SideScreen
 
         private static int ResolveFullBaselineRepeatCount(bool hybridRefresh, bool hasPreviousFrame)
         {
-            return hybridRefresh && !hasPreviousFrame ? 2 : 1;
+            // Every Hybrid full-frame boundary owns a freshly opened serial
+            // session, so repeat the same vendor-shaped baseline used at
+            // startup instead of treating it as an in-session redraw.
+            return hybridRefresh ? 2 : 1;
         }
 
         private static bool ShouldPrimeFullBaseline(bool hybridRefresh, bool hasPreviousFrame)
         {
-            return hybridRefresh && !hasPreviousFrame;
+            return hybridRefresh;
         }
 
         private static bool ShouldReopenDiffSessionBeforeFull(bool hybridRefresh, bool hasPreviousFrame)
         {
-            return hasPreviousFrame && !hybridRefresh;
+            // A command-200 write on the existing command-204 session did not
+            // recover the physical panel's silent freeze.  Rebuild ownership
+            // before every periodic baseline so the device sees the complete
+            // startup lifecycle again.
+            return hasPreviousFrame;
         }
 
         private static bool ShouldResetDiffSequenceAfterFull(bool hybridRefresh, bool hasPreviousFrame)
         {
-            // Startup and a rebuilt serial session begin at sequence zero. A
-            // host-side recovery frame sent on the existing Hybrid session
-            // does not prove that the device reset its command-204 counter.
-            return !hasPreviousFrame || !hybridRefresh;
+            // Startup and every periodic baseline now own a rebuilt serial
+            // session, so the next command-204 sequence begins at zero.
+            return !hasPreviousFrame || ShouldReopenDiffSessionBeforeFull(hybridRefresh, hasPreviousFrame);
         }
 
         private static int ResolveRefreshIntervalMilliseconds(bool hybridRefresh, int configuredIntervalMs)

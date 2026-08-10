@@ -162,6 +162,36 @@ if ($null -eq $taskModeFunction) {
 }
 . ([scriptblock]::Create($taskModeFunction.Extent.Text))
 
+$requestedModeFunction = $startAst.Find(
+    {
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq "Resolve-RequestedSwitchMode"
+    },
+    $true)
+if ($null -eq $requestedModeFunction) {
+    throw "scripts/start.ps1 must preserve an explicitly installed task mode when the caller omits mode switches."
+}
+. ([scriptblock]::Create($requestedModeFunction.Extent.Text))
+
+$requestedModeCases = @(
+    @{ Name = "omitted Hybrid adopts registered Hybrid"; Arguments = '-HybridRefresh'; Flag = 'HybridRefresh'; Requested = $false; Explicit = $false; Expected = $true },
+    @{ Name = "omitted Hybrid keeps registered full mode"; Arguments = '-Root "E:\repo"'; Flag = 'HybridRefresh'; Requested = $false; Explicit = $false; Expected = $false },
+    @{ Name = "explicit false overrides registered Hybrid"; Arguments = '-HybridRefresh'; Flag = 'HybridRefresh'; Requested = $false; Explicit = $true; Expected = $false },
+    @{ Name = "explicit true overrides registered full mode"; Arguments = '-Root "E:\repo"'; Flag = 'HybridRefresh'; Requested = $true; Explicit = $true; Expected = $true },
+    @{ Name = "omitted Alt adopts registered Alt"; Arguments = '-HybridRefresh -AltHelper'; Flag = 'AltHelper'; Requested = $false; Explicit = $false; Expected = $true }
+)
+foreach ($case in $requestedModeCases) {
+    $actual = Resolve-RequestedSwitchMode `
+        -Arguments $case.Arguments `
+        -FlagName $case.Flag `
+        -RequestedValue $case.Requested `
+        -WasExplicit $case.Explicit
+    if ([bool]$actual -ne [bool]$case.Expected) {
+        throw ("Requested task mode case failed: {0}; expected={1} actual={2}" -f $case.Name, $case.Expected, $actual)
+    }
+}
+
 $modeCases = @(
     @{ Name = "full defaults match no flags"; Arguments = '-Root "E:\\repo"'; Hybrid = $false; Alt = $false; Expected = $true },
     @{ Name = "hybrid and alt flags match explicit request"; Arguments = '-HybridRefresh -AltHelper'; Hybrid = $true; Alt = $true; Expected = $true },

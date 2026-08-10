@@ -120,15 +120,15 @@ public static class TestStreamCadenceProgram
             SideScreenStreamApp.ShouldSendFullFrameForTest(300, true, 0));
         Equal("hybrid startup follows the vendor duplicate baseline", 2,
             SideScreenStreamApp.ResolveFullBaselineRepeatCountForTest(true, false));
-        Equal("periodic hybrid recovery uses one redraw to limit clock interruption", 1,
+        Equal("periodic hybrid recovery repeats the vendor baseline after rebuilding the session", 2,
             SideScreenStreamApp.ResolveFullBaselineRepeatCountForTest(true, true));
         Equal("hybrid startup primes the panel before its first baseline", true,
             SideScreenStreamApp.ShouldPrimeFullBaselineForTest(true, false));
-        Equal("periodic hybrid recovery does not repeat disruptive startup priming", false,
+        Equal("periodic hybrid recovery primes the rebuilt serial session", true,
             SideScreenStreamApp.ShouldPrimeFullBaselineForTest(true, true));
-        Equal("periodic hybrid recovery keeps the single serial session", false,
+        Equal("periodic hybrid recovery rebuilds the serial session", true,
             SideScreenStreamApp.ShouldReopenDiffSessionBeforeFullForTest(true, true));
-        Equal("periodic hybrid recovery keeps command-204 sequence monotonic", false,
+        Equal("periodic hybrid recovery restarts command-204 sequence with the rebuilt session", true,
             SideScreenStreamApp.ShouldResetDiffSequenceAfterFullForTest(true, true));
         Equal("a rebuilt legacy differential session restarts its sequence", true,
             SideScreenStreamApp.ShouldResetDiffSequenceAfterFullForTest(false, true));

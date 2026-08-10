@@ -73,7 +73,7 @@ Set-Location 'C:\path\to\PC-Panel-Hub'
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start.ps1 -Port COM7 -IntervalMs 3000
 ```
 
-个人启动和开机任务默认使用 command `200` 全帧模式，每约 3 秒更新一次。现场长期运行已证明 command `204` 可能在主机心跳仍正常时让实体屏静默停止刷新，因此 1 Hz 混合模式仅保留为显式诊断候选；只有接受该风险并现场观察时才传入 `-HybridRefresh`。
+个人启动和开机任务默认使用 command `200` 全帧模式，每约 3 秒更新一次。现场长期运行已证明 command `204` 可能在主机心跳仍正常时让实体屏静默停止刷新，因此 1 Hz 混合模式仅保留为显式候选；需要 1 秒时钟时可传入 `-HybridRefresh`。该模式现在每 900 帧重建一次串口会话并重复厂商式双全帧基线，正常每秒刷新，恢复边界会短暂停顿约 5 秒。
 
 为兼容既有安装，Windows 计划任务、快捷方式及本机脚本中的内部标识仍保留 `TURZX SideScreen`；这不再是公开项目名称，也无需为改名迁移现有运行路径。
 

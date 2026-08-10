@@ -23,11 +23,13 @@ The conservative path remains full-frame only:
 The explicit HybridRefresh path is a device-specific candidate for the required 1Hz
 clock. It does not redefine command 204 as a verified public protocol. It uses the
 field-tested default delta helper, a vendor-shaped priming/brightness/double-command-200
-baseline, one persistent serial writer, a 900ms delta timeout, and process exit/reopen
-on the first failure. Startup keeps the vendor-shaped double baseline. During normal
-operation, one command-200 redraw is attempted every 900 frames (about 15 minutes at
-1Hz) without repeating priming or the duplicate startup frame, limiting the interruption
-to one normal full-frame transfer.
+baseline, one persistent serial writer between recovery boundaries, a 900ms delta timeout,
+and process exit/reopen on the first failure. Startup keeps the vendor-shaped double
+baseline. Every 900 frames (about 15 minutes at 1Hz), Hybrid closes and reopens the
+serial session, repeats priming/brightness plus the duplicate command-200 baseline,
+then restarts command-204 sequence numbering. This intentionally trades one brief
+recovery pause for a real startup-shaped reset after in-session full redraws proved
+unable to recover silent physical freezes.
 
 Hybrid heartbeat success proves only that the local write returned within its bound.
 The current path has no device ACK and cannot prove that the OLED decoded or scanned
@@ -125,9 +127,9 @@ Hybrid candidate:
   physical panel rejected the 19th Alt delta and then rejected all writes until recovery.
 - Abort the whole child after a 900ms delta timeout; never retry concurrently on the
   possibly blocked session.
-- Attempt one host-side full redraw every 900 frames without reopening the serial session,
-  and keep command-204 sequence numbers monotonic across that redraw. This is a recovery
-  attempt, not proof that the physical panel accepted it.
+- Rebuild the serial session every 900 frames, repeat the vendor priming/brightness and
+  duplicate command-200 baseline, then restart command-204 sequence numbering. This is
+  still a host-side recovery attempt, not proof that the physical panel accepted it.
 
 Future protocol work:
 

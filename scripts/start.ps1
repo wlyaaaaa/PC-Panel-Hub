@@ -11,6 +11,11 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+$hybridRefreshWasExplicit = $PSBoundParameters.ContainsKey("HybridRefresh")
+$altHelperWasExplicit = $PSBoundParameters.ContainsKey("AltHelper")
+$effectiveHybridRefresh = [bool]$HybridRefresh
+$effectiveAltHelper = [bool]$AltHelper
+
 function Test-ScheduledTaskActionMode {
     param(
         [AllowEmptyString()][string]$Arguments,
@@ -22,6 +27,22 @@ function Test-ScheduledTaskActionMode {
     $hasAltHelper = [regex]::IsMatch($Arguments, '(?i)(?:^|\s)-AltHelper(?:\s|$)')
     return ($hasHybridRefresh -eq $HybridRefreshEnabled) -and
         ($hasAltHelper -eq $AltHelperEnabled)
+}
+
+function Resolve-RequestedSwitchMode {
+    param(
+        [AllowEmptyString()][string]$Arguments,
+        [Parameter(Mandatory = $true)][string]$FlagName,
+        [bool]$RequestedValue,
+        [bool]$WasExplicit
+    )
+
+    if ($WasExplicit) {
+        return $RequestedValue
+    }
+
+    $pattern = '(?i)(?:^|\s)-{0}(?:\s|$)' -f [regex]::Escape($FlagName)
+    return [regex]::IsMatch($Arguments, $pattern)
 }
 
 $watchdog = Join-Path $Root "tools\turzx_side_screen\StartSideScreenWatchdog.ps1"
@@ -45,12 +66,22 @@ if (-not $Direct) {
     $scheduledTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
     if ($null -ne $scheduledTask) {
         $registeredArguments = (($scheduledTask.Actions | ForEach-Object { [string]$_.Arguments }) -join ' ')
+        $effectiveHybridRefresh = Resolve-RequestedSwitchMode `
+            -Arguments $registeredArguments `
+            -FlagName "HybridRefresh" `
+            -RequestedValue ([bool]$HybridRefresh) `
+            -WasExplicit $hybridRefreshWasExplicit
+        $effectiveAltHelper = Resolve-RequestedSwitchMode `
+            -Arguments $registeredArguments `
+            -FlagName "AltHelper" `
+            -RequestedValue ([bool]$AltHelper) `
+            -WasExplicit $altHelperWasExplicit
         $modeMatches = Test-ScheduledTaskActionMode `
             -Arguments $registeredArguments `
-            -HybridRefreshEnabled ([bool]$HybridRefresh) `
-            -AltHelperEnabled ([bool]$AltHelper)
+            -HybridRefreshEnabled $effectiveHybridRefresh `
+            -AltHelperEnabled $effectiveAltHelper
         if (-not $modeMatches) {
-            Write-Warning ("Scheduled task mode does not match the requested mode; using the direct launcher. Re-run install-startup-admin.ps1 to persist the change. registered=<{0}> requestedHybrid={1} requestedAlt={2}" -f $registeredArguments, [bool]$HybridRefresh, [bool]$AltHelper)
+            Write-Warning ("Scheduled task mode does not match the requested mode; using the direct launcher. Re-run install-startup-admin.ps1 to persist the change. registered=<{0}> requestedHybrid={1} requestedAlt={2}" -f $registeredArguments, $effectiveHybridRefresh, $effectiveAltHelper)
         }
         else {
             $outDir = Join-Path $Root "tools\turzx_side_screen\out"
@@ -96,6 +127,6 @@ $directArguments = @(
     "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $watchdog,
     "-Root", $Root, "-Port", $Port, "-IntervalMs", [string]$IntervalMs
 )
-if ($HybridRefresh) { $directArguments += "-HybridRefresh" }
-if ($AltHelper) { $directArguments += "-AltHelper" }
+if ($effectiveHybridRefresh) { $directArguments += "-HybridRefresh" }
+if ($effectiveAltHelper) { $directArguments += "-AltHelper" }
 & powershell @directArguments

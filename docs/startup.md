@@ -7,13 +7,12 @@ The recommended startup path is a Windows Scheduled Task:
 - Trigger: user logon
 - Action: `wscript.exe` -> `tools\turzx_side_screen\StartSideScreenWatchdog-Hidden.vbs` -> `StartSideScreenWatchdog.ps1`
 - Default port: `COM7`
-- Installed personal mode: verified command-200 full frames at `3000ms`.
-  Command `204` hybrid refresh is retained only as an explicit `-HybridRefresh`
-  diagnostic candidate. Long-running physical-panel evidence showed silent freezes
-  while host-side command-204 heartbeats and periodic command-200 writes remained
-  healthy, so it is not used by automatic startup. The optional Alt helper is not
-  enabled: this panel accepted 18 frames and then rejected Alt command 204 plus
-  subsequent writes.
+- Default installer mode: verified command-200 full frames at `3000ms`.
+  A personal installation can explicitly pass `-HybridRefresh` for the required
+  1Hz clock. That mode now performs a hard serial-session rebuild every 900 frames
+  instead of trusting an in-session command-200 redraw that did not recover silent
+  physical freezes. The optional Alt helper is not enabled: this panel accepted 18
+  frames and then rejected Alt command 204 plus subsequent writes.
 
 This is not a `SYSTEM` account task. It runs as the current interactive user with `Highest` run level, which is usually safer for COM ports, user-profile Python installs, RTSS/Afterburner, and other desktop telemetry tools.
 
@@ -36,14 +35,15 @@ on the COM7 send path.
 
 When explicitly enabled, Hybrid startup/recovery follows the vendor 8.8-inch lifecycle: raw `0x2C` priming,
 brightness restore, then two identical command-200 baselines before command 204 begins.
-After startup, one full command-200 redraw is sent every 900 frames (about 15 minutes).
-It does not repeat priming or the duplicate startup baseline, so the 1Hz clock is interrupted
-for only one normal full-frame transfer while silent command-204 panel drift gets a periodic
-host-side repair attempt.
+After startup, every 900-frame boundary (about 15 minutes) closes and reopens the
+serial session, repeats priming/brightness and the duplicate command-200 baseline,
+then restarts command-204 sequence numbering. The normal clock remains 1Hz; this hard
+recovery boundary causes one roughly five-second pause instead of making every clock
+tick three seconds long.
 The watchdog verifies that this recovery cadence remains enabled and is actually reached.
-Those host-side repair attempts do not provide device acknowledgement and did not prevent
-silent physical freezes on this panel. The default and recommended production mode is the
-3-second verified full-frame path; HybridRefresh is opt-in only.
+This is still a host-side recovery strategy rather than device acknowledgement.
+The repository default remains the 3-second verified full-frame path; HybridRefresh
+must be installed explicitly on machines where a 1Hz clock is required.
 
 | Windows state | LIAN LI HS2 curved OLED | TURZX case panel |
 | --- | --- | --- |
