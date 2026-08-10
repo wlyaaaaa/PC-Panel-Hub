@@ -27,6 +27,26 @@ foreach ($relative in $defaultFiles) {
     }
 }
 
+# The panel has repeatedly entered a silent physical freeze while the host-side
+# command-204 heartbeat remained healthy.  Production entry points therefore
+# default to the verified command-200 transport; HybridRefresh stays available
+# only as an explicit diagnostic opt-in.
+$productionEntryFiles = @(
+    "scripts\start.ps1",
+    "scripts\install-startup-admin.ps1"
+)
+
+foreach ($relative in $productionEntryFiles) {
+    $path = Join-Path $Root $relative
+    $text = Get-Content -Raw -LiteralPath $path
+    if ($text -match [regex]::Escape('[switch]$HybridRefresh = $true')) {
+        throw "Production entry must default HybridRefresh to false: $relative"
+    }
+    if ($text -notmatch [regex]::Escape('[switch]$HybridRefresh')) {
+        throw "Production entry must retain HybridRefresh as an explicit opt-in: $relative"
+    }
+}
+
 $hiddenLaunchers = @(
     "tools\turzx_side_screen\StartSideScreenWatchdog-Hidden.vbs",
     "tools\turzx_side_screen\RestartSideScreenAfterResume-Hidden.vbs"

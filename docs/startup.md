@@ -5,17 +5,21 @@ The recommended startup path is a Windows Scheduled Task:
 - Task name: `TURZX SideScreen`
 - Run level: `Highest`
 - Trigger: user logon
-- Action: hidden `powershell.exe` -> `tools\turzx_side_screen\StartSideScreenWatchdog.ps1`
+- Action: `wscript.exe` -> `tools\turzx_side_screen\StartSideScreenWatchdog-Hidden.vbs` -> `StartSideScreenWatchdog.ps1`
 - Default port: `COM7`
-- Installed personal mode: explicit hybrid refresh (`204` deltas at `1000ms`);
-  command-200-only fallback remains `3000ms`. The optional Alt helper is not enabled:
-  this panel accepted 18 frames and then rejected Alt command 204 plus subsequent writes.
+- Installed personal mode: verified command-200 full frames at `3000ms`.
+  Command `204` hybrid refresh is retained only as an explicit `-HybridRefresh`
+  diagnostic candidate. Long-running physical-panel evidence showed silent freezes
+  while host-side command-204 heartbeats and periodic command-200 writes remained
+  healthy, so it is not used by automatic startup. The optional Alt helper is not
+  enabled: this panel accepted 18 frames and then rejected Alt command 204 plus
+  subsequent writes.
 
 This is not a `SYSTEM` account task. It runs as the current interactive user with `Highest` run level, which is usually safer for COM ports, user-profile Python installs, RTSS/Afterburner, and other desktop telemetry tools.
 
-Task Scheduler launches the watchdog process directly. This keeps task state and
-restart/stop behavior attached to the real long-running process instead of an
-intermediate script host that can leave an orphaned watchdog behind.
+Task Scheduler launches a GUI-subsystem `wscript.exe` parent adapter. The adapter
+starts PowerShell with window style 0 and waits for the long-running watchdog, so
+the task remains running without creating a visible console at interactive logon.
 
 The watchdog starts the render stack and coordinates both auxiliary displays across
 Windows power transitions. At startup it also enables the Windows multi-monitor
@@ -30,15 +34,16 @@ worker to exit and reopen under the watchdog. Heartbeat timing checks also rejec
 live-but-stalled process. Diagnostic preview encoding is asynchronous and never sits
 on the COM7 send path.
 
-Hybrid startup/recovery follows the vendor 8.8-inch lifecycle: raw `0x2C` priming,
+When explicitly enabled, Hybrid startup/recovery follows the vendor 8.8-inch lifecycle: raw `0x2C` priming,
 brightness restore, then two identical command-200 baselines before command 204 begins.
 After startup, one full command-200 redraw is sent every 900 frames (about 15 minutes).
 It does not repeat priming or the duplicate startup baseline, so the 1Hz clock is interrupted
 for only one normal full-frame transfer while silent command-204 panel drift gets a periodic
 host-side repair attempt.
 The watchdog verifies that this recovery cadence remains enabled and is actually reached.
-If command 204 is still not reliable on the physical panel, disable HybridRefresh and use
-the 3-second verified full-frame mode.
+Those host-side repair attempts do not provide device acknowledgement and did not prevent
+silent physical freezes on this panel. The default and recommended production mode is the
+3-second verified full-frame path; HybridRefresh is opt-in only.
 
 | Windows state | LIAN LI HS2 curved OLED | TURZX case panel |
 | --- | --- | --- |

@@ -4,7 +4,7 @@ param(
     [string]$ResumeTaskName = "TURZX SideScreen Resume",
     [string]$Port = "COM7",
     [int]$IntervalMs = 3000,
-    [switch]$HybridRefresh = $true,
+    [switch]$HybridRefresh,
     [switch]$AltHelper,
     [switch]$DoNotDisableOldTasks
 )
@@ -45,12 +45,14 @@ if (Test-Path -LiteralPath $checker) {
 }
 
 $workingDir = Split-Path -Parent $script
+$wscriptPath = Join-Path $env:WINDIR "System32\wscript.exe"
 $refreshArguments = ""
-if ($HybridRefresh) { $refreshArguments += " -HybridRefresh -PollSeconds 1" }
+if ($HybridRefresh) { $refreshArguments += " -HybridRefresh" }
 if ($AltHelper) { $refreshArguments += " -AltHelper" }
+$launcherArguments = ('"{0}" -Root "{1}" -Port "{2}" -IntervalMs {3}{4}' -f $launcher, $Root, $Port, $IntervalMs, $refreshArguments)
 $action = New-ScheduledTaskAction `
-    -Execute "powershell.exe" `
-    -Argument (('-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -Root "{1}" -Port "{2}" -IntervalMs {3}{4}') -f $script, $Root, $Port, $IntervalMs, $refreshArguments) `
+    -Execute $wscriptPath `
+    -Argument $launcherArguments `
     -WorkingDirectory $workingDir
 
 $trigger = New-ScheduledTaskTrigger -AtLogOn

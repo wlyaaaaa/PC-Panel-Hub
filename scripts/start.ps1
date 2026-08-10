@@ -3,7 +3,7 @@ param(
     [string]$TaskName = "TURZX SideScreen",
     [string]$Port = "COM7",
     [int]$IntervalMs = 3000,
-    [switch]$HybridRefresh = $true,
+    [switch]$HybridRefresh,
     [switch]$AltHelper,
     [switch]$Direct
 )

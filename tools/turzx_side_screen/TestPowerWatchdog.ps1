@@ -932,8 +932,8 @@ foreach ($pattern in @("StartSideScreenWatchdog.ps1", '[switch]$Worker')) {
 
 $installerText = Get-Content -Raw -LiteralPath $installer
 foreach ($pattern in @(
-    'Execute "powershell.exe"',
-    "-WindowStyle Hidden",
+    "System32\wscript.exe",
+    "StartSideScreenWatchdog-Hidden.vbs",
     "StartSideScreenWatchdog.ps1",
     "TURZX SideScreen Resume",
     "RestartSideScreenAfterResume.ps1",
@@ -944,6 +944,9 @@ foreach ($pattern in @(
     if ($installerText -notmatch [regex]::Escape($pattern)) {
         throw "Startup installer must make Task Scheduler own the hidden watchdog process; missing: $pattern"
     }
+}
+if ($installerText -match [regex]::Escape('-Execute "powershell.exe"')) {
+    throw "Startup installer must not execute PowerShell directly in the interactive logon task."
 }
 
 if (!(Test-Path -LiteralPath $resume)) {
