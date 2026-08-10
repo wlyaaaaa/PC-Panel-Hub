@@ -18,6 +18,7 @@ namespace TURZX.SideScreen
         private const int DefaultSendTimeoutMilliseconds = 10000;
         private const int DefaultDifferentialSendTimeoutMilliseconds = 900;
         private const int DefaultMaxConsecutiveSendFailures = 1;
+        private const int DefaultHybridFullResyncEveryFrames = 900;
         private static int previewWorkerActive;
 
         public static int Main(string[] args)
@@ -62,6 +63,7 @@ namespace TURZX.SideScreen
                 ", diff=" + options.UseDiff +
                 ", hybridRefresh=" + options.HybridRefresh +
                 ", diffSendTimeoutMs=" + options.DiffSendTimeoutMs +
+                ", fullResyncEveryFrames=" + options.FullResyncEveryFrames +
                 ", altHelper=" + options.AltHelper +
                 ", port=" + options.Port);
 
@@ -113,22 +115,24 @@ namespace TURZX.SideScreen
                                 sendAttempted = true;
                                 sendWatch = Stopwatch.StartNew();
                                 byte[] currentFrameData = diffSession.Convert(bitmap);
-                                if (ShouldSendFullFrame(frame, previousFrameData != null, options.FullResyncEveryFrames))
+                                bool hasPreviousFrame = previousFrameData != null;
+                                if (ShouldSendFullFrame(frame, hasPreviousFrame, options.FullResyncEveryFrames))
                                 {
                                     frameTransport = "full_200";
-                                    if (previousFrameData != null)
+                                    if (ShouldReopenDiffSessionBeforeFull(options.HybridRefresh, hasPreviousFrame))
                                     {
                                         diffSession.Dispose();
                                         diffSession = new TurzxHelperSender.DiffSession(options.Root, options.Port, options.DevCode);
                                     }
                                     string fullMessage;
-                                    int baselineRepeats = options.HybridRefresh ? 2 : 1;
+                                    int baselineRepeats = ResolveFullBaselineRepeatCount(options.HybridRefresh, hasPreviousFrame);
+                                    bool primeBaseline = ShouldPrimeFullBaseline(options.HybridRefresh, hasPreviousFrame);
                                     bool fullOk = diffSession.SendFullWithTimeout(
                                         currentFrameData,
                                         options.SendTimeoutMs,
                                         baselineRepeats,
-                                        options.HybridRefresh ? 100 : 0,
-                                        options.HybridRefresh,
+                                        primeBaseline ? 100 : 0,
+                                        primeBaseline,
                                         options.BaselineBrightness,
                                         out fullMessage);
                                     if (!fullOk)
@@ -139,7 +143,10 @@ namespace TURZX.SideScreen
                                     sendMs = sendWatch.ElapsedMilliseconds;
                                     sent++;
                                     consecutiveSendFailures = 0;
-                                    diffSequence = 0;
+                                    if (ShouldResetDiffSequenceAfterFull(options.HybridRefresh, hasPreviousFrame))
+                                    {
+                                        diffSequence = 0;
+                                    }
                                     lastFullFrame = frame;
                                     Console.WriteLine("frame " + frame + " FULL sent in " + sendWatch.ElapsedMilliseconds + "ms: frameBytes=" + currentFrameData.Length + ", repeats=" + baselineRepeats);
                                 }
@@ -320,6 +327,11 @@ namespace TURZX.SideScreen
             return DefaultMaxConsecutiveSendFailures;
         }
 
+        internal static int DefaultHybridFullResyncEveryFramesForTest()
+        {
+            return DefaultHybridFullResyncEveryFrames;
+        }
+
         internal static bool IsSendTimeoutMillisecondsValidForTest(int timeoutMs)
         {
             return timeoutMs > 0;
@@ -396,6 +408,26 @@ namespace TURZX.SideScreen
         internal static bool ShouldSendFullFrameForTest(int frame, bool hasPreviousFrame, int fullResyncEveryFrames)
         {
             return ShouldSendFullFrame(frame, hasPreviousFrame, fullResyncEveryFrames);
+        }
+
+        internal static int ResolveFullBaselineRepeatCountForTest(bool hybridRefresh, bool hasPreviousFrame)
+        {
+            return ResolveFullBaselineRepeatCount(hybridRefresh, hasPreviousFrame);
+        }
+
+        internal static bool ShouldPrimeFullBaselineForTest(bool hybridRefresh, bool hasPreviousFrame)
+        {
+            return ShouldPrimeFullBaseline(hybridRefresh, hasPreviousFrame);
+        }
+
+        internal static bool ShouldReopenDiffSessionBeforeFullForTest(bool hybridRefresh, bool hasPreviousFrame)
+        {
+            return ShouldReopenDiffSessionBeforeFull(hybridRefresh, hasPreviousFrame);
+        }
+
+        internal static bool ShouldResetDiffSequenceAfterFullForTest(bool hybridRefresh, bool hasPreviousFrame)
+        {
+            return ShouldResetDiffSequenceAfterFull(hybridRefresh, hasPreviousFrame);
         }
 
         internal static bool IsDifferentialTransportAllowedForTest(bool useDiff, bool dryRun, bool allowUnverifiedDiff)
@@ -616,6 +648,29 @@ namespace TURZX.SideScreen
             return !hasPreviousFrame || (fullResyncEveryFrames > 0 && frame > 1 && frame % fullResyncEveryFrames == 0);
         }
 
+        private static int ResolveFullBaselineRepeatCount(bool hybridRefresh, bool hasPreviousFrame)
+        {
+            return hybridRefresh && !hasPreviousFrame ? 2 : 1;
+        }
+
+        private static bool ShouldPrimeFullBaseline(bool hybridRefresh, bool hasPreviousFrame)
+        {
+            return hybridRefresh && !hasPreviousFrame;
+        }
+
+        private static bool ShouldReopenDiffSessionBeforeFull(bool hybridRefresh, bool hasPreviousFrame)
+        {
+            return hasPreviousFrame && !hybridRefresh;
+        }
+
+        private static bool ShouldResetDiffSequenceAfterFull(bool hybridRefresh, bool hasPreviousFrame)
+        {
+            // Startup and a rebuilt serial session begin at sequence zero. A
+            // host-side recovery frame sent on the existing Hybrid session
+            // does not prove that the device reset its command-204 counter.
+            return !hasPreviousFrame || !hybridRefresh;
+        }
+
         private static int ResolveRefreshIntervalMilliseconds(bool hybridRefresh, int configuredIntervalMs)
         {
             return hybridRefresh ? 1000 : configuredIntervalMs;
@@ -719,6 +774,7 @@ namespace TURZX.SideScreen
             AppendJsonProperty(json, "failed", failed, true);
             AppendJsonProperty(json, "consecutive_send_failures", consecutiveSendFailures, true);
             AppendJsonProperty(json, "last_full_frame", lastFullFrame, true);
+            AppendJsonProperty(json, "full_resync_every_frames", options.FullResyncEveryFrames, true);
             AppendJsonProperty(json, "period_ms", periodMs, true);
             AppendJsonProperty(json, "fetch_ms", fetchMs, true);
             AppendJsonProperty(json, "render_ms", renderMs, true);
@@ -1065,7 +1121,7 @@ namespace TURZX.SideScreen
 
         private static void PrintUsage()
         {
-            Console.WriteLine("TURZX.SideScreen.Stream.exe [--sample] [--dry-run] [--hybrid-refresh] [--diff --allow-unverified-diff] [--alt-helper] [--frames N] [--interval-ms 3000] [--send-timeout-ms 10000] [--diff-send-timeout-ms 900] [--baseline-brightness 170] [--preview-interval-seconds 45] [--full-resync-every-frames 0] [--max-consecutive-send-failures 1] [--metrics-url URL] [--root TURZX_ROOT] [--port COM7]");
+            Console.WriteLine("TURZX.SideScreen.Stream.exe [--sample] [--dry-run] [--hybrid-refresh] [--diff --allow-unverified-diff] [--alt-helper] [--frames N] [--interval-ms 3000] [--send-timeout-ms 10000] [--diff-send-timeout-ms 900] [--baseline-brightness 170] [--preview-interval-seconds 45] [--full-resync-every-frames 900] [--max-consecutive-send-failures 1] [--metrics-url URL] [--root TURZX_ROOT] [--port COM7]");
             Console.WriteLine("frames=0 means infinite. --hybrid-refresh is an explicit 1Hz command-204 candidate with command-200 startup/recovery baselines; default production remains verified command 200 at 3 seconds.");
         }
 
@@ -1084,7 +1140,7 @@ namespace TURZX.SideScreen
             public int SendTimeoutMs = DefaultSendTimeoutMilliseconds;
             public int DiffSendTimeoutMs = DefaultDifferentialSendTimeoutMilliseconds;
             public int MaxConsecutiveSendFailures = DefaultMaxConsecutiveSendFailures;
-            public int FullResyncEveryFrames = 0;
+            public int FullResyncEveryFrames = DefaultHybridFullResyncEveryFrames;
             public int PreviewIntervalSeconds = DefaultPreviewIntervalSeconds;
             public byte BaselineBrightness = 170;
             public string MetricsUrl = DefaultMetricsUrl;

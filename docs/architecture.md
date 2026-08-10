@@ -26,8 +26,10 @@ PC Panel Hub is intentionally split into small local processes:
    - Keeps verified command `200` as the conservative 3-second mode.
    - Provides an explicit hybrid candidate for the required 1Hz clock: vendor-shaped
      priming/brightness/two-frame command-200 baseline, followed by bounded command-204
-     deltas on one persistent COM session. The default hybrid configuration does not
-     interrupt the clock with periodic full frames; failures exit and rebuild the session.
+     deltas on one persistent COM session. Because command 204 has no device ACK, the
+     default hybrid configuration redraws one complete command-200 frame every 900 frames
+     (about 15 minutes at normal 1Hz cadence) as a host-side attempt to repair silent panel
+     drift without repeating disruptive startup priming; failures exit and rebuild the session.
    - Runs at `AboveNormal` process/thread priority while the serial sender thread uses
      `Highest`; neither the process nor the sender uses realtime scheduling.
    - Writes the diagnostic PNG on a low-priority, single-flight background worker after
@@ -51,12 +53,14 @@ PC Panel Hub is intentionally split into small local processes:
   worker so the watchdog can reopen the process and COM port instead of leaving a hung
   sender alive for minutes.
 - Stream heartbeats include transport mode, per-frame transport, whether a send was attempted,
-  and its duration. The watchdog
-  also rejects send, frame, and period overruns, so a process that is alive but no longer
-  meeting the panel cadence is not treated as healthy.
+  its duration, the configured recovery interval, and the latest full-frame number. The
+  watchdog also rejects send, frame, period, and overdue/mismatched recovery baselines, so
+  a process that is alive but no longer meeting the host-side panel contract is not treated
+  as healthy.
 - The header clock is rendered from local Beijing time in the C# renderer, not from the metrics snapshot cache.
 - A successful host write is not a device ACK. Physical 1Hz/freeze acceptance remains a
-  visual hardware check until the vendor exposes a trustworthy panel-status response.
+  visual hardware check until the vendor exposes a trustworthy panel-status response; the
+  900-frame redraw limits time between host attempts, not proven physical outage duration.
 - Metrics fetches are capped at a short timeout; stale hardware values are preferable to a visibly stalled screen.
 - Top process ranking refresh: `3s`.
 - Weather refresh: cached and much slower.

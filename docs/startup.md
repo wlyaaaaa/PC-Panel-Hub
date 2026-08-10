@@ -32,9 +32,13 @@ on the COM7 send path.
 
 Hybrid startup/recovery follows the vendor 8.8-inch lifecycle: raw `0x2C` priming,
 brightness restore, then two identical command-200 baselines before command 204 begins.
-No periodic full baseline is enabled by default because each pair costs about 4.8 seconds
-and would visibly stop a seconds clock. If command 204 is not reliable on the physical
-panel, disable HybridRefresh and use the 3-second verified full-frame mode.
+After startup, one full command-200 redraw is sent every 900 frames (about 15 minutes).
+It does not repeat priming or the duplicate startup baseline, so the 1Hz clock is interrupted
+for only one normal full-frame transfer while silent command-204 panel drift gets a periodic
+host-side repair attempt.
+The watchdog verifies that this recovery cadence remains enabled and is actually reached.
+If command 204 is still not reliable on the physical panel, disable HybridRefresh and use
+the 3-second verified full-frame mode.
 
 | Windows state | LIAN LI HS2 curved OLED | TURZX case panel |
 | --- | --- | --- |

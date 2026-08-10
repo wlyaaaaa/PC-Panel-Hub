@@ -5,7 +5,7 @@ param(
     [ValidateRange(3000, 60000)][int]$SendTimeoutMs = 10000,
     [ValidateRange(100, 5000)][int]$DiffSendTimeoutMs = 900,
     [ValidateRange(1, 10)][int]$MaxConsecutiveSendFailures = 1,
-    [int]$FullResyncEveryFrames = 0,
+    [int]$FullResyncEveryFrames = 900,
     [ValidateRange(0, 255)][int]$BaselineBrightness = 170,
     [int]$PreviewIntervalSeconds = 45,
     [int64]$MaxStackLogBytes = 1048576,

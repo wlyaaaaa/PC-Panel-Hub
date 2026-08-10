@@ -33,7 +33,7 @@ foreach ($entry in @(
     foreach ($pattern in @(
         '[switch]$HybridRefresh',
         '[int]$DiffSendTimeoutMs = 900',
-        '[int]$FullResyncEveryFrames = 0'
+        '[int]$FullResyncEveryFrames = 900'
     )) {
         if ($entry.Text -notmatch [regex]::Escape($pattern)) {
             throw ("{0} missing explicit hybrid refresh contract: {1}" -f $entry.Name, $pattern)
@@ -82,9 +82,10 @@ foreach ($pattern in @(
     }
 }
 foreach ($pattern in @(
-    'public int FullResyncEveryFrames = 0;',
-    'int baselineRepeats = options.HybridRefresh ? 2 : 1;',
-    'options.HybridRefresh ? 100 : 0'
+    'public int FullResyncEveryFrames = DefaultHybridFullResyncEveryFrames;',
+    'ResolveFullBaselineRepeatCount(options.HybridRefresh, hasPreviousFrame)',
+    'ShouldPrimeFullBaseline(options.HybridRefresh, hasPreviousFrame)',
+    'DefaultHybridFullResyncEveryFrames = 900'
 )) {
     if ($streamSource -notmatch [regex]::Escape($pattern)) {
         throw "Hybrid startup baseline contract is missing: $pattern"
@@ -120,8 +121,24 @@ foreach ($pattern in @(
         throw "Start entrypoint must validate the registered task action before running it: $pattern"
     }
 }
-if ($startEntry -notmatch 'if\s*\(\s*-not\s+\$modeMatches\s*\)[\s\S]{0,1800}schtasks\.exe\s+/Run') {
+if ($startEntry -notmatch 'if\s*\(\s*-not\s+\$modeMatches\s*\)[\s\S]{0,4000}schtasks\.exe\s+/Run') {
     throw "Start entrypoint must branch on task action mode before invoking schtasks /Run."
+}
+foreach ($pattern in @(
+    'StopSideScreenStack.ps1',
+    '-IncludeWatchdog',
+    '-SkipStackEntrypoint',
+    '-Quiet'
+)) {
+    if ($startEntry -notmatch [regex]::Escape($pattern)) {
+        throw "Scheduled-task restart must reclaim an orphaned hidden watchdog before relaunch: $pattern"
+    }
+}
+$taskEndIndex = $startEntry.IndexOf('schtasks.exe /End', [StringComparison]::OrdinalIgnoreCase)
+$watchdogStopIndex = $startEntry.IndexOf('-IncludeWatchdog', [StringComparison]::OrdinalIgnoreCase)
+$taskRunIndex = $startEntry.IndexOf('schtasks.exe /Run', [StringComparison]::OrdinalIgnoreCase)
+if ($taskEndIndex -lt 0 -or $watchdogStopIndex -le $taskEndIndex -or $taskRunIndex -le $watchdogStopIndex) {
+    throw "Scheduled-task restart ordering must be /End -> exact watchdog stop -> /Run."
 }
 
 $startTokens = $null
@@ -174,6 +191,7 @@ foreach ($pattern in @(
     "WriteHeartbeatCopies",
     '"send_attempted"',
     '"send_ms"',
+    '"full_resync_every_frames"',
     "stream-heartbeat-a.json",
     "stream-heartbeat-b.json",
     "preview warning:",
@@ -409,6 +427,7 @@ $HeartbeatMaxSendMs = 10000
 $HeartbeatMaxElapsedMs = 12000
 $HeartbeatMaxPeriodMs = 15000
 $DiffSendTimeoutMs = 900
+$FullResyncEveryFrames = 900
 $HybridRefresh = $false
 try {
     Set-Content -LiteralPath $slotBHeartbeat -Value '{"frame":41,"status":"ok","error":null,"transport_mode":"verified_full_200","send_attempted":true,"send_ms":2300,"elapsed_ms":2400,"period_ms":3000}' -Encoding UTF8
@@ -455,7 +474,7 @@ try {
         throw "Watchdog must reject an experimental differential transport heartbeat."
     }
 
-    Set-Content -LiteralPath $slotBHeartbeat -Value '{"frame":43,"status":"ok","error":null,"transport_mode":"hybrid_diff_204_full_200","frame_transport":"diff_204","send_attempted":true,"send_ms":40,"elapsed_ms":80,"period_ms":1000}' -Encoding UTF8
+    Set-Content -LiteralPath $slotBHeartbeat -Value '{"frame":43,"status":"ok","error":null,"transport_mode":"hybrid_diff_204_full_200","frame_transport":"diff_204","last_full_frame":1,"full_resync_every_frames":900,"send_attempted":true,"send_ms":40,"elapsed_ms":80,"period_ms":1000}' -Encoding UTF8
     (Get-Item -LiteralPath $slotBHeartbeat).LastWriteTimeUtc = [DateTime]::UtcNow
     $hybridDisabledHealth = Get-StreamHeartbeatHealth
     if ($hybridDisabledHealth.Healthy -or $hybridDisabledHealth.Reason -notmatch "transport-unverified") {
@@ -468,18 +487,32 @@ try {
         throw "Watchdog must accept a valid hybrid heartbeat when HybridRefresh is explicit: $($hybridEnabledHealth.Reason)"
     }
 
-    Set-Content -LiteralPath $slotBHeartbeat -Value '{"frame":44,"status":"ok","error":null,"transport_mode":"hybrid_diff_204_full_200","frame_transport":"diff_204","send_attempted":true,"send_ms":901,"elapsed_ms":940,"period_ms":1000}' -Encoding UTF8
+    Set-Content -LiteralPath $slotBHeartbeat -Value '{"frame":44,"status":"ok","error":null,"transport_mode":"hybrid_diff_204_full_200","frame_transport":"diff_204","last_full_frame":1,"full_resync_every_frames":900,"send_attempted":true,"send_ms":901,"elapsed_ms":940,"period_ms":1000}' -Encoding UTF8
     (Get-Item -LiteralPath $slotBHeartbeat).LastWriteTimeUtc = [DateTime]::UtcNow
     $hybridDiffOverrunHealth = Get-StreamHeartbeatHealth
     if ($hybridDiffOverrunHealth.Healthy -or $hybridDiffOverrunHealth.Reason -notmatch "send-overrun") {
         throw "Watchdog must apply the dedicated 900ms budget to a hybrid command-204 frame."
     }
 
-    Set-Content -LiteralPath $slotBHeartbeat -Value '{"frame":45,"status":"ok","error":null,"transport_mode":"hybrid_diff_204_full_200","frame_transport":"full_200","send_attempted":true,"send_ms":4600,"elapsed_ms":4800,"period_ms":5000}' -Encoding UTF8
+    Set-Content -LiteralPath $slotBHeartbeat -Value '{"frame":45,"status":"ok","error":null,"transport_mode":"hybrid_diff_204_full_200","frame_transport":"full_200","last_full_frame":45,"full_resync_every_frames":900,"send_attempted":true,"send_ms":4600,"elapsed_ms":4800,"period_ms":5000}' -Encoding UTF8
     (Get-Item -LiteralPath $slotBHeartbeat).LastWriteTimeUtc = [DateTime]::UtcNow
     $hybridBaselineHealth = Get-StreamHeartbeatHealth
     if (-not $hybridBaselineHealth.Healthy) {
         throw "Watchdog must allow a bounded hybrid startup/recovery command-200 baseline: $($hybridBaselineHealth.Reason)"
+    }
+
+    Set-Content -LiteralPath $slotBHeartbeat -Value '{"frame":1800,"status":"ok","error":null,"transport_mode":"hybrid_diff_204_full_200","frame_transport":"diff_204","last_full_frame":900,"full_resync_every_frames":900,"send_attempted":true,"send_ms":40,"elapsed_ms":80,"period_ms":1000}' -Encoding UTF8
+    (Get-Item -LiteralPath $slotBHeartbeat).LastWriteTimeUtc = [DateTime]::UtcNow
+    $hybridResyncOverdueHealth = Get-StreamHeartbeatHealth
+    if ($hybridResyncOverdueHealth.Healthy -or $hybridResyncOverdueHealth.Reason -notmatch "full-resync-overdue") {
+        throw "Watchdog must restart a hybrid stream that silently stopped producing full recovery frames."
+    }
+
+    Set-Content -LiteralPath $slotBHeartbeat -Value '{"frame":46,"status":"ok","error":null,"transport_mode":"hybrid_diff_204_full_200","frame_transport":"diff_204","last_full_frame":45,"full_resync_every_frames":0,"send_attempted":true,"send_ms":40,"elapsed_ms":80,"period_ms":1000}' -Encoding UTF8
+    (Get-Item -LiteralPath $slotBHeartbeat).LastWriteTimeUtc = [DateTime]::UtcNow
+    $hybridResyncDisabledHealth = Get-StreamHeartbeatHealth
+    if ($hybridResyncDisabledHealth.Healthy -or $hybridResyncDisabledHealth.Reason -notmatch "full-resync-config-mismatch") {
+        throw "Watchdog must reject a hybrid worker that silently disabled periodic panel recovery."
     }
     $HybridRefresh = $false
 

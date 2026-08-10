@@ -104,6 +104,12 @@ public static class TestStreamCadenceProgram
             SideScreenStreamApp.ShouldAbortAfterSendFailureForTest(true, false, 1, 2));
         Equal("hybrid startup always sends a full baseline even when periodic resync is disabled", true,
             SideScreenStreamApp.ShouldSendFullFrameForTest(1, false, 0));
+        Equal("hybrid production schedules a host-side recovery attempt every fifteen minutes", 900,
+            SideScreenStreamApp.DefaultHybridFullResyncEveryFramesForTest());
+        Equal("frame before the production recovery boundary remains incremental", false,
+            SideScreenStreamApp.ShouldSendFullFrameForTest(899, true, 900));
+        Equal("production recovery boundary redraws the complete panel", true,
+            SideScreenStreamApp.ShouldSendFullFrameForTest(900, true, 900));
         Equal("ordinary differential frame stays incremental", false,
             SideScreenStreamApp.ShouldSendFullFrameForTest(299, true, 300));
         Equal("an explicitly configured boundary sends an optional periodic full baseline", true,
@@ -112,6 +118,20 @@ public static class TestStreamCadenceProgram
             SideScreenStreamApp.ShouldSendFullFrameForTest(301, true, 300));
         Equal("zero disables periodic full baselines after startup", false,
             SideScreenStreamApp.ShouldSendFullFrameForTest(300, true, 0));
+        Equal("hybrid startup follows the vendor duplicate baseline", 2,
+            SideScreenStreamApp.ResolveFullBaselineRepeatCountForTest(true, false));
+        Equal("periodic hybrid recovery uses one redraw to limit clock interruption", 1,
+            SideScreenStreamApp.ResolveFullBaselineRepeatCountForTest(true, true));
+        Equal("hybrid startup primes the panel before its first baseline", true,
+            SideScreenStreamApp.ShouldPrimeFullBaselineForTest(true, false));
+        Equal("periodic hybrid recovery does not repeat disruptive startup priming", false,
+            SideScreenStreamApp.ShouldPrimeFullBaselineForTest(true, true));
+        Equal("periodic hybrid recovery keeps the single serial session", false,
+            SideScreenStreamApp.ShouldReopenDiffSessionBeforeFullForTest(true, true));
+        Equal("periodic hybrid recovery keeps command-204 sequence monotonic", false,
+            SideScreenStreamApp.ShouldResetDiffSequenceAfterFullForTest(true, true));
+        Equal("a rebuilt legacy differential session restarts its sequence", true,
+            SideScreenStreamApp.ShouldResetDiffSequenceAfterFullForTest(false, true));
         Equal("verified full-frame transport is always allowed", true,
             SideScreenStreamApp.IsDifferentialTransportAllowedForTest(false, false, false));
         Equal("live differential transport fails closed without explicit opt-in", false,

@@ -5,7 +5,7 @@ param(
     [ValidateRange(3000, 60000)][int]$SendTimeoutMs = 10000,
     [ValidateRange(100, 5000)][int]$DiffSendTimeoutMs = 900,
     [ValidateRange(1, 10)][int]$MaxConsecutiveSendFailures = 1,
-    [int]$FullResyncEveryFrames = 0,
+    [int]$FullResyncEveryFrames = 900,
     [int]$PreviewIntervalSeconds = 45,
     [int64]$MaxStackLogBytes = 1048576,
     [int64]$MaxStreamLogBytes = 5242880,
@@ -665,6 +665,34 @@ function Get-StreamHeartbeatHealth {
                 }
                 if ($frameTransport -eq "diff_204") {
                     $sendLimitMs = $DiffSendTimeoutMs
+                }
+                if ($FullResyncEveryFrames -gt 0) {
+                    if ($null -eq $heartbeat.last_full_frame -or
+                        $null -eq $heartbeat.full_resync_every_frames) {
+                        return [pscustomobject]@{
+                            Healthy = $false
+                            Reason = "full-resync-missing"
+                        }
+                    }
+                    $lastFullFrame = [int64]$heartbeat.last_full_frame
+                    $reportedFullResyncEveryFrames = [int64]$heartbeat.full_resync_every_frames
+                    $currentFrame = [int64]$heartbeat.frame
+                    if ($reportedFullResyncEveryFrames -ne $FullResyncEveryFrames) {
+                        return [pscustomobject]@{
+                            Healthy = $false
+                            Reason = ("full-resync-config-mismatch reported={0} expected={1}" -f `
+                                $reportedFullResyncEveryFrames, $FullResyncEveryFrames)
+                        }
+                    }
+                    if ($lastFullFrame -le 0 -or
+                        $lastFullFrame -gt $currentFrame -or
+                        ($currentFrame - $lastFullFrame) -ge $FullResyncEveryFrames) {
+                        return [pscustomobject]@{
+                            Healthy = $false
+                            Reason = ("full-resync-overdue frame={0} lastFullFrame={1} limit={2}" -f `
+                                $currentFrame, $lastFullFrame, $FullResyncEveryFrames)
+                        }
+                    }
                 }
             }
             if ($sendMs -gt $sendLimitMs) {
