@@ -174,6 +174,13 @@ public sealed class PhoneNotificationClassificationTests
     [InlineData("Sign-in", "Verification code: 7351942", "7351942")]
     [InlineData("Sign-in", "Your one-time code is 86420917", "86420917")]
     [InlineData("账户安全", "验证码：１２３４５６", "123456")]
+    [InlineData(
+        "账户安全",
+        "...提醒：验证码725816，5分钟有效，勿泄露防诈骗。非本人操作请忽略。",
+        "725816")]
+    [InlineData("账户安全", "动态口令725816，5分钟有效", "725816")]
+    [InlineData("账户安全", "一次性验证码725816，请勿泄露", "725816")]
+    [InlineData("账户安全", "短信码725816，请勿泄露", "725816")]
     [InlineData("Sign-in", "531 902 is your verification code", "531902")]
     [InlineData("Sign-in", "Verification code: 531-902", "531902")]
     [InlineData("账户安全", "482731 是您的腾讯验证码", "482731")]
@@ -221,6 +228,9 @@ public sealed class PhoneNotificationClassificationTests
     [InlineData("账户提醒", "验证码：1380 0138 000")]
     [InlineData("账户提醒", "验证码：123456AB")]
     [InlineData("账户提醒", "验证码：AB123456")]
+    [InlineData("账户提醒", "验证码13800138000")]
+    [InlineData("账户提醒", "验证码123456AB")]
+    [InlineData("账户提醒", "验证码AB123456")]
     public void DoesNotPromoteUnrelatedNumbers(
         string title,
         string body)

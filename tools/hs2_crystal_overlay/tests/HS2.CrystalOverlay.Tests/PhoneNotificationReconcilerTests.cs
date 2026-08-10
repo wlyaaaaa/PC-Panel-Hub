@@ -285,6 +285,29 @@ public sealed class PhoneNotificationReconcilerTests
             StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void VerificationCodeWithoutWhitespaceAfterKeywordUsesFocusCard()
+    {
+        var reconciler = new PhoneNotificationSnapshotReconciler(
+            TimeSpan.FromMinutes(5));
+        _ = reconciler.Reconcile(
+            [Item(70, "微信", "基线消息", OverlaySource.PhoneLink)],
+            Start);
+
+        var request = Assert.Single(reconciler.Reconcile(
+            [Item(
+                71,
+                "账户安全",
+                "...提醒：验证码725816，5分钟有效，勿泄露防诈骗。非本人操作请忽略。",
+                OverlaySource.PhoneLink,
+                Start + TimeSpan.FromSeconds(1))],
+            Start + TimeSpan.FromSeconds(2)));
+
+        Assert.Equal(OverlayKind.PhoneVerificationCode, request.Kind);
+        Assert.Equal("725816", request.Title);
+        Assert.Equal("725816", request.Visual?.VerificationCode);
+    }
+
     private static PhoneNotificationSnapshotItem Item(
         uint id,
         string title,

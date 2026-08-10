@@ -7,6 +7,11 @@ public static partial class PhoneVerificationCodeDetector
 {
     private const int MaximumForwardDistance = 32;
     private const int MaximumReverseDistance = 16;
+    private const string ChineseVerificationKeywordPattern =
+        @"(?:验证码|校验码|认证码|动态(?:码|密码|口令)|一次性(?:密码|口令|验证码)|短信码|安全码)";
+    private const string VerificationKeywordPattern =
+        ChineseVerificationKeywordPattern +
+        @"|(?<![\p{L}\p{N}])(?:otp|verification\s+code|authentication\s+code|security\s+code|auth\s+code|one[\s-]*time\s+(?:code|password|passcode))(?![\p{L}\p{N}])";
 
     public static bool TryExtract(
         string? title,
@@ -189,12 +194,17 @@ public static partial class PhoneVerificationCodeDetector
     }
 
     [GeneratedRegex(
-        @"验证码|校验码|认证码|动态(?:码|密码|口令)|一次性(?:密码|口令|验证码)|短信码|安全码|(?<![\p{L}\p{N}])(?:otp|verification\s+code|authentication\s+code|security\s+code|auth\s+code|one[\s-]*time\s+(?:code|password|passcode))(?![\p{L}\p{N}])",
+        VerificationKeywordPattern,
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex VerificationKeyword();
 
+    // Chinese notifications often place the code directly after the keyword;
+    // keep that narrow exception while retaining the general alphanumeric
+    // boundary for unrelated numbers.
     [GeneratedRegex(
-        @"(?<![\p{L}\p{N}])(?:[0-9]{4}[ \t\u00a0-][0-9]{4}|[0-9]{3}[ \t\u00a0-][0-9]{3}|[0-9]{4,8})(?![\p{L}\p{N}])",
+        @"(?:(?<![\p{L}\p{N}])|(?<=" +
+        ChineseVerificationKeywordPattern +
+        @"))(?:[0-9]{4}[ \t\u00a0-][0-9]{4}|[0-9]{3}[ \t\u00a0-][0-9]{3}|[0-9]{4,8})(?![\p{L}\p{N}])",
         RegexOptions.CultureInvariant)]
     private static partial Regex CodeCandidate();
 
