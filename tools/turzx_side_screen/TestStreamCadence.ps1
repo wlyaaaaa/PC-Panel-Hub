@@ -13,6 +13,11 @@ $exePath = Join-Path $outDir ("TestStreamCadenceProgram.{0}.exe" -f $PID)
 
 $program = @'
 using System;
+using System.Diagnostics;
+using System.Net;
+using System.Net.Sockets;
+using System.Text;
+using System.Threading;
 using TURZX.SideScreen;
 
 public static class TestStreamCadenceProgram
@@ -81,6 +86,8 @@ public static class TestStreamCadenceProgram
             out fallbackStatus);
         Equal("missing cache returns empty snapshot sequence", 0L, empty.Sequence.Value);
         StartsWith("missing cache status marks empty data", "empty:TimeoutException", fallbackStatus);
+
+        VerifyMetricsFetchTotalDeadline();
 
         Equal("device error is classified as send failure", true,
             SideScreenStreamApp.IsLikelyDeviceSendFailureForTest(
@@ -286,6 +293,59 @@ public static class TestStreamCadenceProgram
         }
     }
 
+    private static void VerifyMetricsFetchTotalDeadline()
+    {
+        TcpListener listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        Thread server = new Thread(delegate()
+        {
+            try
+            {
+                using (TcpClient client = listener.AcceptTcpClient())
+                using (NetworkStream stream = client.GetStream())
+                {
+                    byte[] requestBuffer = new byte[4096];
+                    stream.Read(requestBuffer, 0, requestBuffer.Length);
+                    byte[] prefix = Encoding.ASCII.GetBytes(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 1000000\r\nConnection: close\r\n\r\n{");
+                    stream.Write(prefix, 0, prefix.Length);
+                    stream.Flush();
+                    Thread.Sleep(2000);
+                }
+            }
+            catch
+            {
+                // The client is expected to abort the deliberately stalled body.
+            }
+        });
+        server.IsBackground = true;
+        server.Start();
+
+        Stopwatch watch = Stopwatch.StartNew();
+        bool timedOut = false;
+        try
+        {
+            SideScreenStreamApp.FetchSnapshotForTest(
+                "http://127.0.0.1:" + port + "/snapshot",
+                120);
+        }
+        catch (TimeoutException)
+        {
+            timedOut = true;
+        }
+        finally
+        {
+            watch.Stop();
+            listener.Stop();
+        }
+        Equal("stalled metrics body reaches the total deadline", true, timedOut);
+        if (watch.ElapsedMilliseconds >= 750)
+        {
+            throw new Exception("metrics fetch exceeded its total deadline: " + watch.ElapsedMilliseconds + "ms");
+        }
+    }
+
     private static void Equal(string name, object expected, object actual)
     {
         if (!object.Equals(expected, actual))
@@ -346,7 +406,7 @@ try {
         (Join-Path $scriptDir "TURZX.SideScreen.Stream.cs")
     )
 
-    & $cscPath /nologo /codepage:65001 /utf8output /target:exe /main:TestStreamCadenceProgram /out:$exePath /r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Runtime.Serialization.dll $sources
+    & $cscPath /nologo /codepage:65001 /utf8output /target:exe /main:TestStreamCadenceProgram /out:$exePath /r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Net.Http.dll /r:System.Runtime.Serialization.dll $sources
     if ($LASTEXITCODE -ne 0) {
         throw "csc failed with exit code $LASTEXITCODE"
     }

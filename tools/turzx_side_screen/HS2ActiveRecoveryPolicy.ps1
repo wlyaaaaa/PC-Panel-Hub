@@ -571,10 +571,15 @@ function Get-HS2LConnectServiceRecoveryEligibility {
             )
         }
     )
-    if ($controllerEndpoints.Count -eq 0) {
+    if ($controllerEndpoints.Count -ne 1) {
         return [pscustomobject]@{
             Eligible = $false
-            Reason = "bound-native-or-ad23-endpoint-not-healthy"
+            Reason = if ($controllerEndpoints.Count -eq 0) {
+                "bound-native-or-ad23-endpoint-not-healthy"
+            }
+            else {
+                "bound-controller-endpoint-ambiguous"
+            }
             EndpointInstanceId = $null
         }
     }

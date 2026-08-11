@@ -956,6 +956,23 @@ try {
     if ($foreignNativeEligibility.Eligible) {
         throw "An A068 endpoint not parented by the previously bound hub must fail closed."
     }
+
+    $duplicateAd23Endpoint = [pscustomobject]@{
+        InstanceId = "USB\VID_1A86&PID_AD23\duplicate-controller"
+        ParentInstanceId = $validHub.InstanceId
+        Present = $true
+        Status = "OK"
+        ProblemCode = 0
+    }
+    $ambiguousControllerEligibility = Get-HS2LConnectServiceRecoveryEligibility `
+        -BindingPath $nativeLConnectBindingPath `
+        -Snapshot ([pscustomobject]@{
+            Devices = @($nativeRecoveryHub, $nativeA068Endpoint, $duplicateAd23Endpoint)
+        })
+    if ($ambiguousControllerEligibility.Eligible -or
+        $ambiguousControllerEligibility.Reason -cne "bound-controller-endpoint-ambiguous") {
+        throw "Multiple healthy controller endpoints on the bound hub must fail closed."
+    }
 }
 finally {
     Remove-Item -LiteralPath $nativeLConnectBindingPath -Force -ErrorAction SilentlyContinue
@@ -1493,9 +1510,40 @@ foreach ($pattern in @(
     "Get-TurzxShutdownEventDecision"
     "ShutdownStartupGraceSeconds"
     "HeartbeatStartupGraceSeconds = 60"
+    "FailureCircuitBreakerSeconds = 30"
+    "failure circuit open"
+    "failure circuit closed"
 )) {
     if ($watchdogText -notmatch [regex]::Escape($pattern)) {
         throw "Watchdog missing expected pattern: $pattern"
+    }
+}
+if ($watchdogText -match 'watchdog paused') {
+    throw "Repeated stream failures must enter a bounded retry circuit instead of permanently pausing the watchdog."
+}
+
+$stopText = Get-Content -Raw -LiteralPath $stop
+foreach ($pattern in @(
+        "Wait-TurzxStreamProcessesExit",
+        "stream processes did not exit",
+        'side-screen-stack.pid')) {
+    if ($stopText -notmatch [regex]::Escape($pattern)) {
+        throw "Stack stop must prove the old stream released COM before restart; missing: $pattern"
+    }
+}
+if ($watchdogText -notmatch '(?s)function Stop-Stack.*?\$LASTEXITCODE\s+-ne\s+0.*?throw') {
+    throw "Watchdog Start-Stack must fail closed when StopSideScreenStack cannot prove stream exit."
+}
+foreach ($powerTransition in @(
+        [pscustomobject]@{ Function = 'Enter-SleepDisplayState'; Reason = 'suspend'; State = 'Sleep' },
+        [pscustomobject]@{ Function = 'Enter-ShutdownDisplayState'; Reason = 'shutdown'; State = 'Shutdown' }
+    )) {
+    $pattern = '(?s)function\s+{0}.*?try\s*\{{\s*Stop-Stack\s+-Reason\s+"{1}"\s*\}}\s*catch.*?Invoke-HS2PowerState\s+-State\s+{2}' -f `
+        [regex]::Escape($powerTransition.Function),
+        [regex]::Escape($powerTransition.Reason),
+        [regex]::Escape($powerTransition.State)
+    if ($watchdogText -notmatch $pattern) {
+        throw "$($powerTransition.State) must still execute the HS2 power policy when stream-stop proof fails."
     }
 }
 
@@ -1935,6 +1983,7 @@ foreach ($pattern in @(
     "Disable-ScheduledTask",
     "AllowStartIfOnBatteries",
     "DontStopIfGoingOnBatteries"
+    "RestartCount 999"
 )) {
     if ($installerText -notmatch [regex]::Escape($pattern)) {
         throw "Startup installer must make Task Scheduler own the hidden watchdog process; missing: $pattern"

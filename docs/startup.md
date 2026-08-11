@@ -116,6 +116,15 @@ process is still visible while its HTTP endpoint is already dead, the launcher
 waits for port `18765` to release and starts a replacement. The watchdog allows
 60 seconds for this startup recovery before evaluating stream heartbeats.
 
+Repeated child exits or heartbeat stalls now open a bounded 30-second circuit:
+the watchdog proves that the previous `TURZX.SideScreen.Stream` process released
+COM, cools down, and then starts one new stack instead of exiting successfully
+and leaving the panel frozen. The scheduled task retains a long restart budget
+for an actual worker fault. Sleep and shutdown still execute the HS2 power policy
+even if old-stream exit proof or the TURZX brightness fallback fails; normal
+startup remains fail-closed and will not create a second COM writer until the old
+one is gone.
+
 Install:
 
 ```powershell

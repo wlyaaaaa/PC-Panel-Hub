@@ -21,7 +21,8 @@ PC Panel Hub is intentionally split into small local processes:
    - Prevents heavy process sampling from blocking the 1s main snapshot loop.
 
 4. `TURZX.SideScreen.Stream.exe`
-   - Fetches snapshots with a short timeout and reuses the last good snapshot if metrics are slow.
+   - Fetches snapshots under one total deadline covering headers and the complete body,
+     then reuses the last good snapshot if metrics are slow or stall mid-response.
    - Renders 480x1920 bitmaps with `System.Drawing`.
    - Keeps verified command `200` as the conservative 3-second mode.
    - Provides an explicit hybrid candidate for the required 1Hz clock: vendor-shaped
@@ -63,7 +64,9 @@ PC Panel Hub is intentionally split into small local processes:
 - A successful host write is not a device ACK. Physical 1Hz/freeze acceptance remains a
   visual hardware check until the vendor exposes a trustworthy panel-status response; the
   900-frame redraw limits time between host attempts, not proven physical outage duration.
-- Metrics fetches are capped at a short timeout; stale hardware values are preferable to a visibly stalled screen.
+- Metrics fetches use one short cancellation deadline for the complete HTTP response,
+  including a stalled body, and cap the buffered payload at 4 MiB. Stale hardware values
+  are preferable to a visibly stalled screen.
 - Top process ranking refresh: `3s`.
 - Weather refresh: cached and much slower.
 - Data trust log write: throttled to avoid high-frequency disk writes.

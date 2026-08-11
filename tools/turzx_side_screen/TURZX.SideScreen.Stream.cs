@@ -4,6 +4,7 @@ using System.Drawing;
 using System.Drawing.Imaging;
 using System.IO;
 using System.Net;
+using System.Net.Http;
 using System.Runtime.Serialization.Json;
 using System.Text;
 using System.Threading;
@@ -19,7 +20,9 @@ namespace TURZX.SideScreen
         private const int DefaultDifferentialSendTimeoutMilliseconds = 900;
         private const int DefaultMaxConsecutiveSendFailures = 1;
         private const int DefaultHybridFullResyncEveryFrames = 900;
+        private const long DefaultMaxMetricsPayloadBytes = 4L * 1024L * 1024L;
         private static int previewWorkerActive;
+        private static readonly HttpClient MetricsHttpClient = CreateMetricsHttpClient();
 
         public static int Main(string[] args)
         {
@@ -1015,26 +1018,72 @@ namespace TURZX.SideScreen
 
         private static Snapshot FetchSnapshot(StreamOptions options)
         {
-            HttpWebRequest request = (HttpWebRequest)WebRequest.Create(options.MetricsUrl);
-            request.Method = "GET";
-            request.Timeout = options.HttpTimeoutMs;
-            request.ReadWriteTimeout = options.HttpTimeoutMs;
-            using (WebResponse response = request.GetResponse())
-            using (Stream stream = response.GetResponseStream())
+            return FetchSnapshotWithTotalDeadline(options.MetricsUrl, options.HttpTimeoutMs);
+        }
+
+        internal static Snapshot FetchSnapshotForTest(string metricsUrl, int timeoutMs)
+        {
+            return FetchSnapshotWithTotalDeadline(metricsUrl, timeoutMs);
+        }
+
+        private static HttpClient CreateMetricsHttpClient()
+        {
+            HttpClientHandler handler = new HttpClientHandler();
+            handler.UseProxy = false;
+            HttpClient client = new HttpClient(handler);
+            client.Timeout = Timeout.InfiniteTimeSpan;
+            client.MaxResponseContentBufferSize = DefaultMaxMetricsPayloadBytes;
+            return client;
+        }
+
+        private static Snapshot FetchSnapshotWithTotalDeadline(string metricsUrl, int timeoutMs)
+        {
+            if (timeoutMs <= 0)
             {
-                DataContractJsonSerializer serializer = new DataContractJsonSerializer(typeof(Snapshot));
-                Snapshot snapshot = serializer.ReadObject(stream) as Snapshot;
-                if (snapshot == null)
-                {
-                    throw new InvalidDataException("Snapshot JSON did not deserialize.");
-                }
+                throw new ArgumentOutOfRangeException("timeoutMs", "Metrics timeout must be positive.");
+            }
 
-                if (snapshot.SchemaVersion.HasValue && snapshot.SchemaVersion.Value != 1)
+            using (CancellationTokenSource deadline = new CancellationTokenSource(timeoutMs))
+            using (HttpRequestMessage request = new HttpRequestMessage(HttpMethod.Get, metricsUrl))
+            {
+                try
                 {
-                    throw new InvalidDataException("Unsupported schema_version: " + snapshot.SchemaVersion.Value);
-                }
+                    using (HttpResponseMessage response = MetricsHttpClient.SendAsync(
+                        request,
+                        HttpCompletionOption.ResponseContentRead,
+                        deadline.Token).GetAwaiter().GetResult())
+                    {
+                        response.EnsureSuccessStatusCode();
+                        byte[] payload = response.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult();
+                        if (payload.LongLength > DefaultMaxMetricsPayloadBytes)
+                        {
+                            throw new InvalidDataException("Metrics response exceeded the payload limit.");
+                        }
 
-                return snapshot;
+                        using (MemoryStream stream = new MemoryStream(payload, false))
+                        {
+                            DataContractJsonSerializer serializer = new DataContractJsonSerializer(typeof(Snapshot));
+                            Snapshot snapshot = serializer.ReadObject(stream) as Snapshot;
+                            if (snapshot == null)
+                            {
+                                throw new InvalidDataException("Snapshot JSON did not deserialize.");
+                            }
+
+                            if (snapshot.SchemaVersion.HasValue && snapshot.SchemaVersion.Value != 1)
+                            {
+                                throw new InvalidDataException("Unsupported schema_version: " + snapshot.SchemaVersion.Value);
+                            }
+
+                            return snapshot;
+                        }
+                    }
+                }
+                catch (OperationCanceledException ex)
+                {
+                    throw new TimeoutException(
+                        "Metrics snapshot exceeded the total deadline of " + timeoutMs + "ms.",
+                        ex);
+                }
             }
         }
 

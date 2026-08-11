@@ -40,6 +40,26 @@ function Stop-MatchingProcess {
         }
 }
 
+function Wait-TurzxStreamProcessesExit {
+    param([ValidateRange(1, 60)][int]$TimeoutSeconds = 10)
+
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    do {
+        $remaining = @(Get-Process "TURZX.SideScreen.Stream*" -ErrorAction SilentlyContinue)
+        if ($remaining.Count -eq 0) {
+            return
+        }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTime]::UtcNow -lt $deadline)
+
+    $remaining = @(Get-Process "TURZX.SideScreen.Stream*" -ErrorAction SilentlyContinue)
+    if ($remaining.Count -gt 0) {
+        $ids = @($remaining | ForEach-Object { $_.Id }) -join ","
+        Write-StopLog ("stream processes did not exit before timeout pids={0}" -f $ids)
+        throw "TURZX stream processes did not exit before timeout: $ids"
+    }
+}
+
 $sidePattern = "*" + $side + "*"
 $weatherPattern = "*" + $weather + "*"
 $processSnapshot = @(Get-CimInstance Win32_Process)
@@ -112,7 +132,11 @@ if ($IncludeWatchdog) {
     }
 }
 
-foreach ($pidFile in @("video-stream.pid", "side-screen-stack-child.pid")) {
+# A new COM writer must never start until the previous stream process has
+# actually released the device.  taskkill success text alone is not proof.
+Wait-TurzxStreamProcessesExit
+
+foreach ($pidFile in @("video-stream.pid", "side-screen-stack-child.pid", "side-screen-stack.pid")) {
     $path = Join-Path $outDir $pidFile
     if (Test-Path -LiteralPath $path) {
         Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue

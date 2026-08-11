@@ -94,6 +94,24 @@ foreach ($pattern in @(
 if ($streamSource -notmatch 'SendDiffWithTimeout[\s\S]{0,500}DiffSendTimeoutMs') {
     throw "Command 204 must use its dedicated bounded send path and 900ms budget."
 }
+foreach ($pattern in @(
+    'HttpCompletionOption.ResponseContentRead',
+    'CancellationTokenSource(timeoutMs)',
+    'Timeout.InfiniteTimeSpan',
+    'FetchSnapshotForTest',
+    'MaxResponseContentBufferSize = DefaultMaxMetricsPayloadBytes'
+)) {
+    if ($streamSource -notmatch [regex]::Escape($pattern)) {
+        throw "Metrics fetch must enforce one total response deadline: $pattern"
+    }
+}
+if ($streamSource -match 'serializer\.ReadObject\(response\.GetResponseStream\(\)\)' -or
+    $streamSource -match 'HttpWebRequest') {
+    throw "Metrics JSON must not deserialize directly from an unbounded network stream."
+}
+if ($streamStart -notmatch [regex]::Escape('/r:System.Net.Http.dll')) {
+    throw "The stream compiler must reference System.Net.Http.dll for bounded metrics fetches."
+}
 if ($senderSource -notmatch [regex]::Escape('SendDiffWithTimeout')) {
     throw "TURZX helper sender must expose a bounded command-204 send operation."
 }

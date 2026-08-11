@@ -208,7 +208,7 @@ $sources = @(
     (Join-Path $scriptDir "TURZX.SideScreen.Stream.cs")
 )
 
-& $cscPath /nologo /codepage:65001 /utf8output /target:exe /out:$exePath /r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Runtime.Serialization.dll $sources
+& $cscPath /nologo /codepage:65001 /utf8output /target:exe /out:$exePath /r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Net.Http.dll /r:System.Runtime.Serialization.dll $sources
 if ($LASTEXITCODE -ne 0) {
     throw "csc failed with exit code $LASTEXITCODE"
 }

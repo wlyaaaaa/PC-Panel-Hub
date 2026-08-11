@@ -9,6 +9,10 @@ $ErrorActionPreference = "Stop"
 $side = Join-Path $Root "tools\turzx_side_screen"
 
 function Get-LiveStreamEvidence {
+    $productionTransportModes = @(
+        "verified_full_200",
+        "hybrid_diff_204_full_200"
+    )
     $heartbeatPaths = @(
         (Join-Path $side "out\stream\stream-heartbeat.json"),
         (Join-Path $side "out\stream\stream-heartbeat-a.json"),
@@ -28,7 +32,7 @@ function Get-LiveStreamEvidence {
             if ($heartbeatAgeSeconds -le 15 -and
                 [int64]$heartbeat.frame -gt 0 -and
                 [string]$heartbeat.status -ne "fatal" -and
-                [string]$heartbeat.transport_mode -eq "verified_full_200") {
+                [string]$heartbeat.transport_mode -in $productionTransportModes) {
                 return [pscustomobject]@{
                     Source = "fresh-heartbeat"
                     Detail = ("frame={0} ageSeconds={1:N1} transport={2} file={3}" -f [int64]$heartbeat.frame, $heartbeatAgeSeconds, [string]$heartbeat.transport_mode, $heartbeatItem.Name)

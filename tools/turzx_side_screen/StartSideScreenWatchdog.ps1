@@ -22,6 +22,7 @@ param(
     [int]$ShutdownStartupGraceSeconds = 180,
     [int]$MaxConsecutiveHeartbeatFailures = 3,
     [int]$MaxConsecutiveFailures = 3,
+    [ValidateRange(10, 3600)][int]$FailureCircuitBreakerSeconds = 30,
     [ValidateRange(5, 3600)][int]$HS2OverlayRetrySeconds = 30,
     [ValidateRange(5, 300)][int]$HS2ActiveRetrySeconds = 15,
     [ValidateRange(30, 3600)][int]$HS2ActiveSlowRetrySeconds = 60,
@@ -149,7 +150,29 @@ function Write-WatchdogLog {
 function Stop-Stack {
     param([string]$Reason)
     Write-WatchdogLog ("stop stack reason={0}" -f $Reason)
-    powershell -NoProfile -ExecutionPolicy Bypass -File $stopScript -Root $Root -Quiet | Out-Null
+    $stopOutput = @(
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $stopScript -Root $Root -Quiet 2>&1
+    )
+    if ($LASTEXITCODE -ne 0) {
+        throw "StopSideScreenStack failed to prove the previous stream exited: $($stopOutput -join ' ')"
+    }
+}
+
+function Invoke-TurzxFailureCircuitBreaker {
+    param([Parameter(Mandatory = $true)][string]$Reason)
+
+    Set-Content -LiteralPath $pausedPath -Value (Get-Date -Format "o") -Encoding ASCII
+    Write-WatchdogLog ("failure circuit open reason={0} cooldownSeconds={1}" -f $Reason, $FailureCircuitBreakerSeconds)
+    try {
+        Stop-Stack -Reason ("failure-circuit/{0}" -f $Reason)
+        Start-Sleep -Seconds $FailureCircuitBreakerSeconds
+    }
+    finally {
+        Remove-Item -LiteralPath $pausedPath -Force -ErrorAction SilentlyContinue
+    }
+    Write-WatchdogLog ("failure circuit closed reason={0}; retrying stack" -f $Reason)
+    $newChild = Start-Stack -Reason ("failure-circuit/{0}" -f $Reason)
+    return $newChild
 }
 
 function Set-TurzxPanelBrightness {
@@ -841,10 +864,20 @@ function Enter-SleepDisplayState {
         Write-WatchdogLog ("HS2 monitor-mode request state=Sleep failed: {0}" -f $_.Exception.Message)
     }
 
-    Stop-Stack -Reason "suspend"
-    if (-not (Set-TurzxPanelBrightness -Brightness 0)) {
-        Write-WatchdogLog "TURZX power-off reason=suspend fallback=black-frame"
-        Send-Blank -Reason "power-off-fallback/suspend" -TimeoutMs $QuickBlankTimeoutMs
+    try {
+        Stop-Stack -Reason "suspend"
+    }
+    catch {
+        Write-WatchdogLog ("TURZX stop proof failed reason=suspend; continuing HS2 power policy: {0}" -f $_.Exception.Message)
+    }
+    try {
+        if (-not (Set-TurzxPanelBrightness -Brightness 0)) {
+            Write-WatchdogLog "TURZX power-off reason=suspend fallback=black-frame"
+            Send-Blank -Reason "power-off-fallback/suspend" -TimeoutMs $QuickBlankTimeoutMs
+        }
+    }
+    catch {
+        Write-WatchdogLog ("TURZX power-off reason=suspend failed; continuing HS2 power policy: {0}" -f $_.Exception.Message)
     }
 
     try {
@@ -871,10 +904,20 @@ function Enter-ShutdownDisplayState {
         Write-WatchdogLog ("HS2 monitor-mode request state=Shutdown failed: {0}" -f $_.Exception.Message)
     }
 
-    Stop-Stack -Reason "shutdown"
-    if (-not (Set-TurzxPanelBrightness -Brightness 0)) {
-        Write-WatchdogLog "TURZX power-off reason=shutdown fallback=black-frame"
-        Send-Blank -Reason "power-off-fallback/shutdown" -TimeoutMs $QuickBlankTimeoutMs
+    try {
+        Stop-Stack -Reason "shutdown"
+    }
+    catch {
+        Write-WatchdogLog ("TURZX stop proof failed reason=shutdown; continuing HS2 power policy: {0}" -f $_.Exception.Message)
+    }
+    try {
+        if (-not (Set-TurzxPanelBrightness -Brightness 0)) {
+            Write-WatchdogLog "TURZX power-off reason=shutdown fallback=black-frame"
+            Send-Blank -Reason "power-off-fallback/shutdown" -TimeoutMs $QuickBlankTimeoutMs
+        }
+    }
+    catch {
+        Write-WatchdogLog ("TURZX power-off reason=shutdown failed; continuing HS2 power policy: {0}" -f $_.Exception.Message)
     }
 
     try {
@@ -1270,9 +1313,11 @@ try {
             $consecutiveFailures++
             Write-WatchdogLog ("stack child exited code={0}; consecutiveFailures={1}" -f $child.ExitCode, $consecutiveFailures)
             if ($consecutiveFailures -ge $MaxConsecutiveFailures) {
-                Set-Content -LiteralPath $pausedPath -Value (Get-Date -Format "o") -Encoding ASCII
-                Write-WatchdogLog ("max consecutive failures reached ({0}); watchdog paused" -f $MaxConsecutiveFailures)
-                break
+                $child = Invoke-TurzxFailureCircuitBreaker -Reason "child-exit"
+                $childStartedUtc = [DateTime]::UtcNow
+                $consecutiveFailures = 0
+                $heartbeatFailures = 0
+                continue
             }
             Start-Sleep -Seconds 3
             $child = Start-Stack -Reason "child-exit"
@@ -1294,9 +1339,11 @@ try {
                 if ($heartbeatFailures -ge $MaxConsecutiveHeartbeatFailures) {
                     $consecutiveFailures++
                     if ($consecutiveFailures -ge $MaxConsecutiveFailures) {
-                        Set-Content -LiteralPath $pausedPath -Value (Get-Date -Format "o") -Encoding ASCII
-                        Write-WatchdogLog ("max consecutive failures reached ({0}) after heartbeat stalls; watchdog paused" -f $MaxConsecutiveFailures)
-                        break
+                        $child = Invoke-TurzxFailureCircuitBreaker -Reason "heartbeat-stalls"
+                        $childStartedUtc = [DateTime]::UtcNow
+                        $consecutiveFailures = 0
+                        $heartbeatFailures = 0
+                        continue
                     }
                     Stop-Stack -Reason "heartbeat-unhealthy"
                     Start-Sleep -Seconds 3

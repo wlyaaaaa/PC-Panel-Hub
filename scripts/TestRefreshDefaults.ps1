@@ -47,6 +47,17 @@ foreach ($relative in $productionEntryFiles) {
     }
 }
 
+# The aggregate test runner must recognize every production transport before
+# deciding whether it is safe to launch the entity COM test.  Rejecting the
+# active hybrid heartbeat can race TestVideoStream.ps1 against the live COM7
+# owner when task/process evidence is temporarily unavailable.
+$testRunnerText = Get-Content -Raw -LiteralPath (Join-Path $Root "scripts\test.ps1")
+foreach ($transport in @("verified_full_200", "hybrid_diff_204_full_200")) {
+    if ($testRunnerText -notmatch [regex]::Escape($transport)) {
+        throw "Live stream guard must recognize production transport: $transport"
+    }
+}
+
 # The HS2 full-feature path preserves whichever controller mode the service
 # reports.  Startup artifacts must not preselect a mode switch: only a native
 # 17104896 controller may enter the watchdog's one-time 30-second promotion.
