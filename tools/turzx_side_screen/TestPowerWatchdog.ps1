@@ -232,6 +232,52 @@ if (Test-HS2OverlayProcessCandidate `
     throw "A zero-thread HS2 crash ghost must not own overlay protection."
 }
 
+$overlayRebindRunning = Get-HS2OverlayRebindDecision `
+    -RebindRequired $true `
+    -IsRunning $true
+if ($overlayRebindRunning.Action -cne "Recycle") {
+    throw "A live overlay must be recycled after the HS2 display is rebound."
+}
+$overlayRebindMissing = Get-HS2OverlayRebindDecision `
+    -RebindRequired $true `
+    -IsRunning $false
+if ($overlayRebindMissing.Action -cne "Activate") {
+    throw "A missing overlay must activate after the HS2 display is rebound."
+}
+$overlayRebindIdle = Get-HS2OverlayRebindDecision `
+    -RebindRequired $false `
+    -IsRunning $true
+if ($overlayRebindIdle.Action -cne "None") {
+    throw "A verified overlay must not be recycled without a rebind request."
+}
+
+$overlayRecycleProbe = Start-Process `
+    -FilePath "powershell.exe" `
+    -ArgumentList @(
+        "-NoProfile",
+        "-WindowStyle", "Hidden",
+        "-Command", "Start-Sleep -Seconds 30") `
+    -WindowStyle Hidden `
+    -PassThru
+try {
+    Start-Sleep -Milliseconds 200
+    $overlayRecycleResult = @(
+        Stop-HS2OverlayForRebind `
+            -Process $overlayRecycleProbe `
+            -TimeoutMilliseconds 3000)
+    if ($overlayRecycleResult.Count -ne 1 -or
+        -not $overlayRecycleResult[0].Attempted -or
+        -not $overlayRecycleResult[0].Stopped) {
+        throw "Overlay recycle must return exactly one structured result after stopping its exact probe process."
+    }
+}
+finally {
+    Stop-Process `
+        -Id $overlayRecycleProbe.Id `
+        -Force `
+        -ErrorAction SilentlyContinue
+}
+
 $healthyOverlay = Get-HS2OverlayWatchdogDecision `
     -IsRunning $true `
     -LastAttemptUtc ([DateTime]::MinValue) `
@@ -266,6 +312,69 @@ $retryOverlay = Get-HS2OverlayWatchdogDecision `
     -RetrySeconds 30
 if ($retryOverlay.Action -ne "Activate") {
     throw "A missing HS2 overlay must be retried after the retry interval."
+}
+
+$lconnectRecoveryStarted = $decisionNow.AddSeconds(-20)
+$lconnectFastRetry = Get-HS2LConnectRecoveryFollowUpDecision `
+    -DisplayHealthy $true `
+    -RecoveryAttempted $true `
+    -RecoveryStartedUtc $lconnectRecoveryStarted `
+    -NowUtc $decisionNow `
+    -GraceSeconds 90
+if ($lconnectFastRetry.Action -cne "FastRetry") {
+    throw "L-Connect controller warm-up must keep the fast retry cadence."
+}
+$lconnectExpired = Get-HS2LConnectRecoveryFollowUpDecision `
+    -DisplayHealthy $true `
+    -RecoveryAttempted $true `
+    -RecoveryStartedUtc $decisionNow.AddSeconds(-91) `
+    -NowUtc $decisionNow `
+    -GraceSeconds 90
+if ($lconnectExpired.Action -cne "SlowRetry") {
+    throw "L-Connect recovery must stop fast retrying after its bounded grace period."
+}
+$lconnectInitial = Get-HS2LConnectRecoveryFollowUpDecision `
+    -DisplayHealthy $true `
+    -RecoveryAttempted $false `
+    -RecoveryStartedUtc ([DateTime]::MinValue) `
+    -NowUtc $decisionNow `
+    -GraceSeconds 90
+if ($lconnectInitial.Action -cne "RestartService") {
+    throw "A healthy HS2 USB display with a missing controller must restart L-Connect once."
+}
+$lconnectUnsafe = Get-HS2LConnectRecoveryFollowUpDecision `
+    -DisplayHealthy $false `
+    -RecoveryAttempted $false `
+    -RecoveryStartedUtc ([DateTime]::MinValue) `
+    -NowUtc $decisionNow `
+    -GraceSeconds 90
+if ($lconnectUnsafe.Action -cne "SlowRetry") {
+    throw "L-Connect service recovery must fail closed while the USB display is absent."
+}
+
+$script:controllerProbeCount = 0
+$controllerReady = Wait-HS2LConnectControllerReady `
+    -MaximumAttempts 3 `
+    -PollMilliseconds 1 `
+    -ControllerProbe {
+        $script:controllerProbeCount++
+        return $script:controllerProbeCount -ge 3
+    } `
+    -DelayAction { param([int]$Milliseconds) }
+if (-not $controllerReady -or $script:controllerProbeCount -ne 3) {
+    throw "L-Connect controller readiness must poll until the real controller appears."
+}
+$script:controllerProbeCount = 0
+$controllerPending = Wait-HS2LConnectControllerReady `
+    -MaximumAttempts 2 `
+    -PollMilliseconds 1 `
+    -ControllerProbe {
+        $script:controllerProbeCount++
+        return $false
+    } `
+    -DelayAction { param([int]$Milliseconds) }
+if ($controllerPending -or $script:controllerProbeCount -ne 2) {
+    throw "L-Connect controller readiness must stop after its bounded attempt budget."
 }
 
 [xml]$manifestXml = Get-Content -Raw -LiteralPath $overlayManifest
@@ -683,6 +792,9 @@ foreach ($pattern in @(
     "Enable-DesktopWindowPreservation",
     "Windows display window preservation compliant=",
     "Invoke-HS2OverlayHealthCheck",
+    "Get-HS2OverlayRebindDecision",
+    "Stop-HS2OverlayForRebind",
+    "hs2OverlayRebindRequired",
     "Invoke-HS2ExclusiveWindowProtection",
     "Invoke-HS2ExclusiveWindowGuard",
     "HS2 exclusive-window guard corrected",
@@ -691,6 +803,9 @@ foreach ($pattern in @(
     "Invoke-HS2ActiveMaintenance",
     "Invoke-HS2UsbRecovery",
     "HS2UsbRecoveryAfterFailures",
+    "Get-HS2LConnectRecoveryFollowUpDecision",
+    "HS2LConnectRecoveryRetrySeconds = 5",
+    "HS2LConnectRecoveryGraceSeconds = 90",
     "HS2ActiveSlowRetrySeconds",
     "HS2 recovery helper failed safely",
     "hs2-usb-topology-binding.json",
@@ -733,6 +848,9 @@ if ($watchdogText -notmatch '\$null\s*-eq\s*\$result\s*-or\s*-not\s*\[bool\]\$re
 }
 if ($watchdogText -notmatch '(?s)function Invoke-HS2ActiveMaintenance.*?try\s*\{.*?Get-HS2UsbRecoveryPlan.*?catch\s*\{.*?HS2 recovery helper failed safely') {
     throw "HS2 PnP and recovery helpers must be isolated from the watchdog main loop."
+}
+if ($activeRecoveryText -notmatch '(?s)function Invoke-HS2LConnectServiceRecovery.*?WaitForStatus.*?Wait-HS2LConnectControllerReady') {
+    throw "L-Connect recovery must wait for the real controller after the service reports Running."
 }
 
 $watchdogTokens = $null
@@ -879,6 +997,20 @@ Assert-OrderAfter `
 
 Assert-OrderAfter `
     -Text $watchdogText `
+    -Anchor 'function Set-ActiveDisplayState' `
+    -First '$script:hs2OverlayRebindRequired = $true' `
+    -Second 'Invoke-HS2ActiveMaintenance -Reason $Reason' `
+    -Message "Every startup or resume must request one overlay display rebind before activation."
+
+Assert-OrderAfter `
+    -Text $watchdogText `
+    -Anchor 'function Invoke-HS2OverlayHealthCheck' `
+    -First 'Stop-HS2OverlayForRebind' `
+    -Second 'Start-HS2OverlayActivation' `
+    -Message "A surviving stale overlay must be stopped before the rebound display is activated."
+
+Assert-OrderAfter `
+    -Text $watchdogText `
     -Anchor 'function Invoke-HS2ActiveMaintenance' `
     -First 'Invoke-HS2PowerState -State Active' `
     -Second '$script:hs2DisplayStateActive = $true' `
@@ -888,7 +1020,7 @@ Assert-OrderAfter `
     -Text $watchdogText `
     -Anchor 'function Invoke-HS2ActiveMaintenance' `
     -First 'Get-HS2UsbRecoveryPlan' `
-    -Second 'Test-HS2UsbDisplayHealthy' `
+    -Second 'Get-HS2LConnectRecoveryFollowUpDecision' `
     -Message "An exact bound Code 43 plan must take precedence over L-Connect service recovery."
 
 Assert-OrderAfter `
@@ -911,7 +1043,7 @@ if ($watchdogText -notmatch [regex]::Escape('-SkipDedicatedHubRestart:$skipDedic
 
 Assert-OrderAfter `
     -Text $watchdogText `
-    -Anchor 'if (-not $script:hs2LConnectRecoveryAttempted)' `
+    -Anchor 'if ($lconnectDecision.Action -eq "RestartService")' `
     -First '$script:hs2LConnectRecoveryAttempted = $true' `
     -Second 'Invoke-HS2LConnectServiceRecovery' `
     -Message "L-Connect recovery must be consumed before restarting the service."

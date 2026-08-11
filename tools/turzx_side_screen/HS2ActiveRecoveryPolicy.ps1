@@ -32,6 +32,33 @@ function Get-HS2ActiveRecoveryDecision {
     return [pscustomobject]@{ Action = "Healthy"; Reason = "verified" }
 }
 
+function Get-HS2LConnectRecoveryFollowUpDecision {
+    param(
+        [Parameter(Mandatory = $true)][bool]$DisplayHealthy,
+        [Parameter(Mandatory = $true)][bool]$RecoveryAttempted,
+        [Parameter(Mandatory = $true)][DateTime]$RecoveryStartedUtc,
+        [Parameter(Mandatory = $true)][DateTime]$NowUtc,
+        [ValidateRange(15, 300)][int]$GraceSeconds = 90
+    )
+
+    if (-not $DisplayHealthy) {
+        return [pscustomobject]@{ Action = "SlowRetry" }
+    }
+
+    if (-not $RecoveryAttempted) {
+        return [pscustomobject]@{ Action = "RestartService" }
+    }
+
+    if ($RecoveryStartedUtc -ne [DateTime]::MinValue -and
+        ($NowUtc.ToUniversalTime() -
+            $RecoveryStartedUtc.ToUniversalTime()).TotalSeconds -lt
+        $GraceSeconds) {
+        return [pscustomobject]@{ Action = "FastRetry" }
+    }
+
+    return [pscustomobject]@{ Action = "SlowRetry" }
+}
+
 function Get-HS2UsbRecoveryPlan {
     param(
         [Parameter(Mandatory = $true)][string]$BoundHubInstanceId,
@@ -355,6 +382,45 @@ function Test-HS2UsbDisplayHealthy {
     return $null -ne $device
 }
 
+function Wait-HS2LConnectControllerReady {
+    param(
+        [ValidateRange(1, 60)][int]$MaximumAttempts = 10,
+        [ValidateRange(1, 5000)][int]$PollMilliseconds = 500,
+        [ValidateRange(1, 65535)][int]$ServicePort = 11021,
+        [scriptblock]$ControllerProbe,
+        [scriptblock]$DelayAction = {
+            param([int]$Milliseconds)
+            Start-Sleep -Milliseconds $Milliseconds
+        }
+    )
+
+    if ($null -eq $ControllerProbe) {
+        $ControllerProbe = {
+            param([int]$Port)
+            try {
+                $controller = Get-HS2Controller `
+                    -ServicePort $Port `
+                    -TimeoutSec 1
+                return $null -ne $controller
+            }
+            catch {
+                return $false
+            }
+        }
+    }
+
+    for ($attempt = 1; $attempt -le $MaximumAttempts; $attempt++) {
+        if ([bool](& $ControllerProbe $ServicePort)) {
+            return $true
+        }
+        if ($attempt -lt $MaximumAttempts) {
+            & $DelayAction $PollMilliseconds
+        }
+    }
+
+    return $false
+}
+
 function Invoke-HS2PnPUtil {
     param([Parameter(Mandatory = $true)][string[]]$Arguments)
 
@@ -492,7 +558,12 @@ function Invoke-HS2UsbRecovery {
 }
 
 function Invoke-HS2LConnectServiceRecovery {
-    param([ValidateRange(1, 30)][int]$RunningTimeoutSeconds = 10)
+    param(
+        [ValidateRange(1, 30)][int]$RunningTimeoutSeconds = 10,
+        [ValidateRange(1, 60)][int]$ControllerReadyAttempts = 10,
+        [ValidateRange(1, 5000)][int]$ControllerPollMilliseconds = 500,
+        [ValidateRange(1, 65535)][int]$ServicePort = 11021
+    )
 
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = [Security.Principal.WindowsPrincipal]::new($identity)
@@ -514,7 +585,20 @@ function Invoke-HS2LConnectServiceRecovery {
         $service.WaitForStatus(
             [ServiceProcess.ServiceControllerStatus]::Running,
             [TimeSpan]::FromSeconds($RunningTimeoutSeconds))
-        return [pscustomobject]@{ Attempted = $true; Recovered = $true; Reason = "lconnect-service-restarted" }
+        $controllerReady = Wait-HS2LConnectControllerReady `
+            -MaximumAttempts $ControllerReadyAttempts `
+            -PollMilliseconds $ControllerPollMilliseconds `
+            -ServicePort $ServicePort
+        return [pscustomobject]@{
+            Attempted = $true
+            Recovered = $controllerReady
+            Reason = if ($controllerReady) {
+                "lconnect-controller-ready"
+            }
+            else {
+                "lconnect-service-running-controller-pending"
+            }
+        }
     }
     catch {
         return [pscustomobject]@{ Attempted = $true; Recovered = $false; Reason = "lconnect-service-restart-failed" }

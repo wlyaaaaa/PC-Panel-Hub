@@ -40,6 +40,21 @@ function Get-HS2OverlayWatchdogDecision {
     }
 }
 
+function Get-HS2OverlayRebindDecision {
+    param(
+        [Parameter(Mandatory = $true)][bool]$RebindRequired,
+        [Parameter(Mandatory = $true)][bool]$IsRunning
+    )
+
+    if (-not $RebindRequired) {
+        return [pscustomobject]@{ Action = "None" }
+    }
+
+    return [pscustomobject]@{
+        Action = if ($IsRunning) { "Recycle" } else { "Activate" }
+    }
+}
+
 function Test-HS2OverlayProcessCandidate {
     param(
         [Parameter(Mandatory = $true)]$Process
@@ -67,6 +82,47 @@ function Get-HS2OverlayProcess {
         Where-Object { $_.SessionId -eq $SessionId } |
         Where-Object { Test-HS2OverlayProcessCandidate -Process $_ } |
         Select-Object -First 1
+}
+
+function Stop-HS2OverlayForRebind {
+    param(
+        [Parameter(Mandatory = $true)]$Process,
+        [ValidateRange(100, 10000)][int]$TimeoutMilliseconds = 3000
+    )
+
+    try {
+        $processId = [int]$Process.Id
+        Stop-Process -Id $processId -Force -ErrorAction Stop
+        try {
+            [void]$Process.WaitForExit($TimeoutMilliseconds)
+        }
+        catch {
+            # Stop-Process may invalidate the original Process handle after
+            # the exact process has already exited.  The authoritative check
+            # below resolves the PID again instead of trusting that handle.
+        }
+
+        $stillRunning = Get-Process -Id $processId -ErrorAction SilentlyContinue
+        return [pscustomobject]@{
+            Attempted = $true
+            Stopped = ($null -eq $stillRunning)
+            ProcessId = $processId
+            Reason = if ($null -eq $stillRunning) {
+                "stopped-for-display-rebind"
+            }
+            else {
+                "process-still-running"
+            }
+        }
+    }
+    catch {
+        return [pscustomobject]@{
+            Attempted = $true
+            Stopped = $false
+            ProcessId = [int]$Process.Id
+            Reason = "stop-failed"
+        }
+    }
 }
 
 function Start-HS2OverlayActivation {

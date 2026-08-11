@@ -73,7 +73,13 @@ After an unclean restart, the watchdog also keeps `desired active` separate from
 `verified active`. It retries the read-back-verified Active request every 15
 seconds and does not launch the HS2 overlay until verification succeeds. If the
 HS2 USB display is present but L-Connect has not rebound it, the watchdog restarts
-only `LConnectService` once for that failure streak. If Windows instead reports
+only `LConnectService` once for that failure streak. A running service is not
+treated as recovery proof: the watchdog also waits for the HS2 controller to
+reappear. While that controller is still warming up it keeps a bounded five-second
+retry cadence for up to 90 seconds instead of prematurely falling back to the
+60-second hardware retry. Once Active is verified, any overlay process that
+survived the display outage is recycled once so it binds to the newly enumerated
+display geometry before notifications resume. If Windows instead reports
 the exact dedicated `VID_1A86&PID_8091` HS2 hub with its port-2 descriptor child
 in Code 43, recovery additionally requires the exact hub identity previously
 learned from a healthy HS2 display plus its LIAN LI LED sibling. It is then

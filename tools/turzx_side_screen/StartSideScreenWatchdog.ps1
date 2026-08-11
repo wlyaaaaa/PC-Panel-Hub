@@ -27,6 +27,8 @@ param(
     [ValidateRange(30, 3600)][int]$HS2ActiveSlowRetrySeconds = 60,
     [ValidateRange(10, 3600)][int]$HS2ActiveVerifySeconds = 30,
     [ValidateRange(1, 10)][int]$HS2UsbRecoveryAfterFailures = 3,
+    [ValidateRange(5, 60)][int]$HS2LConnectRecoveryRetrySeconds = 5,
+    [ValidateRange(15, 300)][int]$HS2LConnectRecoveryGraceSeconds = 90,
     [ValidateRange(0, 255)][int]$ActiveBrightness = 170,
     [ValidateRange(1, 65535)][int]$LConnectServicePort = 11021,
     [switch]$HybridRefresh,
@@ -76,6 +78,9 @@ $script:hs2ActiveCurrentRetrySeconds = $HS2ActiveRetrySeconds
 $script:hs2UsbRecoveryAttempted = $false
 $script:hs2UsbRecoveryContinuationPending = $false
 $script:hs2LConnectRecoveryAttempted = $false
+$script:hs2LConnectRecoveryStartedUtc = [DateTime]::MinValue
+$script:hs2LConnectWarmupLogged = $false
+$script:hs2OverlayRebindRequired = $false
 $script:hs2WindowGuardTargetMonitorDevice = $null
 $script:hs2WindowGuardSafeMonitorDevice = $null
 $script:hs2WindowGuardLastStatus = $null
@@ -195,6 +200,8 @@ function Invoke-HS2ActiveMaintenance {
         $script:hs2UsbRecoveryAttempted = $false
         $script:hs2UsbRecoveryContinuationPending = $false
         $script:hs2LConnectRecoveryAttempted = $false
+        $script:hs2LConnectRecoveryStartedUtc = [DateTime]::MinValue
+        $script:hs2LConnectWarmupLogged = $false
         try {
             if (Save-HS2UsbTopologyBinding -Path $hs2UsbTopologyBindingPath) {
                 if (-not $wasVerified) {
@@ -218,6 +225,17 @@ function Invoke-HS2ActiveMaintenance {
     catch {
         $script:hs2DisplayStateActive = $false
         $script:hs2ActiveConsecutiveFailures++
+        try {
+            if (-not (Test-HS2UsbDisplayHealthy)) {
+                # A surviving overlay keeps its old monitor coordinates while
+                # the USB display is absent.  Require one exact process recycle
+                # after the verified display chain returns.
+                $script:hs2OverlayRebindRequired = $true
+            }
+        }
+        catch {
+            $script:hs2OverlayRebindRequired = $true
+        }
         Write-WatchdogLog (
             "HS2 power state=Active reason={0} failed count={1}: {2}" -f `
                 $Reason,
@@ -279,10 +297,20 @@ function Invoke-HS2ActiveMaintenance {
                 return
             }
         }
-        elseif (Test-HS2UsbDisplayHealthy) {
-            if (-not $script:hs2LConnectRecoveryAttempted) {
+        else {
+            $displayHealthy = Test-HS2UsbDisplayHealthy
+            $lconnectDecision = Get-HS2LConnectRecoveryFollowUpDecision `
+                -DisplayHealthy $displayHealthy `
+                -RecoveryAttempted $script:hs2LConnectRecoveryAttempted `
+                -RecoveryStartedUtc $script:hs2LConnectRecoveryStartedUtc `
+                -NowUtc ([DateTime]::UtcNow) `
+                -GraceSeconds $HS2LConnectRecoveryGraceSeconds
+            if ($lconnectDecision.Action -eq "RestartService") {
                 $script:hs2LConnectRecoveryAttempted = $true
-                $serviceRecovery = Invoke-HS2LConnectServiceRecovery
+                $script:hs2LConnectRecoveryStartedUtc = [DateTime]::UtcNow
+                $script:hs2LConnectWarmupLogged = $false
+                $serviceRecovery = Invoke-HS2LConnectServiceRecovery `
+                    -ServicePort $LConnectServicePort
                 Write-WatchdogLog (
                     "HS2 L-Connect recovery attempted={0} recovered={1} reason={2}" -f `
                         $serviceRecovery.Attempted,
@@ -290,6 +318,18 @@ function Invoke-HS2ActiveMaintenance {
                         $serviceRecovery.Reason)
                 $script:hs2ActiveCurrentRetrySeconds = $HS2ActiveRetrySeconds
                 $script:hs2ActiveLastAttemptUtc = [DateTime]::MinValue
+                return
+            }
+            if ($lconnectDecision.Action -eq "FastRetry") {
+                $script:hs2ActiveCurrentRetrySeconds =
+                    $HS2LConnectRecoveryRetrySeconds
+                if (-not $script:hs2LConnectWarmupLogged) {
+                    Write-WatchdogLog (
+                        "HS2 L-Connect controller pending; fastRetrySeconds={0} graceSeconds={1}" -f `
+                            $HS2LConnectRecoveryRetrySeconds,
+                            $HS2LConnectRecoveryGraceSeconds)
+                    $script:hs2LConnectWarmupLogged = $true
+                }
                 return
             }
         }
@@ -321,6 +361,9 @@ function Set-ActiveDisplayState {
     $script:hs2UsbRecoveryAttempted = $false
     $script:hs2UsbRecoveryContinuationPending = $false
     $script:hs2LConnectRecoveryAttempted = $false
+    $script:hs2LConnectRecoveryStartedUtc = [DateTime]::MinValue
+    $script:hs2LConnectWarmupLogged = $false
+    $script:hs2OverlayRebindRequired = $true
     Invoke-HS2ActiveMaintenance -Reason $Reason
 }
 
@@ -357,6 +400,30 @@ function Invoke-HS2OverlayHealthCheck {
 
     $nowUtc = [DateTime]::UtcNow
     $overlayProcess = Get-HS2OverlayProcess
+    $rebindDecision = Get-HS2OverlayRebindDecision `
+        -RebindRequired $script:hs2OverlayRebindRequired `
+        -IsRunning ($null -ne $overlayProcess)
+    if ($rebindDecision.Action -eq "Recycle") {
+        $recycle = Stop-HS2OverlayForRebind -Process $overlayProcess
+        Write-WatchdogLog (
+            "HS2 overlay display rebind attempted={0} stopped={1} pid={2} reason={3}" -f `
+                $recycle.Attempted,
+                $recycle.Stopped,
+                $recycle.ProcessId,
+                $recycle.Reason)
+        if (-not $recycle.Stopped) {
+            return
+        }
+        $overlayProcess = $null
+        $script:hs2OverlayWasRunning = $false
+        $script:hs2OverlayLastAttemptUtc = [DateTime]::MinValue
+        $script:hs2OverlayRebindRequired = $false
+    }
+    elseif ($rebindDecision.Action -eq "Activate") {
+        $script:hs2OverlayWasRunning = $false
+        $script:hs2OverlayLastAttemptUtc = [DateTime]::MinValue
+        $script:hs2OverlayRebindRequired = $false
+    }
     $decision = Get-HS2OverlayWatchdogDecision `
         -IsRunning ($null -ne $overlayProcess) `
         -LastAttemptUtc $script:hs2OverlayLastAttemptUtc `
