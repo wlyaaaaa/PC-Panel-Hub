@@ -31,9 +31,6 @@ $Root = (Resolve-Path -LiteralPath $Root).Path
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $outDir = Join-Path $scriptDir "out"
 $logPath = Join-Path $outDir "side-screen-resume.log"
-$stopScript = Join-Path $scriptDir "StopSideScreenStack.ps1"
-$launcher = Join-Path $scriptDir "StartSideScreenWatchdog-Hidden.vbs"
-$resumeFlag = Join-Path $outDir "restart-on-resume.flag"
 
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 
@@ -44,121 +41,35 @@ function Write-ResumeLog {
     Write-Host $line
 }
 
-function Format-DeviceLine {
-    param($Device)
-
-    if ($null -eq $Device) {
-        return "<missing>"
-    }
-
-    return "{0} {1} {2}" -f $Device.Status, $Device.Name, $Device.PNPDeviceID
-}
-
-function Get-TurzxUsbDevice {
-    $devices = @(Get-CimInstance Win32_PnPEntity -ErrorAction Stop |
-        Where-Object { $_.PNPDeviceID -like ("*" + $DeviceIdPattern + "*") })
-
-    if ($devices.Count -eq 0) {
-        return $null
-    }
-
-    return $devices |
-        Sort-Object `
-            @{ Expression = { if ($_.Name -like ("*(" + $Port + ")*")) { 0 } else { 1 } } },
-            Name |
-        Select-Object -First 1
-}
-
-function Restart-TurzxUsbDevice {
-    if ($SkipDeviceRestart) {
-        Write-ResumeLog "usb device restart skipped by parameter"
-        return
-    }
-
-    try {
-        $device = Get-TurzxUsbDevice
-        if ($null -eq $device) {
-            Write-ResumeLog ("usb device not found for pattern={0}; continue without device restart" -f $DeviceIdPattern)
-            return
-        }
-
-        Write-ResumeLog ("usb device before restart: {0}" -f (Format-DeviceLine $device))
-        $restartOutput = & pnputil.exe /restart-device $device.PNPDeviceID 2>&1
-        $restartExit = $LASTEXITCODE
-        foreach ($line in $restartOutput) {
-            Write-ResumeLog ("pnputil restart: {0}" -f $line)
-        }
-
-        if ($restartExit -ne 0) {
-            Write-ResumeLog ("pnputil restart warning exit={0}; continue startup fallback" -f $restartExit)
-            return
-        }
-
-        if ($DeviceRestartSettleSeconds -gt 0) {
-            Start-Sleep -Seconds $DeviceRestartSettleSeconds
-        }
-
-        $after = Get-TurzxUsbDevice
-        Write-ResumeLog ("usb device after restart: {0}" -f (Format-DeviceLine $after))
-    }
-    catch {
-        Write-ResumeLog ("usb device restart failed: {0}" -f $_.Exception.Message)
-    }
-}
-
-Write-ResumeLog ("restart-on-resume requested root={0} task={1} port={2} interval={3} delay={4}" -f $Root, $TaskName, $Port, $IntervalMs, $DelaySeconds)
+Write-ResumeLog ("legacy resume compatibility probe root={0} task={1} port={2} interval={3} delay={4}; main watchdog owns resume" -f $Root, $TaskName, $Port, $IntervalMs, $DelaySeconds)
 if ($DelaySeconds -gt 0) {
     Start-Sleep -Seconds $DelaySeconds
 }
 
-try {
-    powershell -NoProfile -ExecutionPolicy Bypass -File $stopScript -Root $Root -IncludeWatchdog -SkipStackEntrypoint -Quiet | Out-Null
-    Write-ResumeLog "stopped stale side-screen stack after resume"
-}
-catch {
-    Write-ResumeLog ("stop stale stack failed: {0}" -f $_.Exception.Message)
-}
-
-Restart-TurzxUsbDevice
-
-Set-Content -LiteralPath $resumeFlag -Value (Get-Date -Format "o") -Encoding ASCII
-
-$taskExists = $false
 $scheduledTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-if ($null -ne $scheduledTask) {
-    $taskExists = $true
-    $registeredArguments = (($scheduledTask.Actions | ForEach-Object { [string]$_.Arguments }) -join ' ')
-    $modeMatches = Test-ScheduledTaskActionMode `
-        -Arguments $registeredArguments `
-        -HybridRefreshEnabled ([bool]$HybridRefresh) `
-        -AltHelperEnabled ([bool]$AltHelper)
-    if ($modeMatches) {
-        & schtasks.exe /End /TN $TaskName *> $null
-        Start-Sleep -Milliseconds 800
-        & schtasks.exe /Run /TN $TaskName | Out-Null
-        if ($LASTEXITCODE -eq 0) {
-            Write-ResumeLog ("started scheduled task after resume: {0}" -f $TaskName)
-            exit 0
-        }
-        Write-ResumeLog ("scheduled task start failed exit={0}; using direct hidden launcher" -f $LASTEXITCODE)
-    }
-    else {
-        Write-ResumeLog ("scheduled task mode mismatch; using direct hidden launcher requestedHybrid={0} requestedAlt={1}" -f [bool]$HybridRefresh, [bool]$AltHelper)
-    }
+if ($null -eq $scheduledTask) {
+    Write-ResumeLog "main watchdog task is missing; compatibility probe remains fail-closed"
+    exit 0
 }
 
-if (-not (Test-Path -LiteralPath $launcher)) {
-    throw "Missing hidden launcher: $launcher"
+$registeredArguments = (($scheduledTask.Actions | ForEach-Object { [string]$_.Arguments }) -join ' ')
+$modeMatches = Test-ScheduledTaskActionMode `
+    -Arguments $registeredArguments `
+    -HybridRefreshEnabled ([bool]$HybridRefresh) `
+    -AltHelperEnabled ([bool]$AltHelper)
+if (-not $modeMatches) {
+    Write-ResumeLog ("main task mode mismatch; compatibility probe will not replace the registered owner requestedHybrid={0} requestedAlt={1}" -f [bool]$HybridRefresh, [bool]$AltHelper)
+    exit 0
 }
 
-$launcherArguments = @($launcher, "-Root", $Root, "-Port", $Port, "-IntervalMs", [string]$IntervalMs)
-if ($HybridRefresh) { $launcherArguments += "-HybridRefresh" }
-else { $launcherArguments += "-NoHybridRefresh" }
-if ($AltHelper) { $launcherArguments += "-AltHelper" }
-else { $launcherArguments += "-NoAltHelper" }
-$command = 'wscript.exe "{0}" -Root "{1}" -Port {2} -IntervalMs {3} hybrid={4} altHelper={5}' -f $launcher, $Root, $Port, $IntervalMs, [bool]$HybridRefresh, [bool]$AltHelper
-Start-Process -FilePath "wscript.exe" `
-    -ArgumentList $launcherArguments `
-    -WorkingDirectory $scriptDir `
-    -WindowStyle Hidden | Out-Null
-Write-ResumeLog ("started direct hidden launcher after resume taskExists={0}: {1}" -f $taskExists, $command)
+if ([string]$scheduledTask.State -eq "Running") {
+    Write-ResumeLog "main watchdog already running; no duplicate recovery action required"
+    exit 0
+}
+
+& schtasks.exe /Run /TN $TaskName | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    Write-ResumeLog ("main watchdog task start failed exit={0}; no fallback owner launched" -f $LASTEXITCODE)
+    exit 1
+}
+Write-ResumeLog ("main watchdog task requested: {0}" -f $TaskName)

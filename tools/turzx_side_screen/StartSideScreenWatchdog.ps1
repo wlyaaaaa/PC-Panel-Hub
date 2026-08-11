@@ -27,6 +27,8 @@ param(
     [ValidateRange(30, 3600)][int]$HS2ActiveSlowRetrySeconds = 60,
     [ValidateRange(10, 3600)][int]$HS2ActiveVerifySeconds = 30,
     [ValidateRange(1, 10)][int]$HS2UsbRecoveryAfterFailures = 3,
+    [switch]$EnableHS2UsbPnPRecovery,
+    [ValidateRange(30, 600)][int]$HS2RecoveryStartupGraceSeconds = 120,
     [ValidateRange(5, 60)][int]$HS2LConnectRecoveryRetrySeconds = 5,
     [ValidateRange(15, 300)][int]$HS2LConnectRecoveryGraceSeconds = 90,
     [ValidateRange(0, 255)][int]$ActiveBrightness = 170,
@@ -77,6 +79,8 @@ $script:hs2ActiveConsecutiveFailures = 0
 $script:hs2ActiveCurrentRetrySeconds = $HS2ActiveRetrySeconds
 $script:hs2UsbRecoveryAttempted = $false
 $script:hs2UsbRecoveryContinuationPending = $false
+$script:hs2UsbRecoverySuppressionLogged = $false
+$script:hs2EscalationGraceLogged = $false
 $script:hs2LConnectRecoveryAttempted = $false
 $script:hs2LConnectRecoveryStartedUtc = [DateTime]::MinValue
 $script:hs2LConnectWarmupLogged = $false
@@ -192,6 +196,22 @@ function Invoke-HS2ActiveMaintenance {
         if ($null -eq $result -or -not [bool]$result.Verified) {
             throw "L-Connect did not return a verified HS2 Active state."
         }
+        if (-not (Wait-HS2UsbDisplayHealthy -TimeoutSeconds 15)) {
+            throw "L-Connect reported HS2 Active, but the bound hub/display/LED topology did not become physically healthy."
+        }
+
+        try {
+            $bindingSaved = Save-HS2UsbTopologyBinding `
+                -Path $hs2UsbTopologyBindingPath
+        }
+        catch {
+            throw (
+                "HS2 USB topology binding failed safely: {0}" -f `
+                    $_.Exception.Message)
+        }
+        if (-not $bindingSaved) {
+            throw "HS2 USB topology binding unavailable; display activation remains fail-closed."
+        }
 
         $script:hs2DisplayStateActive = $true
         $script:hs2ActiveLastVerifiedUtc = [DateTime]::UtcNow
@@ -199,23 +219,13 @@ function Invoke-HS2ActiveMaintenance {
         $script:hs2ActiveCurrentRetrySeconds = $HS2ActiveRetrySeconds
         $script:hs2UsbRecoveryAttempted = $false
         $script:hs2UsbRecoveryContinuationPending = $false
+        $script:hs2UsbRecoverySuppressionLogged = $false
+        $script:hs2EscalationGraceLogged = $false
         $script:hs2LConnectRecoveryAttempted = $false
         $script:hs2LConnectRecoveryStartedUtc = [DateTime]::MinValue
         $script:hs2LConnectWarmupLogged = $false
-        try {
-            if (Save-HS2UsbTopologyBinding -Path $hs2UsbTopologyBindingPath) {
-                if (-not $wasVerified) {
-                    Write-WatchdogLog "HS2 USB topology binding verified"
-                }
-            }
-            elseif (-not $wasVerified) {
-                Write-WatchdogLog "HS2 USB topology binding unavailable; Code 43 recovery will fail closed"
-            }
-        }
-        catch {
-            Write-WatchdogLog (
-                "HS2 USB topology binding failed safely: {0}" -f `
-                    $_.Exception.Message)
+        if (-not $wasVerified) {
+            Write-WatchdogLog "HS2 USB topology binding verified"
         }
         if (-not $wasVerified) {
             Write-WatchdogLog ("HS2 power state=Active reason={0} verified=true" -f $Reason)
@@ -247,6 +257,21 @@ function Invoke-HS2ActiveMaintenance {
         return
     }
 
+    $escalationDecision = Get-HS2RecoveryEscalationDecision `
+        -WatchdogStartedUtc $watchdogStartedUtc `
+        -NowUtc ([DateTime]::UtcNow) `
+        -GraceSeconds $HS2RecoveryStartupGraceSeconds
+    if ($escalationDecision.Action -eq "Wait") {
+        if (-not $script:hs2EscalationGraceLogged) {
+            Write-WatchdogLog (
+                "HS2 recovery escalation deferred for startup stabilization remainingSeconds={0:N0}" -f `
+                    $escalationDecision.RetryAfterSeconds)
+            $script:hs2EscalationGraceLogged = $true
+        }
+        $script:hs2ActiveCurrentRetrySeconds = $HS2ActiveRetrySeconds
+        return
+    }
+
     try {
         $binding = Read-HS2UsbTopologyBinding `
             -Path $hs2UsbTopologyBindingPath
@@ -261,10 +286,15 @@ function Invoke-HS2ActiveMaintenance {
             Get-HS2UsbRecoveryPlan `
                 -BoundHubInstanceId ([string]$binding.HubInstanceId) `
                 -Hubs $snapshot.Hubs `
-                -Children $snapshot.Children
+                -Children $snapshot.Children `
+                -Binding $binding `
+                -Devices $snapshot.Devices
         }
 
-        if ($usbPlan.Applicable) {
+        $usbSafety = Get-HS2UsbAutomaticRecoveryDecision `
+            -Enabled ([bool]$EnableHS2UsbPnPRecovery) `
+            -PlanApplicable ([bool]$usbPlan.Applicable)
+        if ($usbSafety.Action -eq "Dispatch") {
             $usbDispatch = Get-HS2UsbRecoveryDispatchDecision `
                 -RecoveryAttempted $script:hs2UsbRecoveryAttempted `
                 -ContinuationPending $script:hs2UsbRecoveryContinuationPending
@@ -296,6 +326,17 @@ function Invoke-HS2ActiveMaintenance {
                 $script:hs2ActiveLastAttemptUtc = [DateTime]::MinValue
                 return
             }
+        }
+        elseif ($usbSafety.Action -eq "Suppress") {
+            if (-not $script:hs2UsbRecoverySuppressionLogged) {
+                Write-WatchdogLog (
+                    "HS2 automatic USB PnP recovery suppressed reason={0} plan={1}; no hub restart, device removal, or scan will run" -f `
+                        $usbSafety.Reason,
+                        $usbPlan.Reason)
+                $script:hs2UsbRecoverySuppressionLogged = $true
+            }
+            $script:hs2ActiveCurrentRetrySeconds = $HS2ActiveSlowRetrySeconds
+            return
         }
         else {
             $displayHealthy = Test-HS2UsbDisplayHealthy
@@ -360,6 +401,8 @@ function Set-ActiveDisplayState {
     $script:hs2ActiveCurrentRetrySeconds = $HS2ActiveRetrySeconds
     $script:hs2UsbRecoveryAttempted = $false
     $script:hs2UsbRecoveryContinuationPending = $false
+    $script:hs2UsbRecoverySuppressionLogged = $false
+    $script:hs2EscalationGraceLogged = $false
     $script:hs2LConnectRecoveryAttempted = $false
     $script:hs2LConnectRecoveryStartedUtc = [DateTime]::MinValue
     $script:hs2LConnectWarmupLogged = $false
@@ -395,6 +438,24 @@ function Enable-DesktopWindowPreservation {
 
 function Invoke-HS2OverlayHealthCheck {
     if (-not $script:hs2DisplayStateActive) {
+        if ($script:hs2OverlayRebindRequired) {
+            $staleOverlayProcess = Get-HS2OverlayProcess
+            if ($null -ne $staleOverlayProcess) {
+                $recycle = Stop-HS2OverlayForRebind `
+                    -Process $staleOverlayProcess
+                Write-WatchdogLog (
+                    "HS2 overlay inactive-display cleanup attempted={0} stopped={1} pid={2} reason={3}" -f `
+                        $recycle.Attempted,
+                        $recycle.Stopped,
+                        $recycle.ProcessId,
+                        $recycle.Reason)
+                if ($recycle.Stopped) {
+                    $script:hs2OverlayWasRunning = $false
+                    $script:hs2OverlayLastAttemptUtc = [DateTime]::MinValue
+                    $script:hs2OverlayRebindRequired = $false
+                }
+            }
+        }
         return
     }
 
@@ -890,6 +951,10 @@ Write-WatchdogLog (
         $HS2ActiveRetrySeconds,
         $HS2ActiveVerifySeconds,
         $HS2UsbRecoveryAfterFailures)
+Write-WatchdogLog (
+    "HS2 USB PnP recovery enabled={0} mode=explicit-opt-in startupGraceSeconds={1}" -f `
+        ([bool]$EnableHS2UsbPnPRecovery),
+        $HS2RecoveryStartupGraceSeconds)
 
 $child = $null
 $consecutiveFailures = 0

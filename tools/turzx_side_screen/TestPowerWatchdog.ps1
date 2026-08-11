@@ -566,6 +566,8 @@ if ($verifyDecision.Action -ne "Verify") {
 $validHub = [pscustomobject]@{
     InstanceId = "USB\VID_1A86&PID_8091\dedicated-hs2-hub"
     Present = $true
+    Status = "OK"
+    ProblemCode = 0
 }
 $validChild = [pscustomobject]@{
     InstanceId = "USB\VID_0000&PID_0002\failed-port-two"
@@ -574,15 +576,241 @@ $validChild = [pscustomobject]@{
     LocationInfo = "Port_#0002.Hub_#0012"
     Present = $true
 }
+$validBinding = [pscustomobject]@{
+    SchemaVersion = 1
+    HubInstanceId = $validHub.InstanceId
+    DisplayInstanceId = "USB\VID_1A86&PID_AD23\verified-hs2-display"
+    LedInstanceId = "USB\VID_0416&PID_8051\verified-hs2-led"
+}
+$validLedSibling = [pscustomobject]@{
+    InstanceId = $validBinding.LedInstanceId
+    ParentInstanceId = $validHub.InstanceId
+    Present = $true
+    Status = "OK"
+    ProblemCode = 0
+}
 $validUsbPlan = Get-HS2UsbRecoveryPlan `
     -BoundHubInstanceId $validHub.InstanceId `
     -Hubs @($validHub) `
-    -Children @($validChild)
+    -Children @($validChild) `
+    -Binding $validBinding `
+    -Devices @($validLedSibling)
 if (-not $validUsbPlan.Applicable -or
     $validUsbPlan.HubInstanceId -cne $validHub.InstanceId -or
     $validUsbPlan.ChildInstanceId -cne $validChild.InstanceId -or
     ($validUsbPlan.Operations -join ",") -cne "RestartDedicatedHub,RemoveExactFailedChild,ScanDevices") {
     throw "HS2 USB recovery must target only the dedicated hub and its exact port-two Code 43 child."
+}
+
+# A missing AD23 with no exact Code 43 child is not safe evidence for any PnP
+# mutation.  It can be normal boot enumeration, a firmware wedge, or a hot
+# unplug in progress, so automatic recovery must fail closed.
+$displayMissingPlan = Get-HS2UsbRecoveryPlan `
+    -BoundHubInstanceId $validHub.InstanceId `
+    -Hubs @($validHub) `
+    -Children @() `
+    -Binding $validBinding `
+    -Devices @($validLedSibling)
+if ($displayMissingPlan.Applicable -or
+    $displayMissingPlan.Reason -cne "exact-code43-child-not-found" -or
+    @($displayMissingPlan.Operations).Count -ne 0) {
+    throw "An absent AD23 without the exact Code 43 child must never trigger PnP recovery."
+}
+
+foreach ($invalidExactCode43Case in @(
+        [pscustomobject]@{
+            Name = "unhealthy dedicated hub"
+            Hubs = @([pscustomobject]@{
+                    InstanceId = $validHub.InstanceId
+                    Present = $true
+                    Status = "Unknown"
+                    ProblemCode = 43
+                })
+            Devices = @($validLedSibling)
+        },
+        [pscustomobject]@{
+            Name = "missing LED sibling"
+            Hubs = @($validHub)
+            Devices = @()
+        },
+        [pscustomobject]@{
+            Name = "LED on a different parent"
+            Hubs = @($validHub)
+            Devices = @([pscustomobject]@{
+                    InstanceId = $validBinding.LedInstanceId
+                    ParentInstanceId = "USB\VID_1A86&PID_8091\different-hub"
+                    Present = $true
+                    Status = "OK"
+                    ProblemCode = 0
+                })
+        }
+    )) {
+    $invalidExactCode43Plan = Get-HS2UsbRecoveryPlan `
+        -BoundHubInstanceId $validHub.InstanceId `
+        -Hubs $invalidExactCode43Case.Hubs `
+        -Children @($validChild) `
+        -Binding $validBinding `
+        -Devices $invalidExactCode43Case.Devices
+    if ($invalidExactCode43Plan.Applicable) {
+        throw "Exact Code 43 recovery must fail closed for $($invalidExactCode43Case.Name)."
+    }
+}
+
+$graceStart = [DateTime]::Parse("2026-08-11T12:00:00Z").ToUniversalTime()
+$startupGraceWait = Get-HS2RecoveryEscalationDecision `
+    -WatchdogStartedUtc $graceStart `
+    -NowUtc $graceStart.AddSeconds(119) `
+    -GraceSeconds 120
+if ($startupGraceWait.Action -cne "Wait") {
+    throw "HS2 startup recovery escalation must remain passive during the stabilization window."
+}
+$startupGraceElapsed = Get-HS2RecoveryEscalationDecision `
+    -WatchdogStartedUtc $graceStart `
+    -NowUtc $graceStart.AddSeconds(120) `
+    -GraceSeconds 120
+if ($startupGraceElapsed.Action -cne "Allow") {
+    throw "HS2 recovery escalation may be evaluated after the stabilization window expires."
+}
+
+$stableProbeValues = [Collections.Generic.Queue[bool]]::new()
+foreach ($value in @($false, $true, $false, $true, $true)) {
+    $stableProbeValues.Enqueue($value)
+}
+$stableProbeCalls = 0
+$stableDisplayReady = Wait-HS2UsbDisplayHealthy `
+    -TimeoutSeconds 1 `
+    -PollMilliseconds 1 `
+    -RequiredConsecutiveSamples 2 `
+    -HealthProbe {
+        $script:stableProbeCalls++
+        return $script:stableProbeValues.Dequeue()
+    } `
+    -DelayAction { param([int]$Milliseconds) }
+if (-not $stableDisplayReady -or $stableProbeCalls -ne 5) {
+    throw "HS2 display admission must require two consecutive healthy physical samples."
+}
+
+$healthyBindingSnapshot = [pscustomobject]@{
+    Devices = @(
+        $validHub,
+        [pscustomobject]@{
+            InstanceId = $validBinding.DisplayInstanceId
+            ParentInstanceId = $validHub.InstanceId
+            Present = $true
+            Status = "OK"
+            ProblemCode = 0
+        },
+        [pscustomobject]@{
+            InstanceId = $validBinding.LedInstanceId
+            ParentInstanceId = $validHub.InstanceId
+            Present = $true
+            Status = "OK"
+            ProblemCode = 0
+        }
+    )
+}
+$healthyBinding = Get-HS2HealthyUsbTopologyBinding -Snapshot $healthyBindingSnapshot
+if ($null -eq $healthyBinding -or
+    [string]$healthyBinding.DisplayInstanceId -ine [string]$validBinding.DisplayInstanceId) {
+    throw "HS2 display admission must resolve one exact healthy hub/display/LED topology."
+}
+$missingLedBinding = Get-HS2HealthyUsbTopologyBinding -Snapshot ([pscustomobject]@{
+        Devices = @($healthyBindingSnapshot.Devices | Where-Object {
+                [string]$_.InstanceId -ine [string]$validBinding.LedInstanceId
+            })
+    })
+if ($null -ne $missingLedBinding) {
+    throw "An AD23 display without its exact healthy LED sibling must fail closed."
+}
+
+$automaticUsbRecoverySuppressed = Get-HS2UsbAutomaticRecoveryDecision `
+    -Enabled $false `
+    -PlanApplicable $true
+if ($automaticUsbRecoverySuppressed.Action -cne "Suppress" -or
+    $automaticUsbRecoverySuppressed.Reason -cne "automatic-usb-pnp-recovery-disabled") {
+    throw "Scheduled HS2 recovery must suppress PnP mutation unless it is explicitly enabled."
+}
+
+$automaticUsbRecoveryDispatch = Get-HS2UsbAutomaticRecoveryDecision `
+    -Enabled $true `
+    -PlanApplicable $true
+if ($automaticUsbRecoveryDispatch.Action -cne "Dispatch") {
+    throw "An explicit manual opt-in must still expose the bounded HS2 PnP recovery path."
+}
+
+$automaticUsbRecoveryNoPlan = Get-HS2UsbAutomaticRecoveryDecision `
+    -Enabled $true `
+    -PlanApplicable $false
+if ($automaticUsbRecoveryNoPlan.Action -cne "NoPlan") {
+    throw "HS2 PnP recovery must remain unavailable when no exact recovery plan exists."
+}
+
+foreach ($invalidMissingDisplayCase in @(
+        [pscustomobject]@{
+            Name = "missing LED sibling"
+            Binding = $validBinding
+            Hubs = $null
+            Devices = @()
+        },
+        [pscustomobject]@{
+            Name = "LED on a different parent"
+            Binding = $validBinding
+            Hubs = $null
+            Devices = @([pscustomobject]@{
+                    InstanceId = $validBinding.LedInstanceId
+                    ParentInstanceId = "USB\VID_1A86&PID_8091\different-hub"
+                    Present = $true
+                    Status = "OK"
+                    ProblemCode = 0
+                })
+        },
+        [pscustomobject]@{
+            Name = "unhealthy LED sibling"
+            Binding = $validBinding
+            Hubs = $null
+            Devices = @([pscustomobject]@{
+                    InstanceId = $validBinding.LedInstanceId
+                    ParentInstanceId = $validHub.InstanceId
+                    Present = $true
+                    Status = "Unknown"
+                    ProblemCode = 43
+                })
+        },
+        [pscustomobject]@{
+            Name = "unhealthy dedicated hub"
+            Binding = $validBinding
+            Hubs = @([pscustomobject]@{
+                    InstanceId = $validHub.InstanceId
+                    Present = $true
+                    Status = "Unknown"
+                    ProblemCode = 43
+                })
+            Devices = @($validLedSibling)
+        },
+        [pscustomobject]@{
+            Name = "AD23 already healthy"
+            Binding = $validBinding
+            Hubs = $null
+            Devices = @(
+                $validLedSibling,
+                [pscustomobject]@{
+                    InstanceId = $validBinding.DisplayInstanceId
+                    ParentInstanceId = $validHub.InstanceId
+                    Present = $true
+                    Status = "OK"
+                    ProblemCode = 0
+                })
+        }
+    )) {
+    $invalidMissingDisplayPlan = Get-HS2UsbRecoveryPlan `
+        -BoundHubInstanceId $validHub.InstanceId `
+        -Hubs $(if ($null -ne $invalidMissingDisplayCase.Hubs) { $invalidMissingDisplayCase.Hubs } else { @($validHub) }) `
+        -Children @() `
+        -Binding $invalidMissingDisplayCase.Binding `
+        -Devices $invalidMissingDisplayCase.Devices
+    if ($invalidMissingDisplayPlan.Applicable) {
+        throw "Bound HS2 display-missing recovery must fail closed for $($invalidMissingDisplayCase.Name)."
+    }
 }
 
 $initialUsbDispatch = Get-HS2UsbRecoveryDispatchDecision `
@@ -620,7 +848,9 @@ $freshChild = [pscustomobject]@{
 $freshUsbPlan = Get-HS2UsbRecoveryPlan `
     -BoundHubInstanceId $validHub.InstanceId `
     -Hubs @($validHub) `
-    -Children @($freshChild)
+    -Children @($freshChild) `
+    -Binding $validBinding `
+    -Devices @($validLedSibling)
 if (-not (Test-HS2UsbRecoveryPlanContinuity `
         -InitialPlan $validUsbPlan `
         -FreshPlan $freshUsbPlan)) {
@@ -641,12 +871,14 @@ if (Test-HS2UsbRecoveryPlanContinuity `
 $script:postRestartSnapshotAttempts = 0
 $eventualFreshPlan = Wait-HS2UsbRecoveryPlan `
     -BoundHubInstanceId $validHub.InstanceId `
+    -Binding $validBinding `
     -TimeoutSeconds 1 `
     -PollMilliseconds 1 `
     -SnapshotProvider {
         $script:postRestartSnapshotAttempts++
         [pscustomobject]@{
             Hubs = @($validHub)
+            Devices = @($validLedSibling)
             Children = if ($script:postRestartSnapshotAttempts -lt 2) {
                 @()
             }
@@ -715,10 +947,24 @@ if ($wrongBoundHubPlan.Applicable) {
 }
 
 $script:mockHS2PnpDevices = @()
+$script:mockHS2PnpPresent = $true
 function Get-PnpDevice {
     [CmdletBinding()]
     param([switch]$PresentOnly)
     return $script:mockHS2PnpDevices
+}
+function Get-PnpDeviceProperty {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$InstanceId,
+        [Parameter(Mandatory = $true)][string]$KeyName
+    )
+    $data = switch ($KeyName) {
+        "DEVPKEY_Device_IsPresent" { $script:mockHS2PnpPresent; break }
+        "DEVPKEY_Device_ProblemCode" { 0; break }
+        default { $null; break }
+    }
+    return [pscustomobject]@{ Data = $data }
 }
 try {
     $script:mockHS2PnpDevices = @(
@@ -747,12 +993,18 @@ try {
             Status = "OK"
         }
     )
+    $script:mockHS2PnpPresent = $false
+    if (Test-HS2UsbDisplayHealthy) {
+        throw "A disconnected historical AD23 devnode must not be treated as a healthy Windows display."
+    }
+    $script:mockHS2PnpPresent = $true
     if (-not (Test-HS2UsbDisplayHealthy)) {
         throw "A healthy AD23 display must permit bounded L-Connect recovery."
     }
 }
 finally {
     Remove-Item Function:\Get-PnpDevice -Force
+    Remove-Item Function:\Get-PnpDeviceProperty -Force
 }
 
 $activeRecoveryText = Get-Content -Raw -LiteralPath $activeRecoveryPolicy
@@ -802,6 +1054,10 @@ foreach ($pattern in @(
     'hs2DisplayStateDesiredActive = $false',
     "Invoke-HS2ActiveMaintenance",
     "Invoke-HS2UsbRecovery",
+    "Get-HS2UsbAutomaticRecoveryDecision",
+    "EnableHS2UsbPnPRecovery",
+    "HS2RecoveryStartupGraceSeconds = 120",
+    "Get-HS2RecoveryEscalationDecision",
     "HS2UsbRecoveryAfterFailures",
     "Get-HS2LConnectRecoveryFollowUpDecision",
     "HS2LConnectRecoveryRetrySeconds = 5",
@@ -846,6 +1102,21 @@ if ($watchdogText -match '(?s)function Set-ActiveDisplayState.*?\$script:hs2Disp
 if ($watchdogText -notmatch '\$null\s*-eq\s*\$result\s*-or\s*-not\s*\[bool\]\$result\.Verified') {
     throw "HS2 Active requires an explicit Verified=true result."
 }
+if ($watchdogText -notmatch '(?s)Invoke-HS2PowerState\s+-State\s+Active.*?Wait-HS2UsbDisplayHealthy.*?Save-HS2UsbTopologyBinding.*?if\s*\(-not\s+\$bindingSaved\).*?throw.*?\$script:hs2DisplayStateActive\s*=\s*\$true') {
+    throw "HS2 Active and overlay activation must wait for a persisted healthy hub/display/LED binding."
+}
+if ($watchdogText -notmatch '(?s)Get-HS2UsbAutomaticRecoveryDecision.*?-Enabled\s+\(\[bool\]\$EnableHS2UsbPnPRecovery\).*?if\s*\(\$usbSafety\.Action\s+-eq\s+"Dispatch"\).*?Invoke-HS2UsbRecovery') {
+    throw "Automatic HS2 PnP mutation must be behind an explicit disabled-by-default opt-in."
+}
+if ($watchdogText -notmatch '(?s)Get-HS2RecoveryEscalationDecision.*?if\s*\(\$escalationDecision\.Action\s+-eq\s+"Wait"\).*?Get-HS2UsbRecoveryPlan') {
+    throw "HS2 startup must finish its passive stabilization window before service or PnP recovery escalation."
+}
+foreach ($startupEntry in @($installer, $watchdogLauncher, $stack)) {
+    $startupEntryText = Get-Content -Raw -LiteralPath $startupEntry
+    if ($startupEntryText -match '(?i)-EnableHS2UsbPnPRecovery') {
+        throw "Production startup must never opt in to HS2 USB PnP recovery: $startupEntry"
+    }
+}
 if ($watchdogText -notmatch '(?s)function Invoke-HS2ActiveMaintenance.*?try\s*\{.*?Get-HS2UsbRecoveryPlan.*?catch\s*\{.*?HS2 recovery helper failed safely') {
     throw "HS2 PnP and recovery helpers must be isolated from the watchdog main loop."
 }
@@ -878,6 +1149,18 @@ foreach ($functionName in @(
         $functionAst[0].Extent.Text -notmatch '-not\s+\$script:hs2DisplayStateActive') {
         throw "$functionName must fail closed before HS2 verification."
     }
+}
+$overlayHealthAst = @(
+    $watchdogAst.FindAll(
+        {
+            param($node)
+            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq "Invoke-HS2OverlayHealthCheck"
+        },
+        $true)
+)[0]
+if ($overlayHealthAst.Extent.Text -notmatch '(?s)-not\s+\$script:hs2DisplayStateActive.*?Get-HS2OverlayProcess.*?Stop-HS2OverlayForRebind.*?return') {
+    throw "An inactive or missing HS2 display must recycle a stale overlay before returning."
 }
 
 foreach ($pattern in @(
@@ -1013,8 +1296,15 @@ Assert-OrderAfter `
     -Text $watchdogText `
     -Anchor 'function Invoke-HS2ActiveMaintenance' `
     -First 'Invoke-HS2PowerState -State Active' `
+    -Second 'Wait-HS2UsbDisplayHealthy' `
+    -Message "HS2 must wait for the Windows display chain after the verified L-Connect request returns."
+
+Assert-OrderAfter `
+    -Text $watchdogText `
+    -Anchor 'function Invoke-HS2ActiveMaintenance' `
+    -First 'Wait-HS2UsbDisplayHealthy' `
     -Second '$script:hs2DisplayStateActive = $true' `
-    -Message "HS2 must be marked active only after the verified L-Connect request returns."
+    -Message "HS2 must be marked active only after the Windows AD23 display is physically healthy."
 
 Assert-OrderAfter `
     -Text $watchdogText `
@@ -1025,7 +1315,7 @@ Assert-OrderAfter `
 
 Assert-OrderAfter `
     -Text $watchdogText `
-    -Anchor 'if ($usbPlan.Applicable)' `
+    -Anchor 'if ($usbSafety.Action -eq "Dispatch")' `
     -First 'Get-HS2UsbRecoveryDispatchDecision' `
     -Second 'Invoke-HS2UsbRecovery' `
     -Message "USB recovery must choose a bounded phase before invoking the destructive helper."
@@ -1068,10 +1358,9 @@ foreach ($pattern in @(
     "StartSideScreenWatchdog-Hidden.vbs",
     "StartSideScreenWatchdog.ps1",
     "TURZX SideScreen Resume",
-    "RestartSideScreenAfterResume.ps1",
-    "RestartSideScreenAfterResume-Hidden.vbs",
-    "DisallowStartIfOnBatteries",
-    "StopIfGoingOnBatteries"
+    "Disable-ScheduledTask",
+    "AllowStartIfOnBatteries",
+    "DontStopIfGoingOnBatteries"
 )) {
     if ($installerText -notmatch [regex]::Escape($pattern)) {
         throw "Startup installer must make Task Scheduler own the hidden watchdog process; missing: $pattern"
@@ -1079,6 +1368,9 @@ foreach ($pattern in @(
 }
 if ($installerText -match [regex]::Escape('-Execute "powershell.exe"')) {
     throw "Startup installer must not execute PowerShell directly in the interactive logon task."
+}
+if ($installerText -match '(?i)/SC\s+ONEVENT|resumeEventQuery|RestartSideScreenAfterResume-Hidden\.vbs') {
+    throw "The installer must not register a second resume recovery owner."
 }
 
 if (!(Test-Path -LiteralPath $resume)) {
@@ -1090,17 +1382,27 @@ if (!(Test-Path -LiteralPath $resumeLauncher)) {
 
 $resumeText = Get-Content -Raw -LiteralPath $resume
 foreach ($pattern in @(
-    "StopSideScreenStack.ps1",
-    "StartSideScreenWatchdog-Hidden.vbs",
-    "restart-on-resume",
     "DelaySeconds",
-    "pnputil.exe",
-    "/restart-device",
-    "VID_0525&PID_A4A7",
-    "Restart-TurzxUsbDevice"
+    "Get-ScheduledTask",
+    "Test-ScheduledTaskActionMode",
+    "main watchdog owns resume",
+    "schtasks.exe",
+    "/Run"
 )) {
     if ($resumeText -notmatch [regex]::Escape($pattern)) {
         throw "Resume recovery script missing expected pattern: $pattern"
+    }
+}
+foreach ($forbiddenPattern in @(
+        "StopSideScreenStack.ps1",
+        "pnputil.exe",
+        "/restart-device",
+        "/End",
+        "Restart-TurzxUsbDevice",
+        "IncludeWatchdog"
+    )) {
+    if ($resumeText -match [regex]::Escape($forbiddenPattern)) {
+        throw "Deprecated resume compatibility script must be non-destructive; found: $forbiddenPattern"
     }
 }
 

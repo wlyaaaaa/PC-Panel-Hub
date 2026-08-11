@@ -71,23 +71,39 @@ and isolated so they do not prevent the TURZX panel from being turned off.
 
 After an unclean restart, the watchdog also keeps `desired active` separate from
 `verified active`. It retries the read-back-verified Active request every 15
-seconds and does not launch the HS2 overlay until verification succeeds. If the
-HS2 USB display is present but L-Connect has not rebound it, the watchdog restarts
-only `LConnectService` once for that failure streak. A running service is not
-treated as recovery proof: the watchdog also waits for the HS2 controller to
-reappear. While that controller is still warming up it keeps a bounded five-second
-retry cadence for up to 90 seconds instead of prematurely falling back to the
-60-second hardware retry. Once Active is verified, any overlay process that
-survived the display outage is recycled once so it binds to the newly enumerated
-display geometry before notifications resume. If Windows instead reports
-the exact dedicated `VID_1A86&PID_8091` HS2 hub with its port-2 descriptor child
-in Code 43, recovery additionally requires the exact hub identity previously
-learned from a healthy HS2 display plus its LIAN LI LED sibling. It is then
-limited to one precise hub restart and, only if still needed, removal/rescan of
-that exact failed child. Missing or ambiguous binding fails closed; it never
-resets a root hub or the whole USB tree. A continuing descriptor failure is
-logged as a hardware cold-power boundary and subsequent probes use a slower
-retry interval instead of writing every few seconds.
+seconds and does not launch the HS2 overlay until both L-Connect verification and
+two consecutive physically healthy AD23 Windows-display samples succeed and the
+same unique healthy hub/display/LED binding is persisted. If the
+HS2 USB display is present but L-Connect has not rebound it, the watchdog may
+restart only `LConnectService` once for that failure streak, and only after a
+120-second startup stabilization window. A running service is not treated as
+recovery proof: the watchdog also waits for the HS2 controller and the physical
+Windows display chain to reappear. While that controller is still warming up it
+keeps a bounded five-second retry cadence for up to 90 seconds. Once both layers
+are verified, any overlay process that survived the display outage is recycled
+once so it binds to the newly enumerated display geometry before notifications
+resume; while the display is absent, a stale overlay is stopped.
+
+Scheduled startup and the normal watchdog never restart a USB hub, remove a
+device, or run a PnP scan. Those operations can trigger a full Windows display
+topology rebuild and are therefore retained only behind the explicit manual
+`-EnableHS2UsbPnPRecovery` diagnostic opt-in. Even then, the plan requires the
+previously verified dedicated `VID_1A86&PID_8091` hub to be healthy, its exact
+LIAN LI LED sibling to be physically healthy, and an exact port-2 Code 43 child.
+An absent AD23 device without that exact failed child is not recovery evidence
+and fails closed. Root hubs, the whole USB tree, ambiguous devices, and ordinary
+boot-time enumeration are never reset automatically. A continuing descriptor
+failure is logged as a cold-power or hardware-service boundary and subsequent
+probes use a slower read-only retry interval.
+
+The long-running watchdog is the only resume owner. Its WMI power subscription
+coalesces suspend/resume handling with the live process and COM ownership. The
+installer no longer registers the former `TURZX SideScreen Resume` event task and
+disables an existing legacy copy during upgrade. The retained compatibility
+script is non-destructive: it cannot stop the watchdog, restart a USB device, run
+PnP, or replace a running owner; at most it asks Task Scheduler to start the main
+task when that task is absent from the running state and its registered mode still
+matches.
 
 TURZX brightness control uses the same RJCP serial path as frame streaming.
 The watchdog releases the stream's COM-port ownership before sending the power

@@ -80,19 +80,6 @@ foreach ($pattern in @(
     }
 }
 
-$explicitFalsePropagation = @(
-    "scripts\install-startup-admin.ps1",
-    "tools\turzx_side_screen\RestartSideScreenAfterResume.ps1"
-)
-foreach ($relative in $explicitFalsePropagation) {
-    $text = Get-Content -Raw -LiteralPath (Join-Path $Root $relative)
-    foreach ($pattern in @('-NoHybridRefresh', '-NoAltHelper')) {
-        if ($text -notmatch [regex]::Escape($pattern)) {
-            throw "Installer/resume fallback must explicitly propagate false mode '$pattern' in $relative"
-        }
-    }
-}
-
 $resumeText = Get-Content -Raw -LiteralPath (Join-Path $Root "tools\turzx_side_screen\RestartSideScreenAfterResume.ps1")
 if ($resumeText -notmatch [regex]::Escape('[switch]$HybridRefresh,') -or
     $resumeText -match [regex]::Escape('[switch]$HybridRefresh = $true')) {

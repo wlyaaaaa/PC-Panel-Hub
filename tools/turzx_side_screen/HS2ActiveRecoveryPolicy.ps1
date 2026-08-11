@@ -32,6 +32,24 @@ function Get-HS2ActiveRecoveryDecision {
     return [pscustomobject]@{ Action = "Healthy"; Reason = "verified" }
 }
 
+function Get-HS2RecoveryEscalationDecision {
+    param(
+        [Parameter(Mandatory = $true)][DateTime]$WatchdogStartedUtc,
+        [Parameter(Mandatory = $true)][DateTime]$NowUtc,
+        [ValidateRange(1, 3600)][int]$GraceSeconds = 120
+    )
+
+    $ageSeconds = [Math]::Max(
+        0,
+        ($NowUtc.ToUniversalTime() -
+            $WatchdogStartedUtc.ToUniversalTime()).TotalSeconds)
+    return [pscustomobject]@{
+        Action = if ($ageSeconds -ge $GraceSeconds) { "Allow" } else { "Wait" }
+        AgeSeconds = $ageSeconds
+        RetryAfterSeconds = [Math]::Max(0, $GraceSeconds - $ageSeconds)
+    }
+}
+
 function Get-HS2LConnectRecoveryFollowUpDecision {
     param(
         [Parameter(Mandatory = $true)][bool]$DisplayHealthy,
@@ -63,7 +81,9 @@ function Get-HS2UsbRecoveryPlan {
     param(
         [Parameter(Mandatory = $true)][string]$BoundHubInstanceId,
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Hubs,
-        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Children
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Children,
+        [object]$Binding,
+        [AllowEmptyCollection()][object[]]$Devices = @()
     )
 
     if ($BoundHubInstanceId -notlike "USB\VID_1A86&PID_8091\*") {
@@ -93,6 +113,72 @@ function Get-HS2UsbRecoveryPlan {
     }
 
     $hubInstanceId = [string]$matchingHubs[0].InstanceId
+    $boundHubIsHealthy = (
+        [string]$matchingHubs[0].Status -eq "OK" -and
+        [int]$matchingHubs[0].ProblemCode -eq 0
+    )
+    if (-not $boundHubIsHealthy) {
+        return [pscustomobject]@{
+            Applicable = $false
+            Reason = "bound-hub-not-healthy"
+            RecoveryKind = $null
+            HubInstanceId = $hubInstanceId
+            ChildInstanceId = $null
+            Operations = @()
+        }
+    }
+
+    if ($null -eq $Binding -or
+        [string]$Binding.HubInstanceId -ine $BoundHubInstanceId -or
+        [string]$Binding.DisplayInstanceId -notlike "USB\VID_1A86&PID_AD23\*" -or
+        [string]$Binding.LedInstanceId -notlike "USB\VID_0416&PID_8051\*") {
+        return [pscustomobject]@{
+            Applicable = $false
+            Reason = "verified-sibling-binding-missing-or-invalid"
+            RecoveryKind = $null
+            HubInstanceId = $hubInstanceId
+            ChildInstanceId = $null
+            Operations = @()
+        }
+    }
+
+    $matchingLedSiblings = @(
+        $Devices | Where-Object {
+            [bool]$_.Present -and
+            [string]$_.InstanceId -ieq [string]$Binding.LedInstanceId -and
+            [string]$_.ParentInstanceId -ieq $hubInstanceId -and
+            [string]$_.Status -eq "OK" -and
+            [int]$_.ProblemCode -eq 0
+        }
+    )
+    if ($matchingLedSiblings.Count -ne 1) {
+        return [pscustomobject]@{
+            Applicable = $false
+            Reason = "bound-led-sibling-not-healthy-or-ambiguous"
+            RecoveryKind = $null
+            HubInstanceId = $hubInstanceId
+            ChildInstanceId = $null
+            Operations = @()
+        }
+    }
+
+    $presentBoundDisplays = @(
+        $Devices | Where-Object {
+            [bool]$_.Present -and
+            [string]$_.InstanceId -ieq [string]$Binding.DisplayInstanceId
+        }
+    )
+    if ($presentBoundDisplays.Count -gt 0) {
+        return [pscustomobject]@{
+            Applicable = $false
+            Reason = "bound-ad23-already-present"
+            RecoveryKind = $null
+            HubInstanceId = $hubInstanceId
+            ChildInstanceId = $null
+            Operations = @()
+        }
+    }
+
     $matchingChildren = @(
         $Children | Where-Object {
             [bool]$_.Present -and
@@ -102,22 +188,34 @@ function Get-HS2UsbRecoveryPlan {
             [string]$_.LocationInfo -like "Port_#0002.*"
         }
     )
-    if ($matchingChildren.Count -ne 1) {
+    if ($matchingChildren.Count -gt 1) {
         return [pscustomobject]@{
             Applicable = $false
-            Reason = if ($matchingChildren.Count -eq 0) { "exact-code43-child-not-found" } else { "exact-code43-child-ambiguous" }
+            Reason = "exact-code43-child-ambiguous"
+            RecoveryKind = $null
             HubInstanceId = $hubInstanceId
             ChildInstanceId = $null
             Operations = @()
         }
     }
 
+    if ($matchingChildren.Count -eq 1) {
+        return [pscustomobject]@{
+            Applicable = $true
+            Reason = "exact-hs2-code43-topology"
+            RecoveryKind = "ExactCode43"
+            HubInstanceId = $hubInstanceId
+            ChildInstanceId = [string]$matchingChildren[0].InstanceId
+            Operations = @("RestartDedicatedHub", "RemoveExactFailedChild", "ScanDevices")
+        }
+    }
     return [pscustomobject]@{
-        Applicable = $true
-        Reason = "exact-hs2-code43-topology"
+        Applicable = $false
+        Reason = "exact-code43-child-not-found"
+        RecoveryKind = $null
         HubInstanceId = $hubInstanceId
-        ChildInstanceId = [string]$matchingChildren[0].InstanceId
-        Operations = @("RestartDedicatedHub", "RemoveExactFailedChild", "ScanDevices")
+        ChildInstanceId = $null
+        Operations = @()
     }
 }
 
@@ -136,6 +234,32 @@ function Test-HS2UsbRecoveryPlanContinuity {
         [bool]$FreshPlan.Applicable -and
         [string]$FreshPlan.HubInstanceId -ieq [string]$InitialPlan.HubInstanceId
     )
+}
+
+function Get-HS2UsbAutomaticRecoveryDecision {
+    param(
+        [Parameter(Mandatory = $true)][bool]$Enabled,
+        [Parameter(Mandatory = $true)][bool]$PlanApplicable
+    )
+
+    if (-not $PlanApplicable) {
+        return [pscustomobject]@{
+            Action = "NoPlan"
+            Reason = "exact-recovery-plan-unavailable"
+        }
+    }
+
+    if (-not $Enabled) {
+        return [pscustomobject]@{
+            Action = "Suppress"
+            Reason = "automatic-usb-pnp-recovery-disabled"
+        }
+    }
+
+    return [pscustomobject]@{
+        Action = "Dispatch"
+        Reason = "explicit-usb-pnp-recovery-opt-in"
+    }
 }
 
 function Get-HS2UsbRecoveryDispatchDecision {
@@ -184,31 +308,42 @@ function Read-HS2UsbTopologyBinding {
 }
 
 function Get-HS2HealthyUsbTopologyBinding {
-    $presentDevices = @(Get-PnpDevice -PresentOnly -ErrorAction Stop)
+    param([object]$Snapshot)
+
+    $snapshot = if ($null -eq $Snapshot) {
+        Get-HS2UsbRecoverySnapshot
+    }
+    else {
+        $Snapshot
+    }
     $healthyHubs = @(
-        $presentDevices | Where-Object {
+        $snapshot.Devices | Where-Object {
+            [bool]$_.Present -and
             [string]$_.InstanceId -like "USB\VID_1A86&PID_8091\*" -and
-            [string]$_.Status -eq "OK"
+            [string]$_.Status -eq "OK" -and
+            [int]$_.ProblemCode -eq 0
         }
     )
     $healthyDisplays = @(
-        $presentDevices | Where-Object {
+        $snapshot.Devices | Where-Object {
+            [bool]$_.Present -and
             [string]$_.InstanceId -like "USB\VID_1A86&PID_AD23\*" -and
-            [string]$_.Status -eq "OK"
+            [string]$_.Status -eq "OK" -and
+            [int]$_.ProblemCode -eq 0
         }
     )
     $healthyLeds = @(
-        $presentDevices | Where-Object {
+        $snapshot.Devices | Where-Object {
+            [bool]$_.Present -and
             [string]$_.InstanceId -like "USB\VID_0416&PID_8051\*" -and
-            [string]$_.Status -eq "OK"
+            [string]$_.Status -eq "OK" -and
+            [int]$_.ProblemCode -eq 0
         }
     )
 
     $matches = New-Object "System.Collections.Generic.List[object]"
     foreach ($display in $healthyDisplays) {
-        $displayParent = [string](Get-HS2PnpPropertyValue `
-            -InstanceId ([string]$display.InstanceId) `
-            -KeyName "DEVPKEY_Device_Parent")
+        $displayParent = [string]$display.ParentInstanceId
         $hub = @(
             $healthyHubs | Where-Object {
                 [string]$_.InstanceId -ieq $displayParent
@@ -220,9 +355,7 @@ function Get-HS2HealthyUsbTopologyBinding {
 
         $siblingLeds = @(
             $healthyLeds | Where-Object {
-                [string](Get-HS2PnpPropertyValue `
-                    -InstanceId ([string]$_.InstanceId) `
-                    -KeyName "DEVPKEY_Device_Parent") -ieq $displayParent
+                [string]$_.ParentInstanceId -ieq $displayParent
             }
         )
         if ($siblingLeds.Count -ne 1) {
@@ -296,48 +429,64 @@ function Get-HS2PnpPropertyValue {
 }
 
 function Get-HS2UsbRecoverySnapshot {
-    $presentDevices = @(Get-PnpDevice -PresentOnly -ErrorAction Stop)
-    $hubs = @(
-        $presentDevices |
-            Where-Object { [string]$_.InstanceId -like "USB\VID_1A86&PID_8091\*" } |
-            ForEach-Object {
-                [pscustomobject]@{
-                    InstanceId = [string]$_.InstanceId
-                    Present = $true
-                }
+    # Get-PnpDevice -PresentOnly can still return a historical disconnected
+    # devnode.  Hardware recovery must use DEVPKEY_Device_IsPresent instead of
+    # inferring physical presence from that cmdlet's result set.
+    $candidateDevices = @(
+        Get-PnpDevice -PresentOnly -ErrorAction Stop | Where-Object {
+            [string]$_.InstanceId -like "USB\VID_1A86&PID_8091\*" -or
+            [string]$_.InstanceId -like "USB\VID_0416&PID_8051\*" -or
+            [string]$_.InstanceId -like "USB\VID_1A86&PID_AD23\*" -or
+            [string]$_.InstanceId -like "USB\VID_0000&PID_0002\*"
+        }
+    )
+    $devices = @(
+        $candidateDevices | ForEach-Object {
+            $instanceId = [string]$_.InstanceId
+            $isPresent = Get-HS2PnpPropertyValue `
+                -InstanceId $instanceId `
+                -KeyName "DEVPKEY_Device_IsPresent"
+            $problemCode = Get-HS2PnpPropertyValue `
+                -InstanceId $instanceId `
+                -KeyName "DEVPKEY_Device_ProblemCode"
+            [pscustomobject]@{
+                InstanceId = $instanceId
+                ParentInstanceId = [string](Get-HS2PnpPropertyValue `
+                    -InstanceId $instanceId `
+                    -KeyName "DEVPKEY_Device_Parent")
+                ProblemCode = if ($null -eq $problemCode) { -1 } else { [int]$problemCode }
+                LocationInfo = [string](Get-HS2PnpPropertyValue `
+                    -InstanceId $instanceId `
+                    -KeyName "DEVPKEY_Device_LocationInfo")
+                Present = [bool]$isPresent
+                Status = [string]$_.Status
             }
+        }
+    )
+    $hubs = @(
+        $devices | Where-Object {
+            [bool]$_.Present -and
+            [string]$_.InstanceId -like "USB\VID_1A86&PID_8091\*"
+        }
     )
     $children = @(
-        $presentDevices |
-            Where-Object { [string]$_.InstanceId -like "USB\VID_0000&PID_0002\*" } |
-            ForEach-Object {
-                $instanceId = [string]$_.InstanceId
-                $problemCode = Get-HS2PnpPropertyValue `
-                    -InstanceId $instanceId `
-                    -KeyName "DEVPKEY_Device_ProblemCode"
-                [pscustomobject]@{
-                    InstanceId = $instanceId
-                    ParentInstanceId = [string](Get-HS2PnpPropertyValue `
-                        -InstanceId $instanceId `
-                        -KeyName "DEVPKEY_Device_Parent")
-                    ProblemCode = if ($null -eq $problemCode) { -1 } else { [int]$problemCode }
-                    LocationInfo = [string](Get-HS2PnpPropertyValue `
-                        -InstanceId $instanceId `
-                        -KeyName "DEVPKEY_Device_LocationInfo")
-                    Present = $true
-                }
-            }
+        $devices | Where-Object {
+            [bool]$_.Present -and
+            [string]$_.InstanceId -like "USB\VID_0000&PID_0002\*"
+        }
     )
 
     return [pscustomobject]@{
         Hubs = $hubs
         Children = $children
+        Devices = $devices
     }
 }
 
 function Wait-HS2UsbRecoveryPlan {
     param(
         [Parameter(Mandatory = $true)][string]$BoundHubInstanceId,
+        [Parameter(Mandatory = $true)][object]$Binding,
         [ValidateRange(1, 30)][int]$TimeoutSeconds = 10,
         [ValidateRange(1, 5000)][int]$PollMilliseconds = 500,
         [scriptblock]$SnapshotProvider = { Get-HS2UsbRecoverySnapshot },
@@ -358,7 +507,9 @@ function Wait-HS2UsbRecoveryPlan {
             $plan = Get-HS2UsbRecoveryPlan `
                 -BoundHubInstanceId $BoundHubInstanceId `
                 -Hubs @($snapshot.Hubs) `
-                -Children @($snapshot.Children)
+                -Children @($snapshot.Children) `
+                -Binding $Binding `
+                -Devices @($snapshot.Devices)
             if ($plan.Applicable) {
                 return $plan
             }
@@ -373,13 +524,27 @@ function Wait-HS2UsbRecoveryPlan {
 }
 
 function Test-HS2UsbDisplayHealthy {
-    $device = Get-PnpDevice -PresentOnly -ErrorAction Stop |
+    $devices = @(
+        Get-PnpDevice -PresentOnly -ErrorAction Stop |
         Where-Object {
             [string]$_.InstanceId -like "USB\VID_1A86&PID_AD23\*"
         } |
-        Where-Object { [string]$_.Status -eq "OK" } |
-        Select-Object -First 1
-    return $null -ne $device
+        Where-Object { [string]$_.Status -eq "OK" }
+    )
+    foreach ($device in $devices) {
+        $instanceId = [string]$device.InstanceId
+        $isPresent = Get-HS2PnpPropertyValue `
+            -InstanceId $instanceId `
+            -KeyName "DEVPKEY_Device_IsPresent"
+        $problemCode = Get-HS2PnpPropertyValue `
+            -InstanceId $instanceId `
+            -KeyName "DEVPKEY_Device_ProblemCode"
+        if ([bool]$isPresent -and $null -ne $problemCode -and
+            [int]$problemCode -eq 0) {
+            return $true
+        }
+    }
+    return $false
 }
 
 function Wait-HS2LConnectControllerReady {
@@ -433,14 +598,32 @@ function Invoke-HS2PnPUtil {
 }
 
 function Wait-HS2UsbDisplayHealthy {
-    param([ValidateRange(1, 30)][int]$TimeoutSeconds = 10)
+    param(
+        [ValidateRange(1, 30)][int]$TimeoutSeconds = 10,
+        [ValidateRange(1, 5000)][int]$PollMilliseconds = 500,
+        [ValidateRange(1, 10)][int]$RequiredConsecutiveSamples = 2,
+        [scriptblock]$HealthProbe = { Test-HS2UsbDisplayHealthy },
+        [scriptblock]$DelayAction = {
+            param([int]$Milliseconds)
+            Start-Sleep -Milliseconds $Milliseconds
+        }
+    )
 
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $consecutiveHealthySamples = 0
     do {
-        if (Test-HS2UsbDisplayHealthy) {
-            return $true
+        if ([bool](& $HealthProbe)) {
+            $consecutiveHealthySamples++
+            if ($consecutiveHealthySamples -ge $RequiredConsecutiveSamples) {
+                return $true
+            }
         }
-        Start-Sleep -Milliseconds 500
+        else {
+            $consecutiveHealthySamples = 0
+        }
+        if ([DateTime]::UtcNow -lt $deadline) {
+            & $DelayAction $PollMilliseconds
+        }
     } while ([DateTime]::UtcNow -lt $deadline)
     return $false
 }
@@ -477,7 +660,9 @@ function Invoke-HS2UsbRecovery {
     $plan = Get-HS2UsbRecoveryPlan `
         -BoundHubInstanceId ([string]$binding.HubInstanceId) `
         -Hubs $snapshot.Hubs `
-        -Children $snapshot.Children
+        -Children $snapshot.Children `
+        -Binding $binding `
+        -Devices $snapshot.Devices
     if (-not $plan.Applicable) {
         return [pscustomobject]@{
             Attempted = $false
@@ -512,6 +697,7 @@ function Invoke-HS2UsbRecovery {
 
         $freshPlan = Wait-HS2UsbRecoveryPlan `
             -BoundHubInstanceId ([string]$binding.HubInstanceId) `
+            -Binding $binding `
             -TimeoutSeconds $ReenumerationTimeoutSeconds
         if ($null -eq $freshPlan -or
             -not (Test-HS2UsbRecoveryPlanContinuity `

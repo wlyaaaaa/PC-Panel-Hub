@@ -21,19 +21,11 @@ if (-not $isAdmin) {
 $Root = (Resolve-Path $Root).Path
 $script = Join-Path $Root "tools\turzx_side_screen\StartSideScreenWatchdog.ps1"
 $launcher = Join-Path $Root "tools\turzx_side_screen\StartSideScreenWatchdog-Hidden.vbs"
-$resumeScript = Join-Path $Root "tools\turzx_side_screen\RestartSideScreenAfterResume.ps1"
-$resumeLauncher = Join-Path $Root "tools\turzx_side_screen\RestartSideScreenAfterResume-Hidden.vbs"
 if (!(Test-Path -LiteralPath $script)) {
     throw "Missing watchdog script: $script"
 }
 if (!(Test-Path -LiteralPath $launcher)) {
     throw "Missing watchdog hidden launcher: $launcher"
-}
-if (!(Test-Path -LiteralPath $resumeScript)) {
-    throw "Missing resume recovery script: $resumeScript"
-}
-if (!(Test-Path -LiteralPath $resumeLauncher)) {
-    throw "Missing resume recovery hidden launcher: $resumeLauncher"
 }
 
 $checker = Join-Path $Root "scripts\check-runtime.ps1"
@@ -78,22 +70,15 @@ Register-ScheduledTask `
     -Description ("Start TURZX SideScreen from {0}" -f $Root) `
     -Force | Out-Null
 
-$resumeRefreshArguments = ""
-if ($HybridRefresh) { $resumeRefreshArguments += " -HybridRefresh" }
-else { $resumeRefreshArguments += " -NoHybridRefresh" }
-if ($AltHelper) { $resumeRefreshArguments += " -AltHelper" }
-else { $resumeRefreshArguments += " -NoAltHelper" }
-$resumeAction = 'wscript.exe "{0}" -Root "{1}" -Port {2} -IntervalMs {3}{4}' -f $resumeLauncher, $Root, $Port, $IntervalMs, $resumeRefreshArguments
-$resumeEventQuery = "*[System[(Provider[@Name='Microsoft-Windows-Power-Troubleshooter'] and EventID=1) or (Provider[@Name='Microsoft-Windows-Kernel-Power'] and EventID=107)]]"
-$resumeCreateOutput = & schtasks.exe /Create /TN $ResumeTaskName /SC ONEVENT /EC System /MO $resumeEventQuery /TR $resumeAction /RL HIGHEST /F 2>&1
-if ($LASTEXITCODE -ne 0) {
-    $resumeCreateText = ($resumeCreateOutput | Out-String).Trim()
-    throw "Failed to register resume recovery task: $resumeCreateText"
+# Resume is owned exclusively by the long-running watchdog's WMI subscription.
+# Disable the legacy event task if an older installation left it behind.  It
+# used to force-kill the watchdog and restart a USB device concurrently with
+# the main owner, which is unsafe during display/USB topology instability.
+$legacyResumeTask = Get-ScheduledTask -TaskName $ResumeTaskName -ErrorAction SilentlyContinue
+if ($null -ne $legacyResumeTask -and $legacyResumeTask.State -ne "Disabled") {
+    Disable-ScheduledTask -TaskName $ResumeTaskName -ErrorAction Stop | Out-Null
+    Write-Host "Disabled legacy resume recovery task: $ResumeTaskName"
 }
-$resumeTask = Get-ScheduledTask -TaskName $ResumeTaskName -ErrorAction Stop
-$resumeTask.Settings.DisallowStartIfOnBatteries = $false
-$resumeTask.Settings.StopIfGoingOnBatteries = $false
-Set-ScheduledTask -InputObject $resumeTask | Out-Null
 
 if (-not $DoNotDisableOldTasks) {
     foreach ($oldTask in @("TURZX WeatherFix", "TURZX_88inch_AdminStart")) {
@@ -121,5 +106,5 @@ Get-ScheduledTask | Where-Object { $_.TaskName -in @($TaskName, $ResumeTaskName,
     Format-List
 
 Write-Host "Installed highest-privilege startup task: $TaskName"
-Write-Host "Installed resume recovery task: $ResumeTaskName"
+Write-Host "Resume recovery owner: main watchdog (legacy task disabled)"
 Write-Host "Root: $Root"
