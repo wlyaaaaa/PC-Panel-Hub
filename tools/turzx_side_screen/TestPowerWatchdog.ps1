@@ -340,7 +340,7 @@ $lconnectInitial = Get-HS2LConnectRecoveryFollowUpDecision `
     -NowUtc $decisionNow `
     -GraceSeconds 90
 if ($lconnectInitial.Action -cne "RestartService") {
-    throw "A healthy HS2 USB display with a missing controller must restart L-Connect once."
+    throw "A healthy bound HS2 controller endpoint with an empty controller API must restart L-Connect once."
 }
 $lconnectUnsafe = Get-HS2LConnectRecoveryFollowUpDecision `
     -DisplayHealthy $false `
@@ -430,12 +430,19 @@ Assert-HS2Plan -State Sleep -OfflineClock $true -ScreenOn $false
 Assert-HS2Plan -State Shutdown -OfflineClock $false -ScreenOn $false
 
 $script:mockHS2State = @{
-    GetOfflineModeClock = $true
-    GetIsScreenOn = $true
+    GetOfflineModeClock = $false
+    GetIsScreenOn = $false
 }
+$script:mockHS2ControllerAvailable = $true
+$script:mockHS2EndpointAvailable = $true
 $script:mockHS2Secondary = $true
 $script:mockHS2Writes = New-Object "System.Collections.Generic.List[string]"
+$script:mockHS2Events = New-Object "System.Collections.Generic.List[string]"
 function Get-HS2Controller {
+    if (-not $script:mockHS2ControllerAvailable) {
+        return $null
+    }
+
     $type = if ($script:mockHS2Secondary) { 17104897 } else { 17104896 }
     [pscustomobject]@{
         DevicePath = "mock-hs2"
@@ -452,11 +459,17 @@ function Invoke-HS2DeviceRequest {
         [int]$TimeoutSec
     )
 
+    if (-not $script:mockHS2EndpointAvailable) {
+        throw "mock HS2 controller endpoint unavailable"
+    }
+
     if ($Type -like "Get*") {
+        [void]$script:mockHS2Events.Add(("Read:{0}" -f $Type))
         return [pscustomobject]@{ Success = $true; Data = [bool]$script:mockHS2State[$Type] }
     }
 
     [void]$script:mockHS2Writes.Add(("{0}={1}" -f $Type, [bool]$Body))
+    [void]$script:mockHS2Events.Add(("Write:{0}={1}" -f $Type, [bool]$Body))
     if ($Type -eq "SetOfflineModeClock") {
         $script:mockHS2State.GetOfflineModeClock = [bool]$Body
     }
@@ -465,37 +478,243 @@ function Invoke-HS2DeviceRequest {
     }
     elseif ($Type -eq "SetSecondaryScreen") {
         $script:mockHS2Secondary = [bool]$Body
+        # A real HS2 mode switch re-enumerates the controller.  Its native
+        # state must be read/applied again on the newly selected endpoint;
+        # otherwise a pre-switch read-back can falsely report success.
+        $script:mockHS2State.GetOfflineModeClock = $false
+        $script:mockHS2State.GetIsScreenOn = $false
     }
     return [pscustomobject]@{ Success = $true }
 }
 
-Invoke-HS2PowerState -State Active | Out-Null
-if ($script:mockHS2Writes.Count -ne 0) {
-    throw "HS2 Active must not rewrite values that already match the requested state."
+$script:mockHS2State.GetOfflineModeClock = $false
+$script:mockHS2State.GetIsScreenOn = $false
+$script:mockHS2Secondary = $true
+$script:mockHS2Writes.Clear()
+$script:mockHS2Events.Clear()
+$defaultSecondaryActive = Invoke-HS2PowerState -State Active
+if ($defaultSecondaryActive.ControllerType -ne 17104897 -or -not $script:mockHS2Secondary) {
+    throw "HS2 Active without a mode override must preserve the existing secondary controller type 17104897."
+}
+if (@($script:mockHS2Writes | Where-Object { $_ -like "SetSecondaryScreen=*" }).Count -ne 0) {
+    throw "HS2 Active default must not demote an already-secondary controller."
+}
+if (($script:mockHS2Writes -join ",") -ne "SetOfflineModeClock=True,SetIsScreenOn=True") {
+    throw "HS2 Active default must only restore native screen state while preserving the current controller mode."
 }
 
+$script:mockHS2State.GetOfflineModeClock = $false
+$script:mockHS2State.GetIsScreenOn = $false
+$script:mockHS2Secondary = $true
+$script:mockHS2Writes.Clear()
+$script:mockHS2Events.Clear()
+$forcedNativeActive = Invoke-HS2PowerState -State Active -EnableSecondaryScreen:$false
+if ($forcedNativeActive.ControllerType -ne 17104896 -or $script:mockHS2Secondary) {
+    throw "HS2 Active -EnableSecondaryScreen:`$false must force the native controller type 17104896."
+}
+if (($script:mockHS2Writes -join ",") -ne "SetSecondaryScreen=False,SetOfflineModeClock=True,SetIsScreenOn=True") {
+    throw "HS2 Active -EnableSecondaryScreen:`$false must be the explicit demotion path."
+}
+$nativeModeIndex = $script:mockHS2Events.IndexOf("Write:SetSecondaryScreen=False")
+if ($nativeModeIndex -lt 0 -or
+    -not ($script:mockHS2Events | Select-Object -Skip ($nativeModeIndex + 1) |
+        Where-Object { $_ -eq "Write:SetOfflineModeClock=True" }) -or
+    -not ($script:mockHS2Events | Select-Object -Skip ($nativeModeIndex + 1) |
+        Where-Object { $_ -eq "Write:SetIsScreenOn=True" }) -or
+    -not ($script:mockHS2Events | Select-Object -Skip ($nativeModeIndex + 1) |
+        Where-Object { $_ -eq "Read:GetIsScreenOn" }) -or
+    -not $script:mockHS2State.GetOfflineModeClock -or
+    -not $script:mockHS2State.GetIsScreenOn) {
+    throw "HS2 native mode switch must re-read, re-apply, and verify screen state on the new controller endpoint."
+}
+
+$script:mockHS2State.GetOfflineModeClock = $false
+$script:mockHS2State.GetIsScreenOn = $false
+$script:mockHS2Secondary = $false
+$script:mockHS2Writes.Clear()
+$script:mockHS2Events.Clear()
+$forcedSecondaryActive = Invoke-HS2PowerState -State Active -EnableSecondaryScreen:$true
+if ($forcedSecondaryActive.ControllerType -ne 17104897 -or -not $script:mockHS2Secondary) {
+    throw "HS2 Active -EnableSecondaryScreen:`$true must force the secondary controller type 17104897."
+}
+if (($script:mockHS2Writes -join ",") -ne "SetSecondaryScreen=True,SetOfflineModeClock=True,SetIsScreenOn=True") {
+    throw "HS2 Active -EnableSecondaryScreen:`$true must re-apply native state after promoting the controller."
+}
+$secondaryModeIndex = $script:mockHS2Events.IndexOf("Write:SetSecondaryScreen=True")
+if ($secondaryModeIndex -lt 0 -or
+    -not ($script:mockHS2Events | Select-Object -Skip ($secondaryModeIndex + 1) |
+        Where-Object { $_ -eq "Write:SetOfflineModeClock=True" }) -or
+    -not ($script:mockHS2Events | Select-Object -Skip ($secondaryModeIndex + 1) |
+        Where-Object { $_ -eq "Write:SetIsScreenOn=True" }) -or
+    -not ($script:mockHS2Events | Select-Object -Skip ($secondaryModeIndex + 1) |
+        Where-Object { $_ -eq "Read:GetIsScreenOn" }) -or
+    -not $script:mockHS2State.GetOfflineModeClock -or
+    -not $script:mockHS2State.GetIsScreenOn) {
+    throw "HS2 secondary mode switch must finish with a verified screen-on state on the new controller endpoint."
+}
+
+$script:mockHS2State.GetOfflineModeClock = $false
+$script:mockHS2State.GetIsScreenOn = $false
+$script:mockHS2Secondary = $false
+$script:mockHS2Writes.Clear()
+$script:mockHS2Events.Clear()
+$defaultNativeActive = Invoke-HS2PowerState -State Active
+if ($defaultNativeActive.ControllerType -ne 17104896 -or $script:mockHS2Secondary) {
+    throw "HS2 Active without a mode override must keep a native controller native."
+}
+if (($script:mockHS2Writes -join ",") -ne "SetOfflineModeClock=True,SetIsScreenOn=True") {
+    throw "HS2 native Active must not emit a redundant controller-mode request."
+}
+
+# A missing controller or an unreachable controller endpoint must fail closed;
+# neither path may issue SetSecondaryScreen(false/true) as a speculative repair.
+$script:mockHS2Writes.Clear()
+$script:mockHS2Events.Clear()
+$script:mockHS2ControllerAvailable = $false
+try {
+    Invoke-HS2PowerState -State Active -EnableSecondaryScreen:$true -SkipVerification | Out-Null
+}
+catch {
+    # A missing API controller is expected to surface as an activation failure.
+}
+if (@($script:mockHS2Writes | Where-Object { $_ -like "SetSecondaryScreen=*" }).Count -ne 0) {
+    throw "HS2 Active with no controller API result must not send a mode switch."
+}
+
+$script:mockHS2ControllerAvailable = $true
+$script:mockHS2EndpointAvailable = $false
+$script:mockHS2Secondary = $true
+try {
+    Invoke-HS2PowerState -State Active -EnableSecondaryScreen:$false -SkipVerification | Out-Null
+}
+catch {
+    # A missing device endpoint is expected to surface as an activation failure.
+}
+if (@($script:mockHS2Writes | Where-Object { $_ -like "SetSecondaryScreen=*" }).Count -ne 0) {
+    throw "HS2 Active with no controller endpoint must not send a mode switch."
+}
+$script:mockHS2EndpointAvailable = $true
+
+# Sleep/Shutdown still leave Windows display mode before turning the panel off.
+$script:mockHS2State.GetOfflineModeClock = $false
+$script:mockHS2State.GetIsScreenOn = $false
+$script:mockHS2Secondary = $true
+$script:mockHS2Writes.Clear()
+$script:mockHS2Events.Clear()
 $transitionStarted = Start-HS2MonitorModeTransition
-if (-not $transitionStarted) {
+if (-not $transitionStarted -or $script:mockHS2Secondary) {
     throw "HS2 Sleep must initiate the monitor-mode transition from Windows display mode."
 }
 Invoke-HS2PowerState -State Sleep -MonitorModeAlreadyRequested -SkipVerification | Out-Null
-if (($script:mockHS2Writes -join ",") -ne "SetSecondaryScreen=False,SetIsScreenOn=False") {
+if (($script:mockHS2Writes -join ",") -ne "SetSecondaryScreen=False,SetOfflineModeClock=True") {
     throw "HS2 Sleep must leave Windows display mode before turning the panel off."
 }
 
+$writesAfterSleep = $script:mockHS2Writes.Count
 Invoke-HS2PowerState -State Sleep -SkipVerification | Out-Null
-if ($script:mockHS2Writes.Count -ne 2) {
+if ($script:mockHS2Writes.Count -ne $writesAfterSleep) {
     throw "Repeating HS2 Sleep must be idempotent."
 }
 
 Invoke-HS2PowerState -State Shutdown -SkipVerification | Out-Null
-if (($script:mockHS2Writes -join ",") -ne "SetSecondaryScreen=False,SetIsScreenOn=False,SetOfflineModeClock=False") {
+if (($script:mockHS2Writes -join ",") -ne "SetSecondaryScreen=False,SetOfflineModeClock=True,SetOfflineModeClock=False") {
     throw "HS2 Shutdown must disable the offline clock while preserving an already-off screen."
 }
 
-Invoke-HS2PowerState -State Active | Out-Null
-if (($script:mockHS2Writes -join ",") -ne "SetSecondaryScreen=False,SetIsScreenOn=False,SetOfflineModeClock=False,SetOfflineModeClock=True,SetIsScreenOn=True,SetSecondaryScreen=True") {
-    throw "HS2 Active must restore screen state before returning the device to Windows display mode."
+$promotionNow = [DateTime]::Parse("2026-08-11T14:00:00Z").ToUniversalTime()
+$nativeNeededPromotion = Get-HS2SecondaryPromotionDecision `
+    -NativeActive $false `
+    -SecondaryVerified $false `
+    -NativeStableSinceUtc ([DateTime]::MinValue) `
+    -LastPromotionAttemptUtc ([DateTime]::MinValue) `
+    -NowUtc $promotionNow `
+    -StabilitySeconds 30
+if ($nativeNeededPromotion.Action -ne "ActivateNative") {
+    throw "HS2 promotion must first recover the native controller."
+}
+$stabilizingPromotion = Get-HS2SecondaryPromotionDecision `
+    -NativeActive $true `
+    -SecondaryVerified $false `
+    -NativeStableSinceUtc $promotionNow.AddSeconds(-29) `
+    -LastPromotionAttemptUtc ([DateTime]::MinValue) `
+    -NowUtc $promotionNow `
+    -StabilitySeconds 30
+if ($stabilizingPromotion.Action -ne "WaitNativeStability") {
+    throw "HS2 promotion must keep the native display stable through its configured grace window."
+}
+$readyPromotion = Get-HS2SecondaryPromotionDecision `
+    -NativeActive $true `
+    -SecondaryVerified $false `
+    -NativeStableSinceUtc $promotionNow.AddSeconds(-30) `
+    -LastPromotionAttemptUtc ([DateTime]::MinValue) `
+    -NowUtc $promotionNow `
+    -StabilitySeconds 30
+if ($readyPromotion.Action -ne "PromoteSecondary") {
+    throw "HS2 must make one secondary-display promotion after the native stabilization window."
+}
+$heldPromotion = Get-HS2SecondaryPromotionDecision `
+    -NativeActive $true `
+    -SecondaryVerified $false `
+    -NativeStableSinceUtc $promotionNow.AddMinutes(-2) `
+    -LastPromotionAttemptUtc $promotionNow.AddSeconds(-1) `
+    -NowUtc $promotionNow `
+    -StabilitySeconds 30
+if ($heldPromotion.Action -ne "HoldNative") {
+    throw "HS2 must not repeatedly switch into the Windows topology after a promotion attempt in the same epoch."
+}
+
+if ($null -eq (Get-Command Get-HS2ResumeEventDecision -ErrorAction SilentlyContinue)) {
+    throw "HS2 resume events must have a pure 30-second merge-window decision function."
+}
+$resumeEpochNow = [DateTime]::Parse("2026-08-11T14:00:00Z").ToUniversalTime()
+$firstResume = Get-HS2ResumeEventDecision `
+    -EventType 7 `
+    -LastHandledUtc ([DateTime]::MinValue) `
+    -NowUtc $resumeEpochNow `
+    -MergeSeconds 30
+if ($firstResume.Action -ne "Handle") {
+    throw "The first resume EventType 7 must start one active watchdog epoch."
+}
+$mergedResume = Get-HS2ResumeEventDecision `
+    -EventType 18 `
+    -LastHandledUtc $resumeEpochNow `
+    -NowUtc $resumeEpochNow.AddSeconds(10) `
+    -MergeSeconds 30
+if ($mergedResume.Action -ne "Ignore") {
+    throw "Resume EventType 7/18 arrivals within 30 seconds must merge into one epoch."
+}
+$afterSuspendResetResume = Get-HS2ResumeEventDecision `
+    -EventType 18 `
+    -LastHandledUtc ([DateTime]::MinValue) `
+    -NowUtc $resumeEpochNow.AddSeconds(10) `
+    -MergeSeconds 30
+if ($afterSuspendResetResume.Action -ne "Handle") {
+    throw "A suspend EventType 4 reset must allow the next resume EventType 18 within 30 seconds."
+}
+$nextResume = Get-HS2ResumeEventDecision `
+    -EventType 18 `
+    -LastHandledUtc $resumeEpochNow `
+    -NowUtc $resumeEpochNow.AddSeconds(31) `
+    -MergeSeconds 30
+if ($nextResume.Action -ne "Handle") {
+    throw "A resume event after the 30-second merge window must start a new epoch."
+}
+$unsupportedResumeRejected = $false
+try {
+    $unsupportedResume = Get-HS2ResumeEventDecision `
+        -EventType 4 `
+        -LastHandledUtc ([DateTime]::MinValue) `
+        -NowUtc $resumeEpochNow `
+        -MergeSeconds 30
+    if ($unsupportedResume.Action -ne "Ignore") {
+        throw "unsupported resume action"
+    }
+}
+catch {
+    $unsupportedResumeRejected = $true
+}
+if (-not $unsupportedResumeRejected) {
+    throw "Suspend EventType 4 must not be treated as a resume epoch."
 }
 
 $decisionNow = [DateTime]::Parse("2026-08-06T12:00:00Z").ToUniversalTime()
@@ -577,9 +796,10 @@ $validChild = [pscustomobject]@{
     Present = $true
 }
 $validBinding = [pscustomobject]@{
-    SchemaVersion = 1
+    SchemaVersion = 2
     HubInstanceId = $validHub.InstanceId
     DisplayInstanceId = "USB\VID_1A86&PID_AD23\verified-hs2-display"
+    DisplayInterfaceInstanceId = "USB\VID_1A86&PID_AD23&MI_00\verified-hs2-display-interface"
     LedInstanceId = "USB\VID_0416&PID_8051\verified-hs2-led"
 }
 $validLedSibling = [pscustomobject]@{
@@ -672,6 +892,75 @@ if ($startupGraceElapsed.Action -cne "Allow") {
     throw "HS2 recovery escalation may be evaluated after the stabilization window expires."
 }
 
+# Native-controller recovery intentionally has no AD23 display.  A previously
+# verified dedicated hub with a present, healthy A068 endpoint is still
+# sufficient physical evidence for the one bounded L-Connect restart when its
+# API is empty.  An A068 endpoint on any other hub must not be accepted.
+$nativeLConnectBindingPath = Join-Path `
+    ([IO.Path]::GetTempPath()) `
+    ("hs2-native-lconnect-binding-{0}.json" -f [Guid]::NewGuid().ToString("N"))
+try {
+    [IO.File]::WriteAllText(
+        $nativeLConnectBindingPath,
+        ($validBinding | ConvertTo-Json -Compress),
+        [Text.UTF8Encoding]::new($false))
+    $nativeRecoveryHub = [pscustomobject]@{
+        InstanceId = $validHub.InstanceId
+        ParentInstanceId = ""
+        Present = $true
+        Status = "OK"
+        ProblemCode = 0
+    }
+    $nativeA068Endpoint = [pscustomobject]@{
+        InstanceId = "USB\VID_1CBE&PID_A068\native-hs2-controller"
+        ParentInstanceId = $validHub.InstanceId
+        Present = $true
+        Status = "OK"
+        ProblemCode = 0
+    }
+    $nativeLConnectEligibility = Get-HS2LConnectServiceRecoveryEligibility `
+        -BindingPath $nativeLConnectBindingPath `
+        -Snapshot ([pscustomobject]@{ Devices = @($nativeRecoveryHub, $nativeA068Endpoint) })
+    if (-not $nativeLConnectEligibility.Eligible -or
+        $nativeLConnectEligibility.EndpointInstanceId -cne $nativeA068Endpoint.InstanceId) {
+        throw "A present A068 endpoint on the previously bound healthy hub must permit the one L-Connect recovery decision."
+    }
+    $nativeApiEmptyFirstDecision = Get-HS2LConnectRecoveryFollowUpDecision `
+        -DisplayHealthy $nativeLConnectEligibility.Eligible `
+        -RecoveryAttempted $false `
+        -RecoveryStartedUtc ([DateTime]::MinValue) `
+        -NowUtc $graceStart.AddSeconds(120) `
+        -GraceSeconds 90
+    if ($nativeApiEmptyFirstDecision.Action -cne "RestartService") {
+        throw "A068 present plus controller API failure must allow exactly one L-Connect restart."
+    }
+    $nativeApiEmptyAfterAttemptDecision = Get-HS2LConnectRecoveryFollowUpDecision `
+        -DisplayHealthy $nativeLConnectEligibility.Eligible `
+        -RecoveryAttempted $true `
+        -RecoveryStartedUtc $graceStart.AddSeconds(120) `
+        -NowUtc $graceStart.AddSeconds(121) `
+        -GraceSeconds 90
+    if ($nativeApiEmptyAfterAttemptDecision.Action -ceq "RestartService") {
+        throw "An A068-backed L-Connect recovery must not restart the service more than once per watchdog epoch."
+    }
+    $foreignA068Endpoint = [pscustomobject]@{
+        InstanceId = "USB\VID_1CBE&PID_A068\foreign-controller"
+        ParentInstanceId = "USB\VID_1A86&PID_8091\other-hub"
+        Present = $true
+        Status = "OK"
+        ProblemCode = 0
+    }
+    $foreignNativeEligibility = Get-HS2LConnectServiceRecoveryEligibility `
+        -BindingPath $nativeLConnectBindingPath `
+        -Snapshot ([pscustomobject]@{ Devices = @($nativeRecoveryHub, $foreignA068Endpoint) })
+    if ($foreignNativeEligibility.Eligible) {
+        throw "An A068 endpoint not parented by the previously bound hub must fail closed."
+    }
+}
+finally {
+    Remove-Item -LiteralPath $nativeLConnectBindingPath -Force -ErrorAction SilentlyContinue
+}
+
 $stableProbeValues = [Collections.Generic.Queue[bool]]::new()
 foreach ($value in @($false, $true, $false, $true, $true)) {
     $stableProbeValues.Enqueue($value)
@@ -690,6 +979,13 @@ if (-not $stableDisplayReady -or $stableProbeCalls -ne 5) {
     throw "HS2 display admission must require two consecutive healthy physical samples."
 }
 
+$healthyDisplayInterface = [pscustomobject]@{
+    InstanceId = $validBinding.DisplayInterfaceInstanceId
+    ParentInstanceId = $validBinding.DisplayInstanceId
+    Present = $true
+    Status = "OK"
+    ProblemCode = 0
+}
 $healthyBindingSnapshot = [pscustomobject]@{
     Devices = @(
         $validHub,
@@ -700,6 +996,7 @@ $healthyBindingSnapshot = [pscustomobject]@{
             Status = "OK"
             ProblemCode = 0
         },
+        $healthyDisplayInterface,
         [pscustomobject]@{
             InstanceId = $validBinding.LedInstanceId
             ParentInstanceId = $validHub.InstanceId
@@ -713,6 +1010,35 @@ $healthyBinding = Get-HS2HealthyUsbTopologyBinding -Snapshot $healthyBindingSnap
 if ($null -eq $healthyBinding -or
     [string]$healthyBinding.DisplayInstanceId -ine [string]$validBinding.DisplayInstanceId) {
     throw "HS2 display admission must resolve one exact healthy hub/display/LED topology."
+}
+$missingDisplayInterfaceBinding = Get-HS2HealthyUsbTopologyBinding -Snapshot ([pscustomobject]@{
+        Devices = @($healthyBindingSnapshot.Devices | Where-Object {
+                [string]$_.InstanceId -notlike "*`&MI_00`*"
+            })
+    })
+if ($null -ne $missingDisplayInterfaceBinding) {
+    throw "An AD23 composite without its MI_00 display interface must fail closed."
+}
+$failedDisplayInterface = $healthyDisplayInterface.PSObject.Copy()
+$failedDisplayInterface.Status = "Unknown"
+$failedDisplayInterface.ProblemCode = 31
+$failedInterfaceBinding = Get-HS2HealthyUsbTopologyBinding -Snapshot ([pscustomobject]@{
+        Devices = @($healthyBindingSnapshot.Devices | Where-Object {
+                [string]$_.InstanceId -ine [string]$healthyDisplayInterface.InstanceId
+            }) + @($failedDisplayInterface)
+    })
+if ($null -ne $failedInterfaceBinding) {
+    throw "An AD23 MI_00 interface with a nonzero problem code must fail closed."
+}
+$foreignDisplayInterface = $healthyDisplayInterface.PSObject.Copy()
+$foreignDisplayInterface.ParentInstanceId = "USB\VID_1A86&PID_AD23\different-composite"
+$foreignInterfaceBinding = Get-HS2HealthyUsbTopologyBinding -Snapshot ([pscustomobject]@{
+        Devices = @($healthyBindingSnapshot.Devices | Where-Object {
+                [string]$_.InstanceId -ine [string]$healthyDisplayInterface.InstanceId
+            }) + @($foreignDisplayInterface)
+    })
+if ($null -ne $foreignInterfaceBinding) {
+    throw "An AD23 MI_00 interface parented by another composite must fail closed."
 }
 $missingLedBinding = Get-HS2HealthyUsbTopologyBinding -Snapshot ([pscustomobject]@{
         Devices = @($healthyBindingSnapshot.Devices | Where-Object {
@@ -959,9 +1285,39 @@ function Get-PnpDeviceProperty {
         [Parameter(Mandatory = $true)][string]$InstanceId,
         [Parameter(Mandatory = $true)][string]$KeyName
     )
+    $device = @(
+        $script:mockHS2PnpDevices | Where-Object {
+            [string]$_.InstanceId -ieq $InstanceId
+        }
+    )[0]
     $data = switch ($KeyName) {
-        "DEVPKEY_Device_IsPresent" { $script:mockHS2PnpPresent; break }
-        "DEVPKEY_Device_ProblemCode" { 0; break }
+        "DEVPKEY_Device_IsPresent" {
+            if ($null -ne $device -and $device.PSObject.Properties.Name -contains "Present") {
+                [bool]$device.Present -and $script:mockHS2PnpPresent
+            }
+            else {
+                $script:mockHS2PnpPresent
+            }
+            break
+        }
+        "DEVPKEY_Device_ProblemCode" {
+            if ($null -ne $device -and $device.PSObject.Properties.Name -contains "ProblemCode") {
+                [int]$device.ProblemCode
+            }
+            else {
+                0
+            }
+            break
+        }
+        "DEVPKEY_Device_Parent" {
+            if ($null -ne $device -and $device.PSObject.Properties.Name -contains "ParentInstanceId") {
+                [string]$device.ParentInstanceId
+            }
+            else {
+                $null
+            }
+            break
+        }
         default { $null; break }
     }
     return [pscustomobject]@{ Data = $data }
@@ -970,7 +1326,9 @@ try {
     $script:mockHS2PnpDevices = @(
         [pscustomobject]@{
             InstanceId = "USB\VID_1CBE&PID_A068\native-mode"
+            Present = $true
             Status = "OK"
+            ProblemCode = 0
         }
     )
     if (Test-HS2UsbDisplayHealthy) {
@@ -980,7 +1338,17 @@ try {
     $script:mockHS2PnpDevices = @(
         [pscustomobject]@{
             InstanceId = "USB\VID_1A86&PID_AD23\failed-display"
+            ParentInstanceId = "USB\VID_1A86&PID_8091\verified-hs2-hub"
+            Present = $true
             Status = "Unknown"
+            ProblemCode = 43
+        },
+        [pscustomobject]@{
+            InstanceId = "USB\VID_1A86&PID_AD23&MI_00\failed-display-interface"
+            ParentInstanceId = "USB\VID_1A86&PID_AD23\failed-display"
+            Present = $true
+            Status = "Unknown"
+            ProblemCode = 43
         }
     )
     if (Test-HS2UsbDisplayHealthy) {
@@ -990,7 +1358,17 @@ try {
     $script:mockHS2PnpDevices = @(
         [pscustomobject]@{
             InstanceId = "USB\VID_1A86&PID_AD23\healthy-display"
+            ParentInstanceId = "USB\VID_1A86&PID_8091\verified-hs2-hub"
+            Present = $true
             Status = "OK"
+            ProblemCode = 0
+        },
+        [pscustomobject]@{
+            InstanceId = "USB\VID_1A86&PID_AD23&MI_00\healthy-display-interface"
+            ParentInstanceId = "USB\VID_1A86&PID_AD23\healthy-display"
+            Present = $true
+            Status = "OK"
+            ProblemCode = 0
         }
     )
     $script:mockHS2PnpPresent = $false
@@ -1008,6 +1386,9 @@ finally {
 }
 
 $activeRecoveryText = Get-Content -Raw -LiteralPath $activeRecoveryPolicy
+if ($activeRecoveryText -notmatch [regex]::Escape('USB\VID_1A86&PID_AD23&MI_00\*')) {
+    throw "HS2 USB recovery snapshots must retain the AD23 MI_00 display interface."
+}
 $missingBindingPath = Join-Path `
     ([IO.Path]::GetTempPath()) `
     ("absent-hs2-binding-{0}.json" -f [Guid]::NewGuid().ToString("N"))
@@ -1026,6 +1407,21 @@ foreach ($forbidden in @(
 }
 
 $watchdogText = Get-Content -Raw -LiteralPath $watchdog
+foreach ($productionPath in @($watchdog, $displayPowerPolicy, $activeRecoveryPolicy)) {
+    $productionText = Get-Content -Raw -LiteralPath $productionPath
+    foreach ($forbiddenPrimaryOrVddToken in @(
+            "MTT1337",
+            "PHLC34B",
+            "ensure_only_display",
+            "ensure_primary",
+            "ChangeDisplaySettings",
+            "SetDisplayConfig",
+            "DisplaySwitch")) {
+        if ($productionText -match [regex]::Escape($forbiddenPrimaryOrVddToken)) {
+            throw "HS2 production must not touch the physical primary or VDD display path: $forbiddenPrimaryOrVddToken"
+        }
+    }
+}
 foreach ($pattern in @(
     "Win32_PowerManagementEvent",
     "Win32_ComputerShutdownEvent",
@@ -1053,19 +1449,26 @@ foreach ($pattern in @(
     'hs2DisplayStateActive = $false',
     'hs2DisplayStateDesiredActive = $false',
     "Invoke-HS2ActiveMaintenance",
-    "Invoke-HS2UsbRecovery",
-    "Get-HS2UsbAutomaticRecoveryDecision",
-    "EnableHS2UsbPnPRecovery",
-    "HS2RecoveryStartupGraceSeconds = 120",
-    "Get-HS2RecoveryEscalationDecision",
-    "HS2UsbRecoveryAfterFailures",
+    "Set-HS2PreservedActiveState",
+    "Set-HS2VerifiedSecondaryState",
+    "Invoke-HS2InitialActiveMaintenance",
+    "Test-HS2CurrentSecondaryBindingHealthy",
+    "Invoke-HS2SecondaryActiveMaintenance",
+    "Set-HS2NativeActiveState",
+    "Invoke-HS2SecondaryPromotion",
+    "Get-HS2SecondaryPromotionDecision",
+    "Get-HS2ResumeEventDecision",
+    "hs2LastResumeHandledUtc",
+    "HS2SecondaryPromotionGraceSeconds = 30",
+    "HS2LConnectRecoveryStartupGraceSeconds = 120",
+    "Invoke-HS2NativeLConnectServiceRecovery",
+    "Get-HS2LConnectServiceRecoveryEligibility",
     "Get-HS2LConnectRecoveryFollowUpDecision",
-    "HS2LConnectRecoveryRetrySeconds = 5",
-    "HS2LConnectRecoveryGraceSeconds = 90",
     "HS2ActiveSlowRetrySeconds",
-    "HS2 recovery helper failed safely",
     "hs2-usb-topology-binding.json",
-    "HS2 overlay watchdog=enabled",
+    "HS2 overlay watchdog=secondary-verified-only",
+    "mode=one-attempt-per-startup-or-resume-epoch",
+    "fallback=verified-native",
     "HS2OverlayRetrySeconds = 30",
     "SetTurzxBrightness.ps1",
     "ActiveBrightness = 170",
@@ -1073,7 +1476,7 @@ foreach ($pattern in @(
     "Enter-ShutdownDisplayState",
     "Set-ActiveDisplayState",
     "fallback=black-frame",
-    "display power policy=hs2-transition-first/turzx-brightness-123",
+    "display power policy=hs2-preserve-current-mode-then-verified-secondary/turzx-brightness-123",
     "StopSideScreenStack.ps1",
     "StartSideScreenStack.ps1",
     "-Worker",
@@ -1102,26 +1505,14 @@ if ($watchdogText -match '(?s)function Set-ActiveDisplayState.*?\$script:hs2Disp
 if ($watchdogText -notmatch '\$null\s*-eq\s*\$result\s*-or\s*-not\s*\[bool\]\$result\.Verified') {
     throw "HS2 Active requires an explicit Verified=true result."
 }
-if ($watchdogText -notmatch '(?s)Invoke-HS2PowerState\s+-State\s+Active.*?Wait-HS2UsbDisplayHealthy.*?Save-HS2UsbTopologyBinding.*?if\s*\(-not\s+\$bindingSaved\).*?throw.*?\$script:hs2DisplayStateActive\s*=\s*\$true') {
-    throw "HS2 Active and overlay activation must wait for a persisted healthy hub/display/LED binding."
+if ($watchdogText -match '(?i)Invoke-HS2UsbRecovery|EnableHS2UsbPnPRecovery') {
+    throw "The preserved-mode recovery epoch must never mutate USB/PnP after a secondary-display failure."
 }
-if ($watchdogText -notmatch '(?s)Get-HS2UsbAutomaticRecoveryDecision.*?-Enabled\s+\(\[bool\]\$EnableHS2UsbPnPRecovery\).*?if\s*\(\$usbSafety\.Action\s+-eq\s+"Dispatch"\).*?Invoke-HS2UsbRecovery') {
-    throw "Automatic HS2 PnP mutation must be behind an explicit disabled-by-default opt-in."
-}
-if ($watchdogText -notmatch '(?s)Get-HS2RecoveryEscalationDecision.*?if\s*\(\$escalationDecision\.Action\s+-eq\s+"Wait"\).*?Get-HS2UsbRecoveryPlan') {
-    throw "HS2 startup must finish its passive stabilization window before service or PnP recovery escalation."
-}
-foreach ($startupEntry in @($installer, $watchdogLauncher, $stack)) {
+foreach ($startupEntry in @($installer, $watchdogLauncher, $stack, $start)) {
     $startupEntryText = Get-Content -Raw -LiteralPath $startupEntry
-    if ($startupEntryText -match '(?i)-EnableHS2UsbPnPRecovery') {
-        throw "Production startup must never opt in to HS2 USB PnP recovery: $startupEntry"
+    if ($startupEntryText -match '(?i)-EnableSecondaryScreen|-EnableHS2UsbPnPRecovery') {
+        throw "Production startup must not force a secondary-display or USB recovery mode: $startupEntry"
     }
-}
-if ($watchdogText -notmatch '(?s)function Invoke-HS2ActiveMaintenance.*?try\s*\{.*?Get-HS2UsbRecoveryPlan.*?catch\s*\{.*?HS2 recovery helper failed safely') {
-    throw "HS2 PnP and recovery helpers must be isolated from the watchdog main loop."
-}
-if ($activeRecoveryText -notmatch '(?s)function Invoke-HS2LConnectServiceRecovery.*?WaitForStatus.*?Wait-HS2LConnectControllerReady') {
-    throw "L-Connect recovery must wait for the real controller after the service reports Running."
 }
 
 $watchdogTokens = $null
@@ -1133,6 +1524,170 @@ $watchdogAst = [System.Management.Automation.Language.Parser]::ParseFile(
 if ($watchdogParseErrors.Count -gt 0) {
     throw "Unable to parse watchdog for verified-state gate tests."
 }
+
+function Get-WatchdogFunctionText {
+    param([Parameter(Mandatory = $true)][string]$Name)
+
+    $matches = @(
+        $watchdogAst.FindAll(
+            {
+                param($node)
+                $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -ceq $Name
+            },
+            $true))
+    if ($matches.Count -ne 1) {
+        throw "Watchdog must define exactly one $Name function."
+    }
+    return $matches[0].Extent.Text
+}
+
+$preservedActiveText = Get-WatchdogFunctionText -Name "Set-HS2PreservedActiveState"
+foreach ($pattern in @(
+        "Invoke-HS2PowerState",
+        "State Active",
+        "17104897",
+        "Set-HS2VerifiedSecondaryState",
+        "17104896")) {
+    if ($preservedActiveText -notmatch [regex]::Escape($pattern)) {
+        throw "Preserved HS2 Active is missing its current-controller contract: $pattern"
+    }
+}
+if ($preservedActiveText -match '(?i)-EnableSecondaryScreen') {
+    throw "Preserved HS2 Active must not force either controller mode."
+}
+if ($preservedActiveText -match '(?i)Set-HS2NativeActiveState') {
+    throw "An already-secondary HS2 controller must not be demoted by the preserved Active path."
+}
+if ($preservedActiveText -notmatch '(?s)17104897.*?Set-HS2VerifiedSecondaryState') {
+    throw "An already-secondary HS2 controller must be verified/bound before overlay activation."
+}
+if ($preservedActiveText -notmatch '(?s)17104896.*?(Set-HS2NativeStateFromResult|hs2NativeDisplayStateActive\s*=\s*\$true)') {
+    throw "A native HS2 controller must remain native and enter the 30-second promotion phase."
+}
+
+$verifiedSecondaryText = Get-WatchdogFunctionText -Name "Set-HS2VerifiedSecondaryState"
+foreach ($pattern in @(
+        "17104897",
+        "Wait-HS2UsbDisplayHealthy",
+        "Save-HS2UsbTopologyBinding",
+        "Enable-DesktopWindowPreservation",
+        "hs2DisplayStateActive = `$true")) {
+    if ($verifiedSecondaryText -notmatch [regex]::Escape($pattern)) {
+        throw "Initial secondary HS2 verification is missing its AD23/binding/window contract: $pattern"
+    }
+}
+if ($verifiedSecondaryText -match '(?i)-EnableSecondaryScreen') {
+    throw "Initial secondary verification must not demote or re-promote an already-secondary controller."
+}
+
+$nativeActiveText = Get-WatchdogFunctionText -Name "Set-HS2NativeActiveState"
+foreach ($pattern in @(
+        "Invoke-HS2PowerState",
+        "Set-HS2NativeStateFromResult",
+        "PreservePromotionBackoff",
+        "-EnableSecondaryScreen:`$false")) {
+    if ($nativeActiveText -notmatch [regex]::Escape($pattern)) {
+        throw "Native HS2 fallback is missing its explicit native-mode contract: $pattern"
+    }
+}
+foreach ($forbiddenPattern in @(
+        "Wait-HS2UsbDisplayHealthy",
+        "Save-HS2UsbTopologyBinding")) {
+    if ($nativeActiveText -match [regex]::Escape($forbiddenPattern)) {
+        throw "Native HS2 fallback must not claim secondary topology health: $forbiddenPattern"
+    }
+}
+
+$promotionText = Get-WatchdogFunctionText -Name "Invoke-HS2SecondaryPromotion"
+foreach ($pattern in @(
+        "Get-HS2SecondaryPromotionDecision",
+        "WaitNativeStability",
+        "HoldNative",
+        "-EnableSecondaryScreen",
+        "17104897",
+        "Set-HS2VerifiedSecondaryState",
+        "Set-HS2NativeActiveState",
+        "PreservePromotionBackoff")) {
+    if ($promotionText -notmatch [regex]::Escape($pattern)) {
+        throw "HS2 secondary promotion is missing its two-phase safety gate: $pattern"
+    }
+}
+if (([regex]::Matches(
+            $promotionText,
+            [regex]::Escape("-EnableSecondaryScreen"))).Count -ne 1) {
+    throw "Each watchdog epoch may issue SetSecondaryScreen(true) through exactly one promotion site."
+}
+if ($promotionText -notmatch '(?s)-NativeActive\s+\$script:hs2NativeDisplayStateActive') {
+    throw "HS2 secondary promotion must be gated by a verified native 17104896 state."
+}
+
+$maintenanceText = Get-WatchdogFunctionText -Name "Invoke-HS2ActiveMaintenance"
+$initialMaintenanceText = Get-WatchdogFunctionText -Name "Invoke-HS2InitialActiveMaintenance"
+$secondaryMaintenanceText = Get-WatchdogFunctionText -Name "Invoke-HS2SecondaryActiveMaintenance"
+$secondaryBindingHealthText = Get-WatchdogFunctionText -Name "Test-HS2CurrentSecondaryBindingHealthy"
+foreach ($pattern in @(
+        "Get-HS2ActiveRecoveryDecision",
+        "HS2ActiveVerifySeconds",
+        "Test-HS2CurrentSecondaryBindingHealthy",
+        "hs2DisplayStateActive = `$false",
+        "hs2OverlayRebindRequired = `$true")) {
+    if ($secondaryMaintenanceText -notmatch [regex]::Escape($pattern)) {
+        throw "Verified secondary HS2 health maintenance is missing its fail-closed/read-back contract: $pattern"
+    }
+}
+if ($secondaryMaintenanceText -match '(?mi)^(?!\s*#).*?(-EnableSecondaryScreen|SetSecondaryScreen)') {
+    throw "Secondary health loss must not issue a controller mode switch."
+}
+if ($secondaryMaintenanceText -match '\$script:hs2SecondaryLastAttemptUtc\s*=\s*\[DateTime\]::MinValue') {
+    throw "Secondary health loss must preserve the current epoch promotion marker."
+}
+if ($secondaryBindingHealthText -match '(?i)-EnableSecondaryScreen|SetSecondaryScreen') {
+    throw "Secondary binding health must remain a read-only controller/AD23/binding probe."
+}
+if ($maintenanceText -match '(?s)\$script:hs2DisplayStateActive\)\s*\{\s*return\s*\}') {
+    throw "A verified secondary display must receive a low-frequency health/read-back check instead of returning forever."
+}
+if ($maintenanceText -notmatch '(?s)Invoke-HS2SecondaryActiveMaintenance') {
+    throw "Active maintenance must dispatch the 30-second verified-secondary health check."
+}
+if ($initialMaintenanceText -notmatch '(?s)Set-HS2PreservedActiveState') {
+    throw "Every startup/resume Active epoch must preserve and verify the controller mode before promotion."
+}
+if ($maintenanceText -notmatch '(?s)Invoke-HS2InitialActiveMaintenance.*?Invoke-HS2SecondaryPromotion') {
+    throw "Native-only HS2 Active must reach the once-per-epoch promotion gate after preservation."
+}
+if ($maintenanceText -notmatch '(?s)Invoke-HS2InitialActiveMaintenance') {
+    throw "HS2 Active maintenance must delegate startup/resume recovery to the preserved-mode path."
+}
+$nativeMaintenanceText = $initialMaintenanceText
+if ($nativeMaintenanceText -notmatch '(?s)hs2SecondaryLastAttemptUtc.*?PreservePromotionBackoff:\$preservePromotionAttempt') {
+    throw "A delayed native fallback must preserve the one-attempt secondary marker for the full watchdog epoch."
+}
+if ($nativeMaintenanceText -notmatch '(?s)catch\s*\{.*?Invoke-HS2NativeLConnectServiceRecovery') {
+    throw "Only a native controller-readback failure may consider the bounded L-Connect service recovery."
+}
+$lconnectRecoveryText = Get-WatchdogFunctionText -Name "Invoke-HS2NativeLConnectServiceRecovery"
+foreach ($pattern in @(
+        "Get-HS2RecoveryEscalationDecision",
+        "HS2LConnectRecoveryStartupGraceSeconds",
+        "Get-HS2LConnectServiceRecoveryEligibility",
+        "Get-HS2LConnectRecoveryFollowUpDecision",
+        "Invoke-HS2LConnectServiceRecovery",
+        "hs2LConnectRecoveryAttempted = `$true",
+        "secondaryAttemptPreserved")) {
+    if ($lconnectRecoveryText -notmatch [regex]::Escape($pattern)) {
+        throw "The bounded L-Connect recovery is missing its safe eligibility/read-back contract: $pattern"
+    }
+}
+if ($lconnectRecoveryText -match 'hs2SecondaryLastAttemptUtc\s*=') {
+    throw "L-Connect service recovery must not clear the one-attempt secondary promotion marker."
+}
+$activeEpochText = Get-WatchdogFunctionText -Name "Set-ActiveDisplayState"
+if ($activeEpochText -notmatch '\$script:hs2SecondaryLastAttemptUtc\s*=\s*\[DateTime\]::MinValue') {
+    throw "Only a new startup or resume epoch may clear the one-attempt secondary promotion marker."
+}
+
 foreach ($functionName in @(
         "Invoke-HS2OverlayHealthCheck",
         "Invoke-HS2ExclusiveWindowProtection")) {
@@ -1294,49 +1849,68 @@ Assert-OrderAfter `
 
 Assert-OrderAfter `
     -Text $watchdogText `
-    -Anchor 'function Invoke-HS2ActiveMaintenance' `
-    -First 'Invoke-HS2PowerState -State Active' `
-    -Second 'Wait-HS2UsbDisplayHealthy' `
-    -Message "HS2 must wait for the Windows display chain after the verified L-Connect request returns."
+    -Anchor 'function Set-HS2NativeActiveState' `
+    -First '-EnableSecondaryScreen:$false' `
+    -Second 'Set-HS2NativeStateFromResult' `
+    -Message "HS2 native fallback must explicitly request native mode before applying the verified native state."
 
 Assert-OrderAfter `
     -Text $watchdogText `
-    -Anchor 'function Invoke-HS2ActiveMaintenance' `
+    -Anchor 'function Set-HS2NativeStateFromResult' `
+    -First 'ControllerType -ne 17104896' `
+    -Second '$script:hs2NativeDisplayStateActive = $true' `
+    -Message "HS2 must establish the native controller before it records a stable native state."
+
+Assert-OrderAfter `
+    -Text $watchdogText `
+    -Anchor 'function Invoke-HS2SecondaryPromotion' `
+    -First '-EnableSecondaryScreen' `
+    -Second 'Set-HS2VerifiedSecondaryState' `
+    -Message "HS2 must enter secondary-display mode before it can verify the AD23 topology."
+
+Assert-OrderAfter `
+    -Text $watchdogText `
+    -Anchor 'function Set-HS2VerifiedSecondaryState' `
     -First 'Wait-HS2UsbDisplayHealthy' `
+    -Second 'Save-HS2UsbTopologyBinding' `
+    -Message "HS2 must save the exact healthy topology only after the Windows display is present."
+
+Assert-OrderAfter `
+    -Text $watchdogText `
+    -Anchor 'function Set-HS2VerifiedSecondaryState' `
+    -First 'Save-HS2UsbTopologyBinding' `
     -Second '$script:hs2DisplayStateActive = $true' `
-    -Message "HS2 must be marked active only after the Windows AD23 display is physically healthy."
+    -Message "HS2 must be marked secondary-active only after its healthy AD23 binding is persisted."
 
 Assert-OrderAfter `
     -Text $watchdogText `
-    -Anchor 'function Invoke-HS2ActiveMaintenance' `
-    -First 'Get-HS2UsbRecoveryPlan' `
-    -Second 'Get-HS2LConnectRecoveryFollowUpDecision' `
-    -Message "An exact bound Code 43 plan must take precedence over L-Connect service recovery."
+    -Anchor 'function Invoke-HS2SecondaryPromotion' `
+    -First 'HS2 secondary promotion failed' `
+    -Second 'Set-HS2NativeActiveState' `
+    -Message "A failed secondary promotion must restore the native display in the same watchdog epoch."
 
-Assert-OrderAfter `
-    -Text $watchdogText `
-    -Anchor 'if ($usbSafety.Action -eq "Dispatch")' `
-    -First 'Get-HS2UsbRecoveryDispatchDecision' `
-    -Second 'Invoke-HS2UsbRecovery' `
-    -Message "USB recovery must choose a bounded phase before invoking the destructive helper."
-
-Assert-OrderAfter `
-    -Text $watchdogText `
-    -Anchor 'if ($usbDispatch.Action -ne "Wait")' `
-    -First '$script:hs2UsbRecoveryContinuationPending = $false' `
-    -Second 'Invoke-HS2UsbRecovery' `
-    -Message "The bounded exact-child continuation must be consumed before it can invoke recovery."
-
-if ($watchdogText -notmatch [regex]::Escape('-SkipDedicatedHubRestart:$skipDedicatedHubRestart')) {
-    throw "The exact-child continuation must not restart the dedicated hub a second time."
+if ($watchdogText -notmatch '\$script:hs2LastResumeHandledUtc\s*=\s*\[DateTime\]::MinValue') {
+    throw "HS2 resume merge state must start empty for a fresh watchdog epoch."
 }
+if ($watchdogText -notmatch '(?s)Get-HS2ResumeEventDecision.*?-MergeSeconds\s+30') {
+    throw "HS2 resume EventType 7/18 handling must use the 30-second merge window."
+}
+if ($watchdogText -notmatch '(?s)\$resumeDecision\.Action\s+-eq\s+"Ignore"') {
+    throw "Duplicate resume events must be ignored before restarting the side-screen stack."
+}
+Assert-OrderAfter `
+    -Text $watchdogText `
+    -Anchor 'elseif ($eventType -eq 7 -or $eventType -eq 18)' `
+    -First 'Get-HS2ResumeEventDecision' `
+    -Second 'Set-ActiveDisplayState -Reason ("resume-event-{0}" -f $eventType)' `
+    -Message "Resume EventType 7/18 must pass the merge decision before resetting the active epoch."
 
 Assert-OrderAfter `
     -Text $watchdogText `
-    -Anchor 'if ($lconnectDecision.Action -eq "RestartService")' `
-    -First '$script:hs2LConnectRecoveryAttempted = $true' `
-    -Second 'Invoke-HS2LConnectServiceRecovery' `
-    -Message "L-Connect recovery must be consumed before restarting the service."
+    -Anchor 'if ($eventType -eq 4)' `
+    -First '$script:hs2LastResumeHandledUtc = [DateTime]::MinValue' `
+    -Second 'Enter-SleepDisplayState' `
+    -Message "Suspend EventType 4 must clear the resume merge marker before the next 7/18 event."
 
 Assert-OrderAfter `
     -Text $watchdogText `

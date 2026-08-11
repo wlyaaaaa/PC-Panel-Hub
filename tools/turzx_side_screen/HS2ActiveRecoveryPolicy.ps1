@@ -293,10 +293,16 @@ function Read-HS2UsbTopologyBinding {
     try {
         $binding = Get-Content -Raw -LiteralPath $Path -ErrorAction Stop |
             ConvertFrom-Json -ErrorAction Stop
-        if ([int]$binding.SchemaVersion -ne 1 -or
+        $schemaVersion = [int]$binding.SchemaVersion
+        if ($schemaVersion -notin @(1, 2) -or
             [string]$binding.HubInstanceId -notlike "USB\VID_1A86&PID_8091\*" -or
             [string]$binding.DisplayInstanceId -notlike "USB\VID_1A86&PID_AD23\*" -or
             [string]$binding.LedInstanceId -notlike "USB\VID_0416&PID_8051\*") {
+            return $null
+        }
+        if ($schemaVersion -eq 2 -and
+            [string]$binding.DisplayInterfaceInstanceId -notlike
+                "USB\VID_1A86&PID_AD23&MI_00\*") {
             return $null
         }
 
@@ -332,6 +338,14 @@ function Get-HS2HealthyUsbTopologyBinding {
             [int]$_.ProblemCode -eq 0
         }
     )
+    $healthyDisplayInterfaces = @(
+        $snapshot.Devices | Where-Object {
+            [bool]$_.Present -and
+            [string]$_.InstanceId -like "USB\VID_1A86&PID_AD23&MI_00\*" -and
+            [string]$_.Status -eq "OK" -and
+            [int]$_.ProblemCode -eq 0
+        }
+    )
     $healthyLeds = @(
         $snapshot.Devices | Where-Object {
             [bool]$_.Present -and
@@ -353,6 +367,15 @@ function Get-HS2HealthyUsbTopologyBinding {
             continue
         }
 
+        $displayInterfaces = @(
+            $healthyDisplayInterfaces | Where-Object {
+                [string]$_.ParentInstanceId -ieq [string]$display.InstanceId
+            }
+        )
+        if ($displayInterfaces.Count -ne 1) {
+            continue
+        }
+
         $siblingLeds = @(
             $healthyLeds | Where-Object {
                 [string]$_.ParentInstanceId -ieq $displayParent
@@ -363,9 +386,10 @@ function Get-HS2HealthyUsbTopologyBinding {
         }
 
         [void]$matches.Add([pscustomobject]@{
-            SchemaVersion = 1
+            SchemaVersion = 2
             HubInstanceId = [string]$hub[0].InstanceId
             DisplayInstanceId = [string]$display.InstanceId
+            DisplayInterfaceInstanceId = [string]$displayInterfaces[0].InstanceId
             LedInstanceId = [string]$siblingLeds[0].InstanceId
             ConfirmedAtUtc = [DateTime]::UtcNow.ToString("o")
         })
@@ -387,8 +411,11 @@ function Save-HS2UsbTopologyBinding {
 
     $existing = Read-HS2UsbTopologyBinding -Path $Path
     if ($null -ne $existing -and
+        [int]$existing.SchemaVersion -eq [int]$binding.SchemaVersion -and
         [string]$existing.HubInstanceId -ieq [string]$binding.HubInstanceId -and
         [string]$existing.DisplayInstanceId -ieq [string]$binding.DisplayInstanceId -and
+        [string]$existing.DisplayInterfaceInstanceId -ieq
+            [string]$binding.DisplayInterfaceInstanceId -and
         [string]$existing.LedInstanceId -ieq [string]$binding.LedInstanceId) {
         return $true
     }
@@ -436,7 +463,9 @@ function Get-HS2UsbRecoverySnapshot {
         Get-PnpDevice -PresentOnly -ErrorAction Stop | Where-Object {
             [string]$_.InstanceId -like "USB\VID_1A86&PID_8091\*" -or
             [string]$_.InstanceId -like "USB\VID_0416&PID_8051\*" -or
+            [string]$_.InstanceId -like "USB\VID_1A86&PID_AD23&MI_00\*" -or
             [string]$_.InstanceId -like "USB\VID_1A86&PID_AD23\*" -or
+            [string]$_.InstanceId -like "USB\VID_1CBE&PID_A068\*" -or
             [string]$_.InstanceId -like "USB\VID_0000&PID_0002\*"
         }
     )
@@ -483,6 +512,80 @@ function Get-HS2UsbRecoverySnapshot {
     }
 }
 
+function Get-HS2LConnectServiceRecoveryEligibility {
+    param(
+        [Parameter(Mandatory = $true)][string]$BindingPath,
+        [object]$Snapshot
+    )
+
+    # A native-first boot intentionally has no AD23 Windows display.  Service
+    # recovery may therefore use the native A068 controller endpoint, but only
+    # when it is on the same previously verified dedicated hub.  This is a
+    # read-only eligibility gate; it never mutates USB/PnP state.
+    $binding = Read-HS2UsbTopologyBinding -Path $BindingPath
+    if ($null -eq $binding) {
+        return [pscustomobject]@{
+            Eligible = $false
+            Reason = "verified-hub-binding-missing"
+            EndpointInstanceId = $null
+        }
+    }
+
+    $snapshot = if ($null -eq $Snapshot) {
+        Get-HS2UsbRecoverySnapshot
+    }
+    else {
+        $Snapshot
+    }
+    $boundHub = @(
+        $snapshot.Devices | Where-Object {
+            [bool]$_.Present -and
+            [string]$_.InstanceId -ieq [string]$binding.HubInstanceId -and
+            [string]$_.InstanceId -like "USB\VID_1A86&PID_8091\*" -and
+            [string]$_.Status -eq "OK" -and
+            [int]$_.ProblemCode -eq 0
+        }
+    )
+    if ($boundHub.Count -ne 1) {
+        return [pscustomobject]@{
+            Eligible = $false
+            Reason = if ($boundHub.Count -eq 0) {
+                "bound-hub-not-healthy"
+            }
+            else {
+                "bound-hub-ambiguous"
+            }
+            EndpointInstanceId = $null
+        }
+    }
+
+    $controllerEndpoints = @(
+        $snapshot.Devices | Where-Object {
+            [bool]$_.Present -and
+            [string]$_.ParentInstanceId -ieq [string]$binding.HubInstanceId -and
+            [string]$_.Status -eq "OK" -and
+            [int]$_.ProblemCode -eq 0 -and
+            (
+                [string]$_.InstanceId -like "USB\VID_1CBE&PID_A068\*" -or
+                [string]$_.InstanceId -like "USB\VID_1A86&PID_AD23\*"
+            )
+        }
+    )
+    if ($controllerEndpoints.Count -eq 0) {
+        return [pscustomobject]@{
+            Eligible = $false
+            Reason = "bound-native-or-ad23-endpoint-not-healthy"
+            EndpointInstanceId = $null
+        }
+    }
+
+    return [pscustomobject]@{
+        Eligible = $true
+        Reason = "bound-controller-endpoint-healthy"
+        EndpointInstanceId = [string]$controllerEndpoints[0].InstanceId
+    }
+}
+
 function Wait-HS2UsbRecoveryPlan {
     param(
         [Parameter(Mandatory = $true)][string]$BoundHubInstanceId,
@@ -524,24 +627,51 @@ function Wait-HS2UsbRecoveryPlan {
 }
 
 function Test-HS2UsbDisplayHealthy {
-    $devices = @(
-        Get-PnpDevice -PresentOnly -ErrorAction Stop |
-        Where-Object {
-            [string]$_.InstanceId -like "USB\VID_1A86&PID_AD23\*"
-        } |
-        Where-Object { [string]$_.Status -eq "OK" }
+    $devices = @(Get-PnpDevice -PresentOnly -ErrorAction Stop)
+    $composites = @(
+        $devices | Where-Object {
+            [string]$_.InstanceId -like "USB\VID_1A86&PID_AD23\*" -and
+            [string]$_.Status -eq "OK"
+        }
     )
-    foreach ($device in $devices) {
-        $instanceId = [string]$device.InstanceId
-        $isPresent = Get-HS2PnpPropertyValue `
-            -InstanceId $instanceId `
+    $displayInterfaces = @(
+        $devices | Where-Object {
+            [string]$_.InstanceId -like "USB\VID_1A86&PID_AD23&MI_00\*" -and
+            [string]$_.Status -eq "OK"
+        }
+    )
+
+    foreach ($composite in $composites) {
+        $compositeId = [string]$composite.InstanceId
+        $compositePresent = Get-HS2PnpPropertyValue `
+            -InstanceId $compositeId `
             -KeyName "DEVPKEY_Device_IsPresent"
-        $problemCode = Get-HS2PnpPropertyValue `
-            -InstanceId $instanceId `
+        $compositeProblem = Get-HS2PnpPropertyValue `
+            -InstanceId $compositeId `
             -KeyName "DEVPKEY_Device_ProblemCode"
-        if ([bool]$isPresent -and $null -ne $problemCode -and
-            [int]$problemCode -eq 0) {
-            return $true
+        if (-not [bool]$compositePresent -or $null -eq $compositeProblem -or
+            [int]$compositeProblem -ne 0) {
+            continue
+        }
+
+        foreach ($display in $displayInterfaces) {
+            $displayId = [string]$display.InstanceId
+            $displayParent = Get-HS2PnpPropertyValue `
+                -InstanceId $displayId `
+                -KeyName "DEVPKEY_Device_Parent"
+            if ([string]$displayParent -ine $compositeId) {
+                continue
+            }
+            $displayPresent = Get-HS2PnpPropertyValue `
+                -InstanceId $displayId `
+                -KeyName "DEVPKEY_Device_IsPresent"
+            $displayProblem = Get-HS2PnpPropertyValue `
+                -InstanceId $displayId `
+                -KeyName "DEVPKEY_Device_ProblemCode"
+            if ([bool]$displayPresent -and $null -ne $displayProblem -and
+                [int]$displayProblem -eq 0) {
+                return $true
+            }
         }
     }
     return $false
@@ -745,6 +875,7 @@ function Invoke-HS2UsbRecovery {
 
 function Invoke-HS2LConnectServiceRecovery {
     param(
+        [Parameter(Mandatory = $true)][string]$BindingPath,
         [ValidateRange(1, 30)][int]$RunningTimeoutSeconds = 10,
         [ValidateRange(1, 60)][int]$ControllerReadyAttempts = 10,
         [ValidateRange(1, 5000)][int]$ControllerPollMilliseconds = 500,
@@ -756,8 +887,14 @@ function Invoke-HS2LConnectServiceRecovery {
     if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
         return [pscustomobject]@{ Attempted = $false; Recovered = $false; Reason = "requires-elevation" }
     }
-    if (-not (Test-HS2UsbDisplayHealthy)) {
-        return [pscustomobject]@{ Attempted = $false; Recovered = $false; Reason = "hs2-usb-display-not-present" }
+    $eligibility = Get-HS2LConnectServiceRecoveryEligibility `
+        -BindingPath $BindingPath
+    if (-not $eligibility.Eligible) {
+        return [pscustomobject]@{
+            Attempted = $false
+            Recovered = $false
+            Reason = [string]$eligibility.Reason
+        }
     }
 
     $service = Get-Service -Name "LConnectService" -ErrorAction SilentlyContinue

@@ -21,9 +21,14 @@ starts PowerShell with window style 0 and waits for the long-running watchdog, s
 the task remains running without creating a visible console at interactive logon.
 
 The watchdog starts the render stack and coordinates both auxiliary displays across
-Windows power transitions. At startup it also enables the Windows multi-monitor
-policies that remember window locations and minimize windows when a monitor is
-disconnected:
+Windows power transitions. HS2 uses a preserve-current-mode safety policy: every
+new startup and resume epoch keeps the controller mode that firmware and Windows
+successfully enumerated. An existing Windows secondary controller (`17104897`) is
+verified in place and is never demoted before its AD23/LED binding and overlay are
+accepted. An existing native controller (`17104896`) is kept lit for a configurable
+30-second stabilization window and then receives exactly one promotion request to
+Windows secondary-display mode. If neither controller is present, no mode request
+is sent. This prevents repeated Windows/GPU display-topology rebuilds.
 
 For high-load resilience, the watchdog and stream run at `AboveNormal` priority and
 the serial write worker runs at `Highest`, without using realtime process priority.
@@ -47,21 +52,26 @@ must be installed explicitly on machines where a 1Hz clock is required.
 
 | Windows state | LIAN LI HS2 curved OLED | TURZX case panel |
 | --- | --- | --- |
-| Active | Windows secondary-display mode, screen on, offline clock armed | stream running at the configured brightness (`170` by default) |
+| Active | 保留开机已成功枚举的模式：已有 `17104897` 时原位验证 AD23+绑定并启动完整浮层；已有 `17104896` 时保持点亮，稳定 30 秒后仅一次尝试 Windows secondary-display；两者都没有时不发送模式切换 | stream running at the configured brightness (`170` by default) |
 | Suspend | monitor mode, native offline clock enabled, normal screen output off | stream stopped, verified command `123` sets brightness to `0` |
 | Shutdown/restart | monitor mode, offline clock disabled, screen output off | stream stopped, verified command `123` sets brightness to `0` |
 
-The native Windows window-preservation policies also cover the separate case where
-the PC remains awake but the main monitor powers down and leaves the display
+The Windows window-preservation policies are deliberately deferred until that
+secondary display has been verified. Once enabled, they cover the separate case
+where the PC remains awake but the main monitor powers down and leaves the display
 topology. Applications are minimized in place instead of being rearranged onto the
 small HS2 display, and Windows restores their remembered monitor locations when the
 main display reconnects.
 
-On resume, the HS2 screen is turned on before it is returned to Windows
-secondary-display mode, and the TURZX brightness is restored before streaming
-starts. Moving HS2 out of the Windows display topology before suspend also keeps
-desktop windows from being stranded on the small display when the main monitor
-disconnects or powers down.
+On resume, HS2 keeps whichever valid controller mode is already present. Only a
+native controller enters the stabilization window before one Windows-secondary
+promotion; an existing verified secondary controller remains secondary.
+The TURZX brightness is restored before streaming starts. Moving HS2 out of the
+Windows display topology before suspend also keeps desktop windows from being
+stranded on the small display when the main monitor disconnects or powers down.
+
+The HS2 policy never changes the physical primary display or the Sunshine MTT1337
+virtual display mode, resolution, refresh rate, HDR, scaling, or capture target.
 
 HS2 transitions use the local L-Connect service on `127.0.0.1:11021`. The
 service can take several seconds to re-enumerate the controller while switching
@@ -69,32 +79,23 @@ between desktop and monitor modes, so the watchdog polls for the new controller
 mode instead of assuming the switch is immediate. L-Connect failures are logged
 and isolated so they do not prevent the TURZX panel from being turned off.
 
-After an unclean restart, the watchdog also keeps `desired active` separate from
-`verified active`. It retries the read-back-verified Active request every 15
-seconds and does not launch the HS2 overlay until both L-Connect verification and
-two consecutive physically healthy AD23 Windows-display samples succeed and the
-same unique healthy hub/display/LED binding is persisted. If the
-HS2 USB display is present but L-Connect has not rebound it, the watchdog may
-restart only `LConnectService` once for that failure streak, and only after a
-120-second startup stabilization window. A running service is not treated as
-recovery proof: the watchdog also waits for the HS2 controller and the physical
-Windows display chain to reappear. While that controller is still warming up it
-keeps a bounded five-second retry cadence for up to 90 seconds. Once both layers
-are verified, any overlay process that survived the display outage is recycled
-once so it binds to the newly enumerated display geometry before notifications
-resume; while the display is absent, a stale overlay is stopped.
-
-Scheduled startup and the normal watchdog never restart a USB hub, remove a
-device, or run a PnP scan. Those operations can trigger a full Windows display
-topology rebuild and are therefore retained only behind the explicit manual
-`-EnableHS2UsbPnPRecovery` diagnostic opt-in. Even then, the plan requires the
-previously verified dedicated `VID_1A86&PID_8091` hub to be healthy, its exact
-LIAN LI LED sibling to be physically healthy, and an exact port-2 Code 43 child.
-An absent AD23 device without that exact failed child is not recovery evidence
-and fails closed. Root hubs, the whole USB tree, ambiguous devices, and ordinary
-boot-time enumeration are never reset automatically. A continuing descriptor
-failure is logged as a cold-power or hardware-service boundary and subsequent
-probes use a slower read-only retry interval.
+After an unclean restart, the watchdog keeps `desired active`, `native active`,
+and `secondary verified` as separate states. Native Active uses L-Connect read-back
+only and never requires an AD23 device. The later secondary phase requires both
+the L-Connect mode read-back and two consecutive healthy AD23 Windows-display
+samples with the same saved hub/display/LED binding. If that promotion fails, the
+watchdog immediately asks for native Active again, stops any stale overlay, and
+holds that bright native state for the remainder of the watchdog process. It does
+not retry the Secondary transition on a timer, restart a USB hub, remove a device,
+or run a PnP scan. The sole service-level exception is one L-Connect restart after
+the 120-second startup grace when the previously bound 8091 hub has a physically
+healthy native A068 endpoint or AD23 endpoint but the controller API is empty;
+that recovery waits for the controller read-back and never clears the one-attempt
+Secondary marker. A new normal startup or resume creates a new epoch and gets one
+fresh promotion attempt. Once both
+layers are verified, any overlay process that survived the display outage is
+recycled once so it binds to the newly enumerated display geometry before
+notifications resume.
 
 The long-running watchdog is the only resume owner. Its WMI power subscription
 coalesces suspend/resume handling with the live process and COM ownership. The

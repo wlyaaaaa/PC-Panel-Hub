@@ -26,9 +26,8 @@ param(
     [ValidateRange(5, 300)][int]$HS2ActiveRetrySeconds = 15,
     [ValidateRange(30, 3600)][int]$HS2ActiveSlowRetrySeconds = 60,
     [ValidateRange(10, 3600)][int]$HS2ActiveVerifySeconds = 30,
-    [ValidateRange(1, 10)][int]$HS2UsbRecoveryAfterFailures = 3,
-    [switch]$EnableHS2UsbPnPRecovery,
-    [ValidateRange(30, 600)][int]$HS2RecoveryStartupGraceSeconds = 120,
+    [ValidateRange(10, 600)][int]$HS2SecondaryPromotionGraceSeconds = 30,
+    [ValidateRange(30, 600)][int]$HS2LConnectRecoveryStartupGraceSeconds = 120,
     [ValidateRange(5, 60)][int]$HS2LConnectRecoveryRetrySeconds = 5,
     [ValidateRange(15, 300)][int]$HS2LConnectRecoveryGraceSeconds = 90,
     [ValidateRange(0, 255)][int]$ActiveBrightness = 170,
@@ -73,22 +72,26 @@ $script:hs2OverlayLastAttemptUtc = [DateTime]::MinValue
 $script:hs2OverlayWasRunning = $false
 $script:hs2DisplayStateActive = $false
 $script:hs2DisplayStateDesiredActive = $false
+$script:hs2NativeDisplayStateActive = $false
+$script:hs2NativeStableSinceUtc = [DateTime]::MinValue
+$script:hs2NativeLastAttemptUtc = [DateTime]::MinValue
+$script:hs2SecondaryLastAttemptUtc = [DateTime]::MinValue
+$script:hs2SecondaryPromotionFailures = 0
+$script:hs2SecondaryStabilityWaitLogged = $false
+$script:hs2SecondaryHoldLogged = $false
+$script:hs2LConnectRecoveryAttempted = $false
+$script:hs2LConnectRecoveryStartedUtc = [DateTime]::MinValue
+$script:hs2LConnectRecoveryGraceLogged = $false
 $script:hs2ActiveLastAttemptUtc = [DateTime]::MinValue
 $script:hs2ActiveLastVerifiedUtc = [DateTime]::MinValue
 $script:hs2ActiveConsecutiveFailures = 0
 $script:hs2ActiveCurrentRetrySeconds = $HS2ActiveRetrySeconds
-$script:hs2UsbRecoveryAttempted = $false
-$script:hs2UsbRecoveryContinuationPending = $false
-$script:hs2UsbRecoverySuppressionLogged = $false
-$script:hs2EscalationGraceLogged = $false
-$script:hs2LConnectRecoveryAttempted = $false
-$script:hs2LConnectRecoveryStartedUtc = [DateTime]::MinValue
-$script:hs2LConnectWarmupLogged = $false
 $script:hs2OverlayRebindRequired = $false
 $script:hs2WindowGuardTargetMonitorDevice = $null
 $script:hs2WindowGuardSafeMonitorDevice = $null
 $script:hs2WindowGuardLastStatus = $null
 $script:hs2WindowGuardLastFailure = $null
+$script:hs2LastResumeHandledUtc = [DateTime]::MinValue
 
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 . $shutdownPolicy
@@ -173,9 +176,157 @@ function Set-TurzxPanelBrightness {
     }
 }
 
-function Invoke-HS2ActiveMaintenance {
-    param([string]$Reason = "watchdog-loop")
+function Set-HS2NativeStateFromResult {
+    param(
+        [Parameter(Mandatory = $true)]$Result,
+        [Parameter(Mandatory = $true)][string]$Reason,
+        [switch]$ResetStabilityWindow,
+        [switch]$PreservePromotionBackoff
+    )
 
+    if ($null -eq $Result -or -not [bool]$Result.Verified -or
+        [int64]$Result.ControllerType -ne 17104896) {
+        throw "HS2 native Active did not return verified controller type 17104896."
+    }
+
+    $nowUtc = [DateTime]::UtcNow
+    $wasNative = $script:hs2NativeDisplayStateActive
+    $modeChanged = [int64]$Result.InitialControllerType -ne 17104896
+    $script:hs2NativeDisplayStateActive = $true
+    $script:hs2DisplayStateActive = $false
+    if ($ResetStabilityWindow -or -not $wasNative -or $modeChanged -or
+        $script:hs2NativeStableSinceUtc -eq [DateTime]::MinValue) {
+        $script:hs2NativeStableSinceUtc = $nowUtc
+        $script:hs2SecondaryStabilityWaitLogged = $false
+        if (-not $PreservePromotionBackoff) {
+            $script:hs2SecondaryLastAttemptUtc = [DateTime]::MinValue
+            $script:hs2SecondaryPromotionFailures = 0
+            $script:hs2SecondaryHoldLogged = $false
+        }
+    }
+    $script:hs2ActiveLastVerifiedUtc = $nowUtc
+    $script:hs2ActiveConsecutiveFailures = 0
+    $script:hs2ActiveCurrentRetrySeconds = $HS2ActiveRetrySeconds
+    $script:hs2OverlayRebindRequired = $true
+    return $Result
+}
+
+function Set-HS2NativeActiveState {
+    param(
+        [Parameter(Mandatory = $true)][string]$Reason,
+        [switch]$ResetStabilityWindow,
+        [switch]$PreservePromotionBackoff
+    )
+
+    # Native mode is an explicit fallback only.  Startup discovery must never
+    # interpret an omitted switch as permission to demote a healthy AD23.
+    $result = Invoke-HS2PowerState `
+        -State Active `
+        -EnableSecondaryScreen:$false `
+        -ServicePort $LConnectServicePort
+    return Set-HS2NativeStateFromResult `
+        -Result $result `
+        -Reason $Reason `
+        -ResetStabilityWindow:$ResetStabilityWindow `
+        -PreservePromotionBackoff:$PreservePromotionBackoff
+}
+
+function Set-HS2VerifiedSecondaryState {
+    param(
+        [Parameter(Mandatory = $true)]$Result,
+        [Parameter(Mandatory = $true)][string]$Reason,
+        [switch]$PreservedAtStartup
+    )
+
+    if ($null -eq $Result -or -not [bool]$Result.Verified -or
+        [int64]$Result.ControllerType -ne 17104897) {
+        throw "HS2 secondary Active did not return verified controller type 17104897."
+    }
+    if (-not (Wait-HS2UsbDisplayHealthy -TimeoutSeconds 15)) {
+        throw "HS2 secondary controller returned, but the bound AD23/LED topology did not become physically healthy."
+    }
+    if (-not (Save-HS2UsbTopologyBinding -Path $hs2UsbTopologyBindingPath)) {
+        throw "HS2 secondary topology binding was not uniquely verified."
+    }
+
+    $nowUtc = [DateTime]::UtcNow
+    $script:hs2NativeDisplayStateActive = $false
+    $script:hs2DisplayStateActive = $true
+    $script:hs2ActiveLastVerifiedUtc = $nowUtc
+    $script:hs2ActiveConsecutiveFailures = 0
+    $script:hs2SecondaryPromotionFailures = 0
+    $script:hs2ActiveCurrentRetrySeconds = $HS2ActiveRetrySeconds
+    $script:hs2OverlayRebindRequired = $true
+    if ($PreservedAtStartup -and
+        $script:hs2SecondaryLastAttemptUtc -eq [DateTime]::MinValue) {
+        # Treat the already-present secondary mode as this epoch's one allowed
+        # topology state.  If it later fails, the epoch cannot oscillate.
+        $script:hs2SecondaryLastAttemptUtc = $nowUtc
+    }
+    Enable-DesktopWindowPreservation
+    if ($PreservedAtStartup) {
+        Write-WatchdogLog (
+            "HS2 secondary preserve verified reason={0}; AD23 binding saved and overlay may activate" -f `
+                $Reason)
+    }
+    else {
+        Write-WatchdogLog (
+            "HS2 secondary promotion verified reason={0}; AD23 binding saved and overlay may activate" -f `
+                $Reason)
+    }
+    return $Result
+}
+
+function Set-HS2PreservedActiveState {
+    param(
+        [Parameter(Mandatory = $true)][string]$Reason,
+        [switch]$ResetStabilityWindow,
+        [switch]$PreservePromotionBackoff
+    )
+
+    # With no mode override, this call may repair screen-on/offline-clock state
+    # but cannot issue SetSecondaryScreen.  Preserve AD23 when firmware/boot
+    # already provided it; only an actual 17104896 controller enters the
+    # stabilization-and-promotion path.
+    $result = Invoke-HS2PowerState -State Active -ServicePort $LConnectServicePort
+    switch ([int64]$result.ControllerType) {
+        17104897 {
+            return Set-HS2VerifiedSecondaryState `
+                -Result $result `
+                -Reason $Reason `
+                -PreservedAtStartup
+        }
+        17104896 {
+            return Set-HS2NativeStateFromResult `
+                -Result $result `
+                -Reason $Reason `
+                -ResetStabilityWindow:$ResetStabilityWindow `
+                -PreservePromotionBackoff:$PreservePromotionBackoff
+        }
+        default {
+            throw "L-Connect returned unsupported HS2 controller type $($result.ControllerType)."
+        }
+    }
+}
+
+function Test-HS2CurrentSecondaryBindingHealthy {
+    $expected = Read-HS2UsbTopologyBinding -Path $hs2UsbTopologyBindingPath
+    $current = Get-HS2HealthyUsbTopologyBinding
+    if ($null -eq $expected -or $null -eq $current) {
+        return $false
+    }
+
+    return (
+        [int]$expected.SchemaVersion -eq 2 -and
+        [int]$current.SchemaVersion -eq 2 -and
+        [string]$current.HubInstanceId -ieq [string]$expected.HubInstanceId -and
+        [string]$current.DisplayInstanceId -ieq [string]$expected.DisplayInstanceId -and
+        [string]$current.DisplayInterfaceInstanceId -ieq
+            [string]$expected.DisplayInterfaceInstanceId -and
+        [string]$current.LedInstanceId -ieq [string]$expected.LedInstanceId)
+}
+
+function Invoke-HS2SecondaryActiveMaintenance {
     $nowUtc = [DateTime]::UtcNow
     $decision = Get-HS2ActiveRecoveryDecision `
         -DesiredActive $script:hs2DisplayStateDesiredActive `
@@ -183,211 +334,272 @@ function Invoke-HS2ActiveMaintenance {
         -LastAttemptUtc $script:hs2ActiveLastAttemptUtc `
         -LastVerifiedUtc $script:hs2ActiveLastVerifiedUtc `
         -NowUtc $nowUtc `
-        -RetrySeconds $script:hs2ActiveCurrentRetrySeconds `
+        -RetrySeconds $HS2ActiveRetrySeconds `
         -VerifySeconds $HS2ActiveVerifySeconds
-    if ($decision.Action -ne "Activate" -and $decision.Action -ne "Verify") {
+    if ($decision.Action -ne "Verify") {
         return
     }
 
-    $wasVerified = $script:hs2DisplayStateActive
     $script:hs2ActiveLastAttemptUtc = $nowUtc
     try {
+        # Preserve is non-topology-mutating: it may repair screen-on state on
+        # the existing controller, but it cannot call SetSecondaryScreen.
         $result = Invoke-HS2PowerState -State Active -ServicePort $LConnectServicePort
-        if ($null -eq $result -or -not [bool]$result.Verified) {
-            throw "L-Connect did not return a verified HS2 Active state."
+        if ([int64]$result.ControllerType -eq 17104896) {
+            if ($script:hs2SecondaryLastAttemptUtc -eq [DateTime]::MinValue) {
+                $script:hs2SecondaryLastAttemptUtc = $nowUtc
+            }
+            Set-HS2NativeStateFromResult `
+                -Result $result `
+                -Reason "secondary-health-returned-native" `
+                -ResetStabilityWindow `
+                -PreservePromotionBackoff | Out-Null
+            Write-WatchdogLog "HS2 secondary health returned native controller; holding native mode for this epoch"
+            return
         }
-        if (-not (Wait-HS2UsbDisplayHealthy -TimeoutSeconds 15)) {
-            throw "L-Connect reported HS2 Active, but the bound hub/display/LED topology did not become physically healthy."
-        }
-
-        try {
-            $bindingSaved = Save-HS2UsbTopologyBinding `
-                -Path $hs2UsbTopologyBindingPath
-        }
-        catch {
-            throw (
-                "HS2 USB topology binding failed safely: {0}" -f `
-                    $_.Exception.Message)
-        }
-        if (-not $bindingSaved) {
-            throw "HS2 USB topology binding unavailable; display activation remains fail-closed."
+        if ([int64]$result.ControllerType -ne 17104897 -or
+            -not (Test-HS2CurrentSecondaryBindingHealthy)) {
+            throw "HS2 secondary controller or its exact AD23/LED binding is no longer healthy."
         }
 
-        $script:hs2DisplayStateActive = $true
         $script:hs2ActiveLastVerifiedUtc = [DateTime]::UtcNow
         $script:hs2ActiveConsecutiveFailures = 0
         $script:hs2ActiveCurrentRetrySeconds = $HS2ActiveRetrySeconds
-        $script:hs2UsbRecoveryAttempted = $false
-        $script:hs2UsbRecoveryContinuationPending = $false
-        $script:hs2UsbRecoverySuppressionLogged = $false
-        $script:hs2EscalationGraceLogged = $false
-        $script:hs2LConnectRecoveryAttempted = $false
-        $script:hs2LConnectRecoveryStartedUtc = [DateTime]::MinValue
-        $script:hs2LConnectWarmupLogged = $false
-        if (-not $wasVerified) {
-            Write-WatchdogLog "HS2 USB topology binding verified"
+    }
+    catch {
+        # Do not attempt a mode transition while a controller/bus is failing.
+        # Fail closed, stop the overlay in the same loop, and wait for natural
+        # controller discovery.  The epoch marker prevents later oscillation.
+        if ($script:hs2SecondaryLastAttemptUtc -eq [DateTime]::MinValue) {
+            $script:hs2SecondaryLastAttemptUtc = $nowUtc
         }
-        if (-not $wasVerified) {
-            Write-WatchdogLog ("HS2 power state=Active reason={0} verified=true" -f $Reason)
+        $script:hs2DisplayStateActive = $false
+        $script:hs2NativeDisplayStateActive = $false
+        $script:hs2OverlayRebindRequired = $true
+        $script:hs2ActiveConsecutiveFailures++
+        $script:hs2ActiveCurrentRetrySeconds = $HS2ActiveSlowRetrySeconds
+        Write-WatchdogLog (
+            "HS2 secondary health lost; preserving topology and waiting for controller recovery: {0}" -f `
+                $_.Exception.Message)
+    }
+}
+
+function Invoke-HS2InitialActiveMaintenance {
+    param([string]$Reason = "watchdog-loop")
+
+    if (-not $script:hs2DisplayStateDesiredActive) {
+        return
+    }
+
+    $nowUtc = [DateTime]::UtcNow
+    $retrySeconds = $script:hs2ActiveCurrentRetrySeconds
+    if ($script:hs2NativeLastAttemptUtc -ne [DateTime]::MinValue -and
+        ($nowUtc - $script:hs2NativeLastAttemptUtc).TotalSeconds -lt $retrySeconds) {
+        return
+    }
+
+    $wasNative = $script:hs2NativeDisplayStateActive
+    $preservePromotionAttempt =
+        $script:hs2SecondaryLastAttemptUtc -ne [DateTime]::MinValue
+    $script:hs2NativeLastAttemptUtc = $nowUtc
+    try {
+        $result = Set-HS2PreservedActiveState `
+            -Reason $Reason `
+            -ResetStabilityWindow:(-not $wasNative) `
+            -PreservePromotionBackoff:$preservePromotionAttempt
+        if ([int64]$result.ControllerType -eq 17104896 -and -not $wasNative) {
+            Write-WatchdogLog (
+                "HS2 native controller ready reason={0} controllerType=17104896; secondary promotion waits {1}s" -f `
+                    $Reason,
+                    $HS2SecondaryPromotionGraceSeconds)
+        }
+    }
+    catch {
+        $script:hs2NativeDisplayStateActive = $false
+        $script:hs2DisplayStateActive = $false
+        $script:hs2ActiveConsecutiveFailures++
+        $script:hs2ActiveCurrentRetrySeconds = if (
+            $script:hs2ActiveConsecutiveFailures -ge 3) {
+            $HS2ActiveSlowRetrySeconds
+        }
+        else {
+            $HS2ActiveRetrySeconds
+        }
+        Write-WatchdogLog (
+            "HS2 initial active recovery failed reason={0} count={1} retrySeconds={2}: {3}" -f `
+                $Reason,
+                $script:hs2ActiveConsecutiveFailures,
+                $script:hs2ActiveCurrentRetrySeconds,
+                $_.Exception.Message)
+        Invoke-HS2NativeLConnectServiceRecovery
+    }
+}
+
+function Invoke-HS2NativeLConnectServiceRecovery {
+    # L-Connect restart is intentionally narrower than a USB/PnP recovery:
+    # it is permitted once only when the previously bound dedicated hub has a
+    # physically healthy native A068 or Secondary AD23 endpoint but the
+    # controller API cannot answer.  It never clears the secondary-promotion
+    # marker, so it cannot cause topology oscillation.
+    if ($script:hs2LConnectRecoveryAttempted) {
+        return
+    }
+
+    $nowUtc = [DateTime]::UtcNow
+    $startupDecision = Get-HS2RecoveryEscalationDecision `
+        -WatchdogStartedUtc $watchdogStartedUtc `
+        -NowUtc $nowUtc `
+        -GraceSeconds $HS2LConnectRecoveryStartupGraceSeconds
+    if ($startupDecision.Action -eq "Wait") {
+        if (-not $script:hs2LConnectRecoveryGraceLogged) {
+            Write-WatchdogLog (
+                "HS2 L-Connect recovery deferred for startup stabilization remainingSeconds={0:N0}" -f `
+                    $startupDecision.RetryAfterSeconds)
+            $script:hs2LConnectRecoveryGraceLogged = $true
         }
         return
+    }
+
+    $eligibility = $null
+    try {
+        $eligibility = Get-HS2LConnectServiceRecoveryEligibility `
+            -BindingPath $hs2UsbTopologyBindingPath
+    }
+    catch {
+        Write-WatchdogLog (
+            "HS2 L-Connect recovery eligibility probe failed safely: {0}" -f `
+                $_.Exception.Message)
+        return
+    }
+    $decision = Get-HS2LConnectRecoveryFollowUpDecision `
+        -DisplayHealthy ([bool]$eligibility.Eligible) `
+        -RecoveryAttempted $script:hs2LConnectRecoveryAttempted `
+        -RecoveryStartedUtc $script:hs2LConnectRecoveryStartedUtc `
+        -NowUtc $nowUtc `
+        -GraceSeconds $HS2LConnectRecoveryGraceSeconds
+    if ($decision.Action -ne "RestartService") {
+        if ($decision.Action -eq "SlowRetry" -and -not $eligibility.Eligible) {
+            Write-WatchdogLog (
+                "HS2 L-Connect recovery skipped reason={0}; secondaryAttemptPreserved={1}" -f `
+                    $eligibility.Reason,
+                    ($script:hs2SecondaryLastAttemptUtc -ne [DateTime]::MinValue))
+        }
+        return
+    }
+
+    $script:hs2LConnectRecoveryAttempted = $true
+    $script:hs2LConnectRecoveryStartedUtc = $nowUtc
+    $serviceRecovery = Invoke-HS2LConnectServiceRecovery `
+        -BindingPath $hs2UsbTopologyBindingPath `
+        -ServicePort $LConnectServicePort
+    Write-WatchdogLog (
+        "HS2 L-Connect recovery attempted={0} recovered={1} reason={2} endpoint={3}; secondaryAttemptPreserved={4}" -f `
+            $serviceRecovery.Attempted,
+            $serviceRecovery.Recovered,
+            $serviceRecovery.Reason,
+            $eligibility.EndpointInstanceId,
+            ($script:hs2SecondaryLastAttemptUtc -ne [DateTime]::MinValue))
+    if ($serviceRecovery.Recovered) {
+        $script:hs2ActiveCurrentRetrySeconds = $HS2LConnectRecoveryRetrySeconds
+        $script:hs2NativeLastAttemptUtc = [DateTime]::MinValue
+    }
+    else {
+        $script:hs2ActiveCurrentRetrySeconds = $HS2ActiveSlowRetrySeconds
+    }
+}
+
+function Invoke-HS2SecondaryPromotion {
+    param([string]$Reason = "watchdog-loop")
+
+    if (-not $script:hs2DisplayStateDesiredActive -or
+        $script:hs2DisplayStateActive) {
+        return
+    }
+
+    $nowUtc = [DateTime]::UtcNow
+    $decision = Get-HS2SecondaryPromotionDecision `
+        -NativeActive $script:hs2NativeDisplayStateActive `
+        -SecondaryVerified $script:hs2DisplayStateActive `
+        -NativeStableSinceUtc $script:hs2NativeStableSinceUtc `
+        -LastPromotionAttemptUtc $script:hs2SecondaryLastAttemptUtc `
+        -NowUtc $nowUtc `
+        -StabilitySeconds $HS2SecondaryPromotionGraceSeconds
+    if ($decision.Action -eq "WaitNativeStability") {
+        if (-not $script:hs2SecondaryStabilityWaitLogged) {
+            Write-WatchdogLog (
+                "HS2 secondary promotion deferred while native display settles remainingSeconds={0:N0}" -f `
+                    $decision.RetryAfterSeconds)
+            $script:hs2SecondaryStabilityWaitLogged = $true
+        }
+        return
+    }
+    if ($decision.Action -eq "HoldNative") {
+        if (-not $script:hs2SecondaryHoldLogged) {
+            Write-WatchdogLog "HS2 secondary promotion already attempted; holding native display until the next startup or resume epoch"
+            $script:hs2SecondaryHoldLogged = $true
+        }
+        return
+    }
+    if ($decision.Action -ne "PromoteSecondary") {
+        return
+    }
+
+    $script:hs2SecondaryLastAttemptUtc = $nowUtc
+    try {
+        $result = Invoke-HS2PowerState `
+            -State Active `
+            -EnableSecondaryScreen `
+            -ServicePort $LConnectServicePort
+        if ($null -eq $result -or -not [bool]$result.Verified -or
+            [int64]$result.ControllerType -ne 17104897) {
+            throw "L-Connect did not return verified HS2 secondary controller type 17104897."
+        }
+        Set-HS2VerifiedSecondaryState `
+            -Result $result `
+            -Reason $Reason | Out-Null
     }
     catch {
         $script:hs2DisplayStateActive = $false
-        $script:hs2ActiveConsecutiveFailures++
+        $script:hs2NativeDisplayStateActive = $false
+        $script:hs2OverlayRebindRequired = $true
+        $script:hs2SecondaryPromotionFailures++
+        Write-WatchdogLog (
+            "HS2 secondary promotion failed reason={0} count={1}; restoring native display: {2}" -f `
+                $Reason,
+                $script:hs2SecondaryPromotionFailures,
+                $_.Exception.Message)
         try {
-            if (-not (Test-HS2UsbDisplayHealthy)) {
-                # A surviving overlay keeps its old monitor coordinates while
-                # the USB display is absent.  Require one exact process recycle
-                # after the verified display chain returns.
-                $script:hs2OverlayRebindRequired = $true
-            }
+            Set-HS2NativeActiveState `
+                -Reason ("secondary-fallback/{0}" -f $Reason) `
+                -ResetStabilityWindow `
+                -PreservePromotionBackoff | Out-Null
+            Write-WatchdogLog (
+                "HS2 secondary promotion fallback=verified-native; secondary is held until the next startup or resume epoch")
         }
         catch {
-            $script:hs2OverlayRebindRequired = $true
-        }
-        Write-WatchdogLog (
-            "HS2 power state=Active reason={0} failed count={1}: {2}" -f `
-                $Reason,
-                $script:hs2ActiveConsecutiveFailures,
-                $_.Exception.Message)
-    }
-
-    if ($script:hs2ActiveConsecutiveFailures -lt $HS2UsbRecoveryAfterFailures) {
-        return
-    }
-
-    $escalationDecision = Get-HS2RecoveryEscalationDecision `
-        -WatchdogStartedUtc $watchdogStartedUtc `
-        -NowUtc ([DateTime]::UtcNow) `
-        -GraceSeconds $HS2RecoveryStartupGraceSeconds
-    if ($escalationDecision.Action -eq "Wait") {
-        if (-not $script:hs2EscalationGraceLogged) {
             Write-WatchdogLog (
-                "HS2 recovery escalation deferred for startup stabilization remainingSeconds={0:N0}" -f `
-                    $escalationDecision.RetryAfterSeconds)
-            $script:hs2EscalationGraceLogged = $true
+                "HS2 native fallback failed after secondary promotion: {0}" -f `
+                    $_.Exception.Message)
         }
-        $script:hs2ActiveCurrentRetrySeconds = $HS2ActiveRetrySeconds
+    }
+}
+
+function Invoke-HS2ActiveMaintenance {
+    param([string]$Reason = "watchdog-loop")
+
+    if (-not $script:hs2DisplayStateDesiredActive) {
+        return
+    }
+    if ($script:hs2DisplayStateActive) {
+        Invoke-HS2SecondaryActiveMaintenance
+        return
+    }
+    if (-not $script:hs2NativeDisplayStateActive) {
+        Invoke-HS2InitialActiveMaintenance -Reason $Reason
         return
     }
 
-    try {
-        $binding = Read-HS2UsbTopologyBinding `
-            -Path $hs2UsbTopologyBindingPath
-        $snapshot = Get-HS2UsbRecoverySnapshot
-        $usbPlan = if ($null -eq $binding) {
-            [pscustomobject]@{
-                Applicable = $false
-                Reason = "verified-hub-binding-missing"
-            }
-        }
-        else {
-            Get-HS2UsbRecoveryPlan `
-                -BoundHubInstanceId ([string]$binding.HubInstanceId) `
-                -Hubs $snapshot.Hubs `
-                -Children $snapshot.Children `
-                -Binding $binding `
-                -Devices $snapshot.Devices
-        }
-
-        $usbSafety = Get-HS2UsbAutomaticRecoveryDecision `
-            -Enabled ([bool]$EnableHS2UsbPnPRecovery) `
-            -PlanApplicable ([bool]$usbPlan.Applicable)
-        if ($usbSafety.Action -eq "Dispatch") {
-            $usbDispatch = Get-HS2UsbRecoveryDispatchDecision `
-                -RecoveryAttempted $script:hs2UsbRecoveryAttempted `
-                -ContinuationPending $script:hs2UsbRecoveryContinuationPending
-            if ($usbDispatch.Action -ne "Wait") {
-                $skipDedicatedHubRestart =
-                    $usbDispatch.Action -eq "RemoveExactChild"
-                # Consume the continuation before the bounded exact-child
-                # attempt.  It is restored only by the explicit post-restart
-                # topology-gap result below, so a broken device cannot cycle
-                # the dedicated hub indefinitely.
-                $script:hs2UsbRecoveryContinuationPending = $false
-                $usbRecovery = Invoke-HS2UsbRecovery `
-                    -BindingPath $hs2UsbTopologyBindingPath `
-                    -SkipDedicatedHubRestart:$skipDedicatedHubRestart
-                if ($usbRecovery.Attempted) {
-                    $script:hs2UsbRecoveryAttempted = $true
-                }
-                if ($usbRecovery.Reason -eq "topology-changed-after-hub-restart") {
-                    $script:hs2UsbRecoveryContinuationPending = $true
-                }
-                Write-WatchdogLog (
-                    "HS2 USB recovery phase={0} attempted={1} recovered={2} reason={3} operations={4}" -f `
-                        $usbDispatch.Action,
-                        $usbRecovery.Attempted,
-                        $usbRecovery.Recovered,
-                        $usbRecovery.Reason,
-                        (@($usbRecovery.Operations) -join ","))
-                $script:hs2ActiveCurrentRetrySeconds = $HS2ActiveRetrySeconds
-                $script:hs2ActiveLastAttemptUtc = [DateTime]::MinValue
-                return
-            }
-        }
-        elseif ($usbSafety.Action -eq "Suppress") {
-            if (-not $script:hs2UsbRecoverySuppressionLogged) {
-                Write-WatchdogLog (
-                    "HS2 automatic USB PnP recovery suppressed reason={0} plan={1}; no hub restart, device removal, or scan will run" -f `
-                        $usbSafety.Reason,
-                        $usbPlan.Reason)
-                $script:hs2UsbRecoverySuppressionLogged = $true
-            }
-            $script:hs2ActiveCurrentRetrySeconds = $HS2ActiveSlowRetrySeconds
-            return
-        }
-        else {
-            $displayHealthy = Test-HS2UsbDisplayHealthy
-            $lconnectDecision = Get-HS2LConnectRecoveryFollowUpDecision `
-                -DisplayHealthy $displayHealthy `
-                -RecoveryAttempted $script:hs2LConnectRecoveryAttempted `
-                -RecoveryStartedUtc $script:hs2LConnectRecoveryStartedUtc `
-                -NowUtc ([DateTime]::UtcNow) `
-                -GraceSeconds $HS2LConnectRecoveryGraceSeconds
-            if ($lconnectDecision.Action -eq "RestartService") {
-                $script:hs2LConnectRecoveryAttempted = $true
-                $script:hs2LConnectRecoveryStartedUtc = [DateTime]::UtcNow
-                $script:hs2LConnectWarmupLogged = $false
-                $serviceRecovery = Invoke-HS2LConnectServiceRecovery `
-                    -ServicePort $LConnectServicePort
-                Write-WatchdogLog (
-                    "HS2 L-Connect recovery attempted={0} recovered={1} reason={2}" -f `
-                        $serviceRecovery.Attempted,
-                        $serviceRecovery.Recovered,
-                        $serviceRecovery.Reason)
-                $script:hs2ActiveCurrentRetrySeconds = $HS2ActiveRetrySeconds
-                $script:hs2ActiveLastAttemptUtc = [DateTime]::MinValue
-                return
-            }
-            if ($lconnectDecision.Action -eq "FastRetry") {
-                $script:hs2ActiveCurrentRetrySeconds =
-                    $HS2LConnectRecoveryRetrySeconds
-                if (-not $script:hs2LConnectWarmupLogged) {
-                    Write-WatchdogLog (
-                        "HS2 L-Connect controller pending; fastRetrySeconds={0} graceSeconds={1}" -f `
-                            $HS2LConnectRecoveryRetrySeconds,
-                            $HS2LConnectRecoveryGraceSeconds)
-                    $script:hs2LConnectWarmupLogged = $true
-                }
-                return
-            }
-        }
-
-        $script:hs2ActiveCurrentRetrySeconds = $HS2ActiveSlowRetrySeconds
-        Write-WatchdogLog (
-            "HS2 recovery exhausted; slowRetrySeconds={0} usbReason={1}" -f `
-                $HS2ActiveSlowRetrySeconds,
-                $usbPlan.Reason)
-    }
-    catch {
-        $script:hs2ActiveCurrentRetrySeconds = $HS2ActiveSlowRetrySeconds
-        Write-WatchdogLog (
-            "HS2 recovery helper failed safely; slowRetrySeconds={0}: {1}" -f `
-                $HS2ActiveSlowRetrySeconds,
-                $_.Exception.Message)
-    }
+    Invoke-HS2SecondaryPromotion -Reason $Reason
 }
 
 function Set-ActiveDisplayState {
@@ -395,17 +607,20 @@ function Set-ActiveDisplayState {
 
     $script:hs2DisplayStateDesiredActive = $true
     $script:hs2DisplayStateActive = $false
+    $script:hs2NativeDisplayStateActive = $false
+    $script:hs2NativeStableSinceUtc = [DateTime]::MinValue
+    $script:hs2NativeLastAttemptUtc = [DateTime]::MinValue
+    $script:hs2SecondaryLastAttemptUtc = [DateTime]::MinValue
+    $script:hs2SecondaryPromotionFailures = 0
+    $script:hs2SecondaryStabilityWaitLogged = $false
+    $script:hs2SecondaryHoldLogged = $false
+    $script:hs2LConnectRecoveryAttempted = $false
+    $script:hs2LConnectRecoveryStartedUtc = [DateTime]::MinValue
+    $script:hs2LConnectRecoveryGraceLogged = $false
     $script:hs2ActiveLastAttemptUtc = [DateTime]::MinValue
     $script:hs2ActiveLastVerifiedUtc = [DateTime]::MinValue
     $script:hs2ActiveConsecutiveFailures = 0
     $script:hs2ActiveCurrentRetrySeconds = $HS2ActiveRetrySeconds
-    $script:hs2UsbRecoveryAttempted = $false
-    $script:hs2UsbRecoveryContinuationPending = $false
-    $script:hs2UsbRecoverySuppressionLogged = $false
-    $script:hs2EscalationGraceLogged = $false
-    $script:hs2LConnectRecoveryAttempted = $false
-    $script:hs2LConnectRecoveryStartedUtc = [DateTime]::MinValue
-    $script:hs2LConnectWarmupLogged = $false
     $script:hs2OverlayRebindRequired = $true
     Invoke-HS2ActiveMaintenance -Reason $Reason
 }
@@ -943,25 +1158,22 @@ if (-not $NoPowerEvents) {
     $shutdownSubscription = Register-WmiEvent -Query "SELECT * FROM Win32_ComputerShutdownEvent" -SourceIdentifier $shutdownSourceId
     Write-WatchdogLog "registered Win32_ComputerShutdownEvent watcher for shutdown/restart blanking"
 }
-Write-WatchdogLog ("display power policy=hs2-transition-first/turzx-brightness-123 activeBrightness={0} lconnectPort={1}" -f `
+Write-WatchdogLog ("display power policy=hs2-preserve-current-mode-then-verified-secondary/turzx-brightness-123 activeBrightness={0} lconnectPort={1}" -f `
     $ActiveBrightness, $LConnectServicePort)
-Write-WatchdogLog ("HS2 overlay watchdog=enabled retrySeconds={0}" -f $HS2OverlayRetrySeconds)
+Write-WatchdogLog ("HS2 secondary promotion graceSeconds={0} mode=one-attempt-per-startup-or-resume-epoch" -f `
+    $HS2SecondaryPromotionGraceSeconds)
+Write-WatchdogLog ("HS2 overlay watchdog=secondary-verified-only retrySeconds={0}" -f $HS2OverlayRetrySeconds)
 Write-WatchdogLog (
-    "HS2 active recovery=enabled retrySeconds={0} verifySeconds={1} usbAfterFailures={2}" -f `
+    "HS2 native recovery=enabled retrySeconds={0} verifySeconds={1}" -f `
         $HS2ActiveRetrySeconds,
-        $HS2ActiveVerifySeconds,
-        $HS2UsbRecoveryAfterFailures)
-Write-WatchdogLog (
-    "HS2 USB PnP recovery enabled={0} mode=explicit-opt-in startupGraceSeconds={1}" -f `
-        ([bool]$EnableHS2UsbPnPRecovery),
-        $HS2RecoveryStartupGraceSeconds)
+        $HS2ActiveVerifySeconds)
 
 $child = $null
 $consecutiveFailures = 0
 $heartbeatFailures = 0
 $childStartedUtc = [DateTime]::UtcNow
 try {
-    Enable-DesktopWindowPreservation
+    Write-WatchdogLog "Windows display window preservation deferred until HS2 secondary binding is verified"
     Set-ActiveDisplayState -Reason "watchdog-start"
     Invoke-HS2OverlayHealthCheck
     Invoke-HS2ExclusiveWindowProtection
@@ -982,19 +1194,39 @@ try {
                     $eventType = [int]$event.SourceEventArgs.NewEvent.EventType
                     Write-WatchdogLog ("power event type={0}" -f $eventType)
                     if ($eventType -eq 4) {
+                        # A new suspend starts a new power epoch.  Do not let a
+                        # resume handled just before this suspend suppress the
+                        # next real resume as though it were the duplicate
+                        # 7/18 notification from the earlier epoch.
+                        $script:hs2LastResumeHandledUtc = [DateTime]::MinValue
                         Enter-SleepDisplayState
                         $child = $null
                         $heartbeatFailures = 0
                     }
                     elseif ($eventType -eq 7 -or $eventType -eq 18) {
-                        $consecutiveFailures = 0
-                        Remove-Item -LiteralPath $pausedPath -Force -ErrorAction SilentlyContinue
-                        Stop-Stack -Reason "resume"
-                        Start-Sleep -Seconds $ResumeDelaySeconds
-                        Set-ActiveDisplayState -Reason ("resume-event-{0}" -f $eventType)
-                        $child = Start-Stack -Reason ("resume-event-{0}" -f $eventType)
-                        $childStartedUtc = [DateTime]::UtcNow
-                        $heartbeatFailures = 0
+                        $resumeNowUtc = [DateTime]::UtcNow
+                        $resumeDecision = Get-HS2ResumeEventDecision `
+                            -EventType $eventType `
+                            -LastHandledUtc $script:hs2LastResumeHandledUtc `
+                            -NowUtc $resumeNowUtc `
+                            -MergeSeconds 30
+                        if ($resumeDecision.Action -eq "Ignore") {
+                            Write-WatchdogLog (
+                                "duplicate resume event type={0} ignored mergeRemainingSeconds={1:N0}" -f `
+                                    $eventType,
+                                    $resumeDecision.RetryAfterSeconds)
+                        }
+                        else {
+                            $script:hs2LastResumeHandledUtc = $resumeNowUtc
+                            $consecutiveFailures = 0
+                            Remove-Item -LiteralPath $pausedPath -Force -ErrorAction SilentlyContinue
+                            Stop-Stack -Reason "resume"
+                            Start-Sleep -Seconds $ResumeDelaySeconds
+                            Set-ActiveDisplayState -Reason ("resume-event-{0}" -f $eventType)
+                            $child = Start-Stack -Reason ("resume-event-{0}" -f $eventType)
+                            $childStartedUtc = [DateTime]::UtcNow
+                            $heartbeatFailures = 0
+                        }
                     }
                 }
                 elseif ($event.SourceIdentifier -eq $shutdownSourceId) {

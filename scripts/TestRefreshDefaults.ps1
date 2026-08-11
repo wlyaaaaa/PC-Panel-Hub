@@ -47,6 +47,37 @@ foreach ($relative in $productionEntryFiles) {
     }
 }
 
+# The HS2 full-feature path preserves whichever controller mode the service
+# reports.  Startup artifacts must not preselect a mode switch: only a native
+# 17104896 controller may enter the watchdog's one-time 30-second promotion.
+$hs2StartupEntries = @(
+    "scripts\start.ps1",
+    "scripts\install-startup-admin.ps1",
+    "tools\turzx_side_screen\InstallStartupTask-Admin.ps1",
+    "tools\turzx_side_screen\StartSideScreenStack.ps1",
+    "tools\turzx_side_screen\StartSideScreenWatchdog-Hidden.vbs"
+)
+foreach ($relative in $hs2StartupEntries) {
+    $path = Join-Path $Root $relative
+    $text = Get-Content -Raw -LiteralPath $path
+    if ($text -match '(?i)-EnableSecondaryScreen') {
+        throw "Startup entry must not force an HS2 controller mode: $relative"
+    }
+}
+$watchdogText = Get-Content -Raw -LiteralPath (Join-Path $Root "tools\turzx_side_screen\StartSideScreenWatchdog.ps1")
+foreach ($pattern in @(
+        "Set-HS2PreservedActiveState",
+        "Set-HS2VerifiedSecondaryState",
+        "Invoke-HS2InitialActiveMaintenance",
+        "Set-HS2NativeActiveState",
+        "HS2SecondaryPromotionGraceSeconds = 30",
+        "Get-HS2SecondaryPromotionDecision",
+        "mode=one-attempt-per-startup-or-resume-epoch")) {
+    if ($watchdogText -notmatch [regex]::Escape($pattern)) {
+        throw "HS2 preserved-mode watchdog contract missing: $pattern"
+    }
+}
+
 $hiddenLaunchers = @(
     "tools\turzx_side_screen\StartSideScreenWatchdog-Hidden.vbs",
     "tools\turzx_side_screen\RestartSideScreenAfterResume-Hidden.vbs"

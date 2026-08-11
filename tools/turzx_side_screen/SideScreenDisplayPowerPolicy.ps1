@@ -23,6 +23,84 @@ function Get-HS2PowerStatePlan {
     }
 }
 
+function Get-HS2SecondaryPromotionDecision {
+    param(
+        [Parameter(Mandatory = $true)][bool]$NativeActive,
+        [Parameter(Mandatory = $true)][bool]$SecondaryVerified,
+        [Parameter(Mandatory = $true)][DateTime]$NativeStableSinceUtc,
+        [Parameter(Mandatory = $true)][DateTime]$LastPromotionAttemptUtc,
+        [Parameter(Mandatory = $true)][DateTime]$NowUtc,
+        [ValidateRange(1, 600)][int]$StabilitySeconds = 30
+    )
+
+    if (-not $NativeActive) {
+        return [pscustomobject]@{
+            Action = "ActivateNative"
+            RetryAfterSeconds = 0
+        }
+    }
+    if ($SecondaryVerified) {
+        return [pscustomobject]@{
+            Action = "Verified"
+            RetryAfterSeconds = 0
+        }
+    }
+
+    $nativeAgeSeconds = if ($NativeStableSinceUtc -eq [DateTime]::MinValue) {
+        0
+    }
+    else {
+        [Math]::Max(0, ($NowUtc - $NativeStableSinceUtc).TotalSeconds)
+    }
+    if ($nativeAgeSeconds -lt $StabilitySeconds) {
+        return [pscustomobject]@{
+            Action = "WaitNativeStability"
+            RetryAfterSeconds = [Math]::Ceiling($StabilitySeconds - $nativeAgeSeconds)
+        }
+    }
+
+    if ($LastPromotionAttemptUtc -ne [DateTime]::MinValue) {
+        return [pscustomobject]@{
+            Action = "HoldNative"
+            RetryAfterSeconds = 0
+        }
+    }
+
+    return [pscustomobject]@{
+        Action = "PromoteSecondary"
+        RetryAfterSeconds = 0
+    }
+}
+
+function Get-HS2ResumeEventDecision {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet(7, 18)]
+        [int]$EventType,
+        [Parameter(Mandatory = $true)][DateTime]$LastHandledUtc,
+        [Parameter(Mandatory = $true)][DateTime]$NowUtc,
+        [ValidateRange(1, 120)][int]$MergeSeconds = 30
+    )
+
+    if ($LastHandledUtc -ne [DateTime]::MinValue -and
+        ($NowUtc.ToUniversalTime() - $LastHandledUtc.ToUniversalTime()).TotalSeconds -lt $MergeSeconds) {
+        return [pscustomobject]@{
+            Action = "Ignore"
+            EventType = $EventType
+            RetryAfterSeconds = [Math]::Max(
+                0,
+                $MergeSeconds -
+                    ($NowUtc.ToUniversalTime() - $LastHandledUtc.ToUniversalTime()).TotalSeconds)
+        }
+    }
+
+    return [pscustomobject]@{
+        Action = "Handle"
+        EventType = $EventType
+        RetryAfterSeconds = 0
+    }
+}
+
 function Get-HS2Controller {
     param(
         [ValidateRange(1, 65535)][int]$ServicePort = 11021,
@@ -155,6 +233,7 @@ function Invoke-HS2PowerState {
         [ValidateRange(1, 10)][int]$TimeoutSec = 2,
         [ValidateRange(1, 30)][int]$ModeSwitchTimeoutSec = 20,
         [switch]$MonitorModeAlreadyRequested,
+        [switch]$EnableSecondaryScreen,
         [switch]$SkipVerification,
         [switch]$DryRun
     )
@@ -187,6 +266,43 @@ function Invoke-HS2PowerState {
     if ($MonitorModeAlreadyRequested) {
         [void]$changedOperations.Add("SetSecondaryScreen(false)")
     }
+    # Active is deliberately tri-state.  With no override, preserve whichever
+    # controller mode survived firmware/boot enumeration.  An explicit false
+    # is the only path that demotes to native mode; an explicit true is the
+    # only path that promotes into the Windows secondary-display topology.
+    # Sleep and shutdown still target native mode before applying their plan.
+    $secondaryModePolicy = if ($State -ne "Active") {
+        "Native"
+    }
+    elseif (-not $PSBoundParameters.ContainsKey("EnableSecondaryScreen")) {
+        "Preserve"
+    }
+    elseif ([bool]$EnableSecondaryScreen) {
+        "Secondary"
+    }
+    else {
+        "Native"
+    }
+    $targetSecondaryScreen = switch ($secondaryModePolicy) {
+        "Secondary" { $true }
+        "Native" { $false }
+        default { $null }
+    }
+
+    if ($null -ne $targetSecondaryScreen -and
+        [bool]$controller.IsSecondaryScreen -ne [bool]$targetSecondaryScreen) {
+        $controller = Set-HS2SecondaryScreenMode `
+            -Controller $controller `
+            -Enabled ([bool]$targetSecondaryScreen) `
+            -ServicePort $ServicePort `
+            -TimeoutSec $ModeSwitchTimeoutSec
+        [void]$changedOperations.Add(
+            "SetSecondaryScreen({0})" -f ([bool]$targetSecondaryScreen).ToString().ToLowerInvariant())
+    }
+
+    # A mode change replaces the controller/device path and can reset screen
+    # state.  Always read, repair, and verify the power plan on the final
+    # controller instead of trusting values captured before the transition.
     $currentValues = @{}
     foreach ($operation in $plan) {
         $current = Invoke-HS2DeviceRequest `
@@ -195,20 +311,6 @@ function Invoke-HS2PowerState {
             -ServicePort $ServicePort `
             -TimeoutSec $TimeoutSec
         $currentValues[$operation.ReadType] = [bool]$current.Data
-    }
-
-    $requiresNativeChange = @($plan | Where-Object {
-        [bool]$currentValues[$_.ReadType] -ne [bool]$_.Value
-    }).Count -gt 0
-    $targetSecondaryScreen = ($State -eq "Active")
-
-    if ($controller.IsSecondaryScreen -and ($requiresNativeChange -or -not $targetSecondaryScreen)) {
-        $controller = Set-HS2SecondaryScreenMode `
-            -Controller $controller `
-            -Enabled $false `
-            -ServicePort $ServicePort `
-            -TimeoutSec $ModeSwitchTimeoutSec
-        [void]$changedOperations.Add("SetSecondaryScreen(false)")
     }
 
     foreach ($operation in $plan) {
@@ -238,21 +340,14 @@ function Invoke-HS2PowerState {
         }
     }
 
-    if ($targetSecondaryScreen -and -not $controller.IsSecondaryScreen) {
-        $controller = Set-HS2SecondaryScreenMode `
-            -Controller $controller `
-            -Enabled $true `
-            -ServicePort $ServicePort `
-            -TimeoutSec $ModeSwitchTimeoutSec
-        [void]$changedOperations.Add("SetSecondaryScreen(true)")
-    }
-
     return [pscustomobject]@{
         State = $State
         Applied = $true
         Verified = -not $SkipVerification
         ControllerType = $controller.ControllerType
         InitialControllerType = $initialControllerType
+        SecondaryScreenPolicy = $secondaryModePolicy
+        SecondaryScreenRequested = ($secondaryModePolicy -eq "Secondary")
         ChangedOperations = @($changedOperations)
     }
 }
