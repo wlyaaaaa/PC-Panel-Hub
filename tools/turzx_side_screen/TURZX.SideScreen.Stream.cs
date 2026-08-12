@@ -290,6 +290,15 @@ namespace TURZX.SideScreen
             return SelectSnapshotAfterFetchFailure(lastSnapshot, error, out status);
         }
 
+        internal static void RunHardDeadlineProbeForTest(int operationDelayMs, int timeoutMs)
+        {
+            RunWithHardDeadline<object>(delegate(CancellationToken cancellationToken)
+            {
+                Thread.Sleep(operationDelayMs);
+                return null;
+            }, timeoutMs, "Test operation exceeded its hard deadline.");
+        }
+
         internal static int ComputeSleepMillisecondsForTest(long frameStartTicks, int intervalMs, long nowTicks, long frequency)
         {
             return ComputeSleepMilliseconds(frameStartTicks, intervalMs, nowTicks, frequency);
@@ -1045,48 +1054,122 @@ namespace TURZX.SideScreen
                 throw new ArgumentOutOfRangeException("timeoutMs", "Metrics timeout must be positive.");
             }
 
-            using (CancellationTokenSource deadline = new CancellationTokenSource(timeoutMs))
-            using (HttpRequestMessage request = new HttpRequestMessage(HttpMethod.Get, metricsUrl))
+            return RunWithHardDeadline<Snapshot>(delegate(CancellationToken cancellationToken)
+            {
+                using (HttpRequestMessage request = new HttpRequestMessage(HttpMethod.Get, metricsUrl))
+                {
+                    try
+                    {
+                        using (HttpResponseMessage response = MetricsHttpClient.SendAsync(
+                            request,
+                            HttpCompletionOption.ResponseContentRead,
+                            cancellationToken).GetAwaiter().GetResult())
+                        {
+                            response.EnsureSuccessStatusCode();
+                            byte[] payload = response.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult();
+                            if (payload.LongLength > DefaultMaxMetricsPayloadBytes)
+                            {
+                                throw new InvalidDataException("Metrics response exceeded the payload limit.");
+                            }
+
+                            using (MemoryStream stream = new MemoryStream(payload, false))
+                            {
+                                DataContractJsonSerializer serializer = new DataContractJsonSerializer(typeof(Snapshot));
+                                Snapshot snapshot = serializer.ReadObject(stream) as Snapshot;
+                                if (snapshot == null)
+                                {
+                                    throw new InvalidDataException("Snapshot JSON did not deserialize.");
+                                }
+
+                                if (snapshot.SchemaVersion.HasValue && snapshot.SchemaVersion.Value != 1)
+                                {
+                                    throw new InvalidDataException("Unsupported schema_version: " + snapshot.SchemaVersion.Value);
+                                }
+
+                                return snapshot;
+                            }
+                        }
+                    }
+                    catch (OperationCanceledException ex)
+                    {
+                        throw new TimeoutException(
+                            "Metrics snapshot exceeded the total deadline of " + timeoutMs + "ms.",
+                            ex);
+                    }
+                }
+            }, timeoutMs, "Metrics snapshot exceeded the independent hard deadline of " + timeoutMs + "ms.");
+        }
+
+        private static T RunWithHardDeadline<T>(Func<CancellationToken, T> operation, int timeoutMs, string timeoutMessage)
+        {
+            if (operation == null)
+            {
+                throw new ArgumentNullException("operation");
+            }
+            if (timeoutMs <= 0)
+            {
+                throw new ArgumentOutOfRangeException("timeoutMs");
+            }
+
+            DeadlineWork<T> work = new DeadlineWork<T>();
+            Thread worker = new Thread(delegate()
             {
                 try
                 {
-                    using (HttpResponseMessage response = MetricsHttpClient.SendAsync(
-                        request,
-                        HttpCompletionOption.ResponseContentRead,
-                        deadline.Token).GetAwaiter().GetResult())
-                    {
-                        response.EnsureSuccessStatusCode();
-                        byte[] payload = response.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult();
-                        if (payload.LongLength > DefaultMaxMetricsPayloadBytes)
-                        {
-                            throw new InvalidDataException("Metrics response exceeded the payload limit.");
-                        }
-
-                        using (MemoryStream stream = new MemoryStream(payload, false))
-                        {
-                            DataContractJsonSerializer serializer = new DataContractJsonSerializer(typeof(Snapshot));
-                            Snapshot snapshot = serializer.ReadObject(stream) as Snapshot;
-                            if (snapshot == null)
-                            {
-                                throw new InvalidDataException("Snapshot JSON did not deserialize.");
-                            }
-
-                            if (snapshot.SchemaVersion.HasValue && snapshot.SchemaVersion.Value != 1)
-                            {
-                                throw new InvalidDataException("Unsupported schema_version: " + snapshot.SchemaVersion.Value);
-                            }
-
-                            return snapshot;
-                        }
-                    }
+                    work.Result = operation(work.Cancellation.Token);
                 }
-                catch (OperationCanceledException ex)
+                catch (Exception ex)
                 {
-                    throw new TimeoutException(
-                        "Metrics snapshot exceeded the total deadline of " + timeoutMs + "ms.",
-                        ex);
+                    work.Error = ex;
                 }
+                finally
+                {
+                    work.Completed.Set();
+                }
+            });
+            worker.IsBackground = true;
+            worker.Name = "TURZX metrics fetch";
+            worker.Start();
+
+            if (!work.Completed.Wait(timeoutMs))
+            {
+                // CancellationTokenSource.Cancel can execute transport callbacks inline. Run it
+                // on a separate background thread so a starved or wedged HTTP stack cannot make
+                // the render loop exceed the caller-owned wall-clock deadline.
+                Thread cancellationWorker = new Thread(delegate()
+                {
+                    try
+                    {
+                        work.Cancellation.Cancel();
+                    }
+                    catch
+                    {
+                        // The render loop has already failed closed to its cached snapshot.
+                    }
+                });
+                cancellationWorker.IsBackground = true;
+                cancellationWorker.Name = "TURZX metrics cancellation";
+                cancellationWorker.Start();
+                throw new TimeoutException(timeoutMessage);
             }
+
+            Exception operationError = work.Error;
+            T result = work.Result;
+            work.Cancellation.Dispose();
+            work.Completed.Dispose();
+            if (operationError != null)
+            {
+                throw operationError;
+            }
+            return result;
+        }
+
+        private sealed class DeadlineWork<T>
+        {
+            internal readonly CancellationTokenSource Cancellation = new CancellationTokenSource();
+            internal readonly ManualResetEventSlim Completed = new ManualResetEventSlim(false);
+            internal T Result;
+            internal Exception Error;
         }
 
         private static Snapshot SampleSnapshot(int frame)

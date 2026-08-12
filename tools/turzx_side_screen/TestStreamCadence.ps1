@@ -88,6 +88,7 @@ public static class TestStreamCadenceProgram
         StartsWith("missing cache status marks empty data", "empty:TimeoutException", fallbackStatus);
 
         VerifyMetricsFetchTotalDeadline();
+        VerifyMetricsFetchDeadlineWithoutTimerCallback();
 
         Equal("device error is classified as send failure", true,
             SideScreenStreamApp.IsLikelyDeviceSendFailureForTest(
@@ -343,6 +344,30 @@ public static class TestStreamCadenceProgram
         if (watch.ElapsedMilliseconds >= 750)
         {
             throw new Exception("metrics fetch exceeded its total deadline: " + watch.ElapsedMilliseconds + "ms");
+        }
+    }
+
+    private static void VerifyMetricsFetchDeadlineWithoutTimerCallback()
+    {
+        Stopwatch watch = Stopwatch.StartNew();
+        bool timedOut = false;
+        try
+        {
+            SideScreenStreamApp.RunHardDeadlineProbeForTest(2000, 120);
+        }
+        catch (TimeoutException)
+        {
+            timedOut = true;
+        }
+        finally
+        {
+            watch.Stop();
+        }
+
+        Equal("hard deadline does not depend on an async timer callback", true, timedOut);
+        if (watch.ElapsedMilliseconds >= 750)
+        {
+            throw new Exception("independent hard deadline was not enforced: " + watch.ElapsedMilliseconds + "ms");
         }
     }
 

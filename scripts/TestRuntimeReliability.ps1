@@ -96,9 +96,13 @@ if ($streamSource -notmatch 'SendDiffWithTimeout[\s\S]{0,500}DiffSendTimeoutMs')
 }
 foreach ($pattern in @(
     'HttpCompletionOption.ResponseContentRead',
-    'CancellationTokenSource(timeoutMs)',
+    'RunWithHardDeadline<Snapshot>',
+    'ManualResetEventSlim(false)',
+    'Thread cancellationWorker',
+    'work.Completed.Wait(timeoutMs)',
     'Timeout.InfiniteTimeSpan',
     'FetchSnapshotForTest',
+    'RunHardDeadlineProbeForTest',
     'MaxResponseContentBufferSize = DefaultMaxMetricsPayloadBytes'
 )) {
     if ($streamSource -notmatch [regex]::Escape($pattern)) {
