@@ -918,6 +918,35 @@ try {
         Status = "OK"
         ProblemCode = 0
     }
+    $bootloaderEndpoint = [pscustomobject]@{
+        InstanceId = "USB\VID_A108&PID_EAEF\bootloader-hs2-controller"
+        ParentInstanceId = $validHub.InstanceId
+        Present = $true
+        Status = "Error"
+        ProblemCode = 28
+        LocationInfo = "Port_#0002.Hub_#0012"
+    }
+    $bootloaderReadiness = Get-HS2ControllerReadiness `
+        -BindingPath $nativeLConnectBindingPath `
+        -Snapshot ([pscustomobject]@{ Devices = @($nativeRecoveryHub, $bootloaderEndpoint) })
+    if ($bootloaderReadiness.Action -cne "Wait" -or
+        $bootloaderReadiness.Reason -cne "bound-controller-in-bootloader-mode") {
+        throw "An exact A108/EAEF endpoint on bound hub port two must wait without calling L-Connect or mutating PnP."
+    }
+    $nativeControllerReadiness = Get-HS2ControllerReadiness `
+        -BindingPath $nativeLConnectBindingPath `
+        -Snapshot ([pscustomobject]@{ Devices = @($nativeRecoveryHub, $nativeA068Endpoint) })
+    if ($nativeControllerReadiness.Action -cne "Ready" -or
+        $nativeControllerReadiness.EndpointInstanceId -cne $nativeA068Endpoint.InstanceId) {
+        throw "A single healthy A068 endpoint on the bound hub must resume normal L-Connect activation."
+    }
+    $missingControllerReadiness = Get-HS2ControllerReadiness `
+        -BindingPath $nativeLConnectBindingPath `
+        -Snapshot ([pscustomobject]@{ Devices = @($nativeRecoveryHub) })
+    if ($missingControllerReadiness.Action -cne "Wait" -or
+        $missingControllerReadiness.Reason -cne "bound-controller-endpoint-missing") {
+        throw "A missing controller endpoint must wait without repeatedly probing L-Connect."
+    }
     $nativeLConnectEligibility = Get-HS2LConnectServiceRecoveryEligibility `
         -BindingPath $nativeLConnectBindingPath `
         -Snapshot ([pscustomobject]@{ Devices = @($nativeRecoveryHub, $nativeA068Endpoint) })
@@ -972,6 +1001,15 @@ try {
     if ($ambiguousControllerEligibility.Eligible -or
         $ambiguousControllerEligibility.Reason -cne "bound-controller-endpoint-ambiguous") {
         throw "Multiple healthy controller endpoints on the bound hub must fail closed."
+    }
+    $ambiguousControllerReadiness = Get-HS2ControllerReadiness `
+        -BindingPath $nativeLConnectBindingPath `
+        -Snapshot ([pscustomobject]@{
+            Devices = @($nativeRecoveryHub, $nativeA068Endpoint, $bootloaderEndpoint)
+        })
+    if ($ambiguousControllerReadiness.Action -cne "Wait" -or
+        $ambiguousControllerReadiness.Reason -cne "bound-controller-endpoint-ambiguous") {
+        throw "A simultaneous normal and bootloader identity on the bound hub must fail closed."
     }
 }
 finally {
@@ -1478,8 +1516,10 @@ foreach ($pattern in @(
     "hs2LastResumeHandledUtc",
     "HS2SecondaryPromotionGraceSeconds = 30",
     "HS2LConnectRecoveryStartupGraceSeconds = 120",
-    "Invoke-HS2NativeLConnectServiceRecovery",
-    "Get-HS2LConnectServiceRecoveryEligibility",
+        "Invoke-HS2NativeLConnectServiceRecovery",
+        "Get-HS2ControllerReadiness",
+        "hs2ControllerReadinessWaitReason",
+        "Get-HS2LConnectServiceRecoveryEligibility",
     "Get-HS2LConnectRecoveryFollowUpDecision",
     "HS2ActiveSlowRetrySeconds",
     "hs2-usb-topology-binding.json",
@@ -1701,6 +1741,16 @@ if ($maintenanceText -notmatch '(?s)Invoke-HS2SecondaryActiveMaintenance') {
 }
 if ($initialMaintenanceText -notmatch '(?s)Set-HS2PreservedActiveState') {
     throw "Every startup/resume Active epoch must preserve and verify the controller mode before promotion."
+}
+$readinessIndex = $initialMaintenanceText.IndexOf(
+    "Get-HS2ControllerReadiness",
+    [StringComparison]::Ordinal)
+$preserveIndex = $initialMaintenanceText.IndexOf(
+    "Set-HS2PreservedActiveState",
+    [StringComparison]::Ordinal)
+if ($readinessIndex -lt 0 -or $preserveIndex -lt 0 -or $readinessIndex -ge $preserveIndex -or
+    $initialMaintenanceText -notmatch '(?s)Action\s+-ne\s+"Ready".*?return') {
+    throw "HS2 startup/resume must prove one bound normal endpoint before it calls L-Connect; bootloader/missing identities must wait read-only."
 }
 if ($maintenanceText -notmatch '(?s)Invoke-HS2InitialActiveMaintenance.*?Invoke-HS2SecondaryPromotion') {
     throw "Native-only HS2 Active must reach the once-per-epoch promotion gate after preservation."

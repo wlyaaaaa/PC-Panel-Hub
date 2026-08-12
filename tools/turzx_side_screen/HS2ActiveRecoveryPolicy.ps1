@@ -466,6 +466,7 @@ function Get-HS2UsbRecoverySnapshot {
             [string]$_.InstanceId -like "USB\VID_1A86&PID_AD23&MI_00\*" -or
             [string]$_.InstanceId -like "USB\VID_1A86&PID_AD23\*" -or
             [string]$_.InstanceId -like "USB\VID_1CBE&PID_A068\*" -or
+            [string]$_.InstanceId -like "USB\VID_A108&PID_EAEF\*" -or
             [string]$_.InstanceId -like "USB\VID_0000&PID_0002\*"
         }
     )
@@ -509,6 +510,114 @@ function Get-HS2UsbRecoverySnapshot {
         Hubs = $hubs
         Children = $children
         Devices = $devices
+    }
+}
+
+function Get-HS2ControllerReadiness {
+    param(
+        [Parameter(Mandatory = $true)][string]$BindingPath,
+        [object]$Snapshot
+    )
+
+    $binding = Read-HS2UsbTopologyBinding -Path $BindingPath
+    if ($null -eq $binding) {
+        return [pscustomobject]@{
+            Action = "Wait"
+            Reason = "verified-hub-binding-missing"
+            EndpointInstanceId = $null
+        }
+    }
+
+    $snapshot = if ($null -eq $Snapshot) {
+        Get-HS2UsbRecoverySnapshot
+    }
+    else {
+        $Snapshot
+    }
+    $boundHubs = @(
+        $snapshot.Devices | Where-Object {
+            [bool]$_.Present -and
+            [string]$_.InstanceId -ieq [string]$binding.HubInstanceId -and
+            [string]$_.InstanceId -like "USB\VID_1A86&PID_8091\*" -and
+            [string]$_.Status -eq "OK" -and
+            [int]$_.ProblemCode -eq 0
+        }
+    )
+    if ($boundHubs.Count -ne 1) {
+        return [pscustomobject]@{
+            Action = "Wait"
+            Reason = if ($boundHubs.Count -eq 0) {
+                "bound-hub-not-healthy"
+            }
+            else {
+                "bound-hub-ambiguous"
+            }
+            EndpointInstanceId = $null
+        }
+    }
+
+    $normalEndpoints = @(
+        $snapshot.Devices | Where-Object {
+            [bool]$_.Present -and
+            [string]$_.ParentInstanceId -ieq [string]$binding.HubInstanceId -and
+            [string]$_.Status -eq "OK" -and
+            [int]$_.ProblemCode -eq 0 -and
+            (
+                [string]$_.InstanceId -like "USB\VID_1CBE&PID_A068\*" -or
+                [string]$_.InstanceId -like "USB\VID_1A86&PID_AD23\*"
+            )
+        }
+    )
+    $bootloaderEndpoints = @(
+        $snapshot.Devices | Where-Object {
+            [bool]$_.Present -and
+            [string]$_.ParentInstanceId -ieq [string]$binding.HubInstanceId -and
+            [string]$_.InstanceId -like "USB\VID_A108&PID_EAEF\*"
+        }
+    )
+
+    if ($normalEndpoints.Count -gt 1 -or
+        $bootloaderEndpoints.Count -gt 1 -or
+        ($normalEndpoints.Count -gt 0 -and $bootloaderEndpoints.Count -gt 0)) {
+        return [pscustomobject]@{
+            Action = "Wait"
+            Reason = "bound-controller-endpoint-ambiguous"
+            EndpointInstanceId = $null
+        }
+    }
+    if ($normalEndpoints.Count -eq 1) {
+        return [pscustomobject]@{
+            Action = "Ready"
+            Reason = "bound-controller-endpoint-ready"
+            EndpointInstanceId = [string]$normalEndpoints[0].InstanceId
+        }
+    }
+    if ($bootloaderEndpoints.Count -eq 1) {
+        $locationProperty = $bootloaderEndpoints[0].PSObject.Properties["LocationInfo"]
+        $locationInfo = if ($null -eq $locationProperty) {
+            ""
+        }
+        else {
+            [string]$locationProperty.Value
+        }
+        if ($locationInfo -notlike "Port_#0002*") {
+            return [pscustomobject]@{
+                Action = "Wait"
+                Reason = "bound-controller-endpoint-ambiguous"
+                EndpointInstanceId = $null
+            }
+        }
+        return [pscustomobject]@{
+            Action = "Wait"
+            Reason = "bound-controller-in-bootloader-mode"
+            EndpointInstanceId = [string]$bootloaderEndpoints[0].InstanceId
+        }
+    }
+
+    return [pscustomobject]@{
+        Action = "Wait"
+        Reason = "bound-controller-endpoint-missing"
+        EndpointInstanceId = $null
     }
 }
 

@@ -83,6 +83,7 @@ $script:hs2SecondaryHoldLogged = $false
 $script:hs2LConnectRecoveryAttempted = $false
 $script:hs2LConnectRecoveryStartedUtc = [DateTime]::MinValue
 $script:hs2LConnectRecoveryGraceLogged = $false
+$script:hs2ControllerReadinessWaitReason = $null
 $script:hs2ActiveLastAttemptUtc = [DateTime]::MinValue
 $script:hs2ActiveLastVerifiedUtc = [DateTime]::MinValue
 $script:hs2ActiveConsecutiveFailures = 0
@@ -425,6 +426,40 @@ function Invoke-HS2InitialActiveMaintenance {
     $preservePromotionAttempt =
         $script:hs2SecondaryLastAttemptUtc -ne [DateTime]::MinValue
     $script:hs2NativeLastAttemptUtc = $nowUtc
+
+    $controllerReadiness = $null
+    try {
+        $controllerReadiness = Get-HS2ControllerReadiness `
+            -BindingPath $hs2UsbTopologyBindingPath
+    }
+    catch {
+        $controllerReadiness = [pscustomobject]@{
+            Action = "Wait"
+            Reason = "controller-readiness-probe-failed"
+            EndpointInstanceId = $null
+        }
+    }
+    if ($controllerReadiness.Action -ne "Ready") {
+        $script:hs2NativeDisplayStateActive = $false
+        $script:hs2DisplayStateActive = $false
+        $script:hs2ActiveCurrentRetrySeconds = $HS2ActiveRetrySeconds
+        if ([string]$script:hs2ControllerReadinessWaitReason -cne
+            [string]$controllerReadiness.Reason) {
+            Write-WatchdogLog (
+                "HS2 controller readiness wait reason={0} endpoint={1}; no L-Connect mode command or USB/PnP recovery will run" -f `
+                    $controllerReadiness.Reason,
+                    $controllerReadiness.EndpointInstanceId)
+            $script:hs2ControllerReadinessWaitReason = [string]$controllerReadiness.Reason
+        }
+        return
+    }
+    if ($null -ne $script:hs2ControllerReadinessWaitReason) {
+        Write-WatchdogLog (
+            "HS2 controller endpoint ready endpoint={0}; resuming preserved-mode L-Connect activation" -f `
+                $controllerReadiness.EndpointInstanceId)
+        $script:hs2ControllerReadinessWaitReason = $null
+    }
+
     try {
         $result = Set-HS2PreservedActiveState `
             -Reason $Reason `
@@ -640,6 +675,7 @@ function Set-ActiveDisplayState {
     $script:hs2LConnectRecoveryAttempted = $false
     $script:hs2LConnectRecoveryStartedUtc = [DateTime]::MinValue
     $script:hs2LConnectRecoveryGraceLogged = $false
+    $script:hs2ControllerReadinessWaitReason = $null
     $script:hs2ActiveLastAttemptUtc = [DateTime]::MinValue
     $script:hs2ActiveLastVerifiedUtc = [DateTime]::MinValue
     $script:hs2ActiveConsecutiveFailures = 0

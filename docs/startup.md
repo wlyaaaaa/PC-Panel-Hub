@@ -30,6 +30,14 @@ accepted. An existing native controller (`17104896`) is kept lit for a configura
 Windows secondary-display mode. If neither controller is present, no mode request
 is sent. This prevents repeated Windows/GPU display-topology rebuilds.
 
+Before any L-Connect request, the watchdog also proves that the previously bound
+dedicated hub owns exactly one normal `A068` or `AD23` controller endpoint. A
+missing endpoint or an exact `A108:EAEF` boot-ROM identity on hub port two enters
+a read-only wait state: no mode command, service restart, hub reset, device
+removal, or PnP scan runs. The cheap endpoint check continues at the normal retry
+cadence, so a repaired or replaced module automatically resumes preserved-mode
+L-Connect activation without restarting the watchdog.
+
 For high-load resilience, the watchdog and stream run at `AboveNormal` priority and
 the serial write worker runs at `Highest`, without using realtime process priority.
 Full-frame writes are bounded to 10 seconds; hybrid delta writes are bounded to
