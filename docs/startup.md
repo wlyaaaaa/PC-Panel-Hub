@@ -81,6 +81,15 @@ stranded on the small display when the main monitor disconnects or powers down.
 The HS2 policy never changes the physical primary display or the Sunshine MTT1337
 virtual display mode, resolution, refresh rate, HDR, scaling, or capture target.
 
+For the OLED Curved model, [LIAN LI requires](https://lian-li.com/product/hs2-oled-curved/)
+the AIO USB lead to connect directly to a motherboard USB 2.0 9-pin header, or
+to LIAN LI's supported EDGE HUB. The bundled 1-to-2
+USB hub lead is for non-LCD devices and is not a supported OLED path. If the
+motherboard USB supply is insufficient, use the supplied SATA auxiliary-power
+lead shown in the [AIO manual](https://drive.google.com/file/d/100nRyDLIbXY8mkVBAG5gv92xSe4A7tpN/view?usp=sharing).
+Power the PC off and unplug it before moving an
+internal USB header; the magnetic OLED cap is the only hot-swappable part.
+
 HS2 transitions use the local L-Connect service on `127.0.0.1:11021`. The
 service can take several seconds to re-enumerate the controller while switching
 between desktop and monitor modes, so the watchdog polls for the new controller
@@ -104,6 +113,14 @@ fresh promotion attempt. Once both
 layers are verified, any overlay process that survived the display outage is
 recycled once so it binds to the newly enumerated display geometry before
 notifications resume.
+
+Correcting an unsupported inline-hub installation changes the Windows instance
+id of the same 8091 hub. When the old bound hub disappears, the watchdog may
+provisionally follow exactly one complete replacement topology only: one healthy
+8091 hub, one controller endpoint on internal port two, and one healthy 8051 LED
+endpoint on internal port three. Multiple or partial candidates fail closed. A
+new binding is not persisted until secondary mode returns with the AD23 composite
+and MI_00 display interface healthy on two consecutive samples.
 
 The long-running watchdog is the only resume owner. Its WMI power subscription
 coalesces suspend/resume handling with the live process and COM ownership. The

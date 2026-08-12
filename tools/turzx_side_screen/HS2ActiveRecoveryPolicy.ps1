@@ -513,6 +513,104 @@ function Get-HS2UsbRecoverySnapshot {
     }
 }
 
+function Resolve-HS2ControllerHub {
+    param(
+        [Parameter(Mandatory = $true)]$Binding,
+        [Parameter(Mandatory = $true)]$Snapshot
+    )
+
+    $healthyHubs = @(
+        $Snapshot.Devices | Where-Object {
+            [bool]$_.Present -and
+            [string]$_.InstanceId -like "USB\VID_1A86&PID_8091\*" -and
+            [string]$_.Status -eq "OK" -and
+            [int]$_.ProblemCode -eq 0
+        }
+    )
+    $boundHubs = @(
+        $healthyHubs | Where-Object {
+            [string]$_.InstanceId -ieq [string]$Binding.HubInstanceId
+        }
+    )
+    if ($boundHubs.Count -eq 1) {
+        return [pscustomobject]@{
+            Hub = $boundHubs[0]
+            RebindRequired = $false
+            Reason = "verified-bound-hub"
+        }
+    }
+    if ($boundHubs.Count -gt 1) {
+        return [pscustomobject]@{
+            Hub = $null
+            RebindRequired = $false
+            Reason = "bound-hub-ambiguous"
+        }
+    }
+
+    # A direct-header correction changes the Windows instance id of the same
+    # physical 8091 hub. Admit that change only from one complete sibling
+    # topology: controller on internal port two and LED on internal port three.
+    # This is provisional identity evidence only; the normal AD23 + MI_00 path
+    # still has to verify and atomically replace the persisted schema-2 binding.
+    $candidates = New-Object "System.Collections.Generic.List[object]"
+    foreach ($hub in $healthyHubs) {
+        $hubId = [string]$hub.InstanceId
+        $leds = @(
+            $Snapshot.Devices | Where-Object {
+                [bool]$_.Present -and
+                [string]$_.ParentInstanceId -ieq $hubId -and
+                [string]$_.InstanceId -like "USB\VID_0416&PID_8051\*" -and
+                [string]$_.Status -eq "OK" -and
+                [int]$_.ProblemCode -eq 0 -and
+                [string]$_.LocationInfo -like "Port_#0003*"
+            }
+        )
+        $normalEndpoints = @(
+            $Snapshot.Devices | Where-Object {
+                [bool]$_.Present -and
+                [string]$_.ParentInstanceId -ieq $hubId -and
+                [string]$_.Status -eq "OK" -and
+                [int]$_.ProblemCode -eq 0 -and
+                [string]$_.LocationInfo -like "Port_#0002*" -and
+                (
+                    [string]$_.InstanceId -like "USB\VID_1CBE&PID_A068\*" -or
+                    [string]$_.InstanceId -like "USB\VID_1A86&PID_AD23\*"
+                )
+            }
+        )
+        $bootloaderEndpoints = @(
+            $Snapshot.Devices | Where-Object {
+                [bool]$_.Present -and
+                [string]$_.ParentInstanceId -ieq $hubId -and
+                [string]$_.InstanceId -like "USB\VID_A108&PID_EAEF\*" -and
+                [string]$_.LocationInfo -like "Port_#0002*"
+            }
+        )
+        if ($leds.Count -eq 1 -and
+            ($normalEndpoints.Count + $bootloaderEndpoints.Count) -eq 1) {
+            [void]$candidates.Add([pscustomobject]@{
+                Hub = $hub
+                RebindRequired = $true
+                Reason = "unique-reenumerated-controller-topology"
+            })
+        }
+    }
+
+    if ($candidates.Count -eq 1) {
+        return $candidates[0]
+    }
+    return [pscustomobject]@{
+        Hub = $null
+        RebindRequired = $false
+        Reason = if ($candidates.Count -gt 1) {
+            "controller-topology-rebind-ambiguous"
+        }
+        else {
+            "bound-hub-not-healthy"
+        }
+    }
+}
+
 function Get-HS2ControllerReadiness {
     param(
         [Parameter(Mandatory = $true)][string]$BindingPath,
@@ -534,32 +632,24 @@ function Get-HS2ControllerReadiness {
     else {
         $Snapshot
     }
-    $boundHubs = @(
-        $snapshot.Devices | Where-Object {
-            [bool]$_.Present -and
-            [string]$_.InstanceId -ieq [string]$binding.HubInstanceId -and
-            [string]$_.InstanceId -like "USB\VID_1A86&PID_8091\*" -and
-            [string]$_.Status -eq "OK" -and
-            [int]$_.ProblemCode -eq 0
-        }
-    )
-    if ($boundHubs.Count -ne 1) {
+    $hubResolution = Resolve-HS2ControllerHub `
+        -Binding $binding `
+        -Snapshot $snapshot
+    if ($null -eq $hubResolution.Hub) {
         return [pscustomobject]@{
             Action = "Wait"
-            Reason = if ($boundHubs.Count -eq 0) {
-                "bound-hub-not-healthy"
-            }
-            else {
-                "bound-hub-ambiguous"
-            }
+            Reason = [string]$hubResolution.Reason
             EndpointInstanceId = $null
+            ResolvedHubInstanceId = $null
+            RebindRequired = $false
         }
     }
+    $resolvedHubInstanceId = [string]$hubResolution.Hub.InstanceId
 
     $normalEndpoints = @(
         $snapshot.Devices | Where-Object {
             [bool]$_.Present -and
-            [string]$_.ParentInstanceId -ieq [string]$binding.HubInstanceId -and
+            [string]$_.ParentInstanceId -ieq $resolvedHubInstanceId -and
             [string]$_.Status -eq "OK" -and
             [int]$_.ProblemCode -eq 0 -and
             (
@@ -571,7 +661,7 @@ function Get-HS2ControllerReadiness {
     $bootloaderEndpoints = @(
         $snapshot.Devices | Where-Object {
             [bool]$_.Present -and
-            [string]$_.ParentInstanceId -ieq [string]$binding.HubInstanceId -and
+            [string]$_.ParentInstanceId -ieq $resolvedHubInstanceId -and
             [string]$_.InstanceId -like "USB\VID_A108&PID_EAEF\*"
         }
     )
@@ -583,6 +673,8 @@ function Get-HS2ControllerReadiness {
             Action = "Wait"
             Reason = "bound-controller-endpoint-ambiguous"
             EndpointInstanceId = $null
+            ResolvedHubInstanceId = $resolvedHubInstanceId
+            RebindRequired = [bool]$hubResolution.RebindRequired
         }
     }
     if ($normalEndpoints.Count -eq 1) {
@@ -590,6 +682,8 @@ function Get-HS2ControllerReadiness {
             Action = "Ready"
             Reason = "bound-controller-endpoint-ready"
             EndpointInstanceId = [string]$normalEndpoints[0].InstanceId
+            ResolvedHubInstanceId = $resolvedHubInstanceId
+            RebindRequired = [bool]$hubResolution.RebindRequired
         }
     }
     if ($bootloaderEndpoints.Count -eq 1) {
@@ -605,12 +699,16 @@ function Get-HS2ControllerReadiness {
                 Action = "Wait"
                 Reason = "bound-controller-endpoint-ambiguous"
                 EndpointInstanceId = $null
+                ResolvedHubInstanceId = $resolvedHubInstanceId
+                RebindRequired = [bool]$hubResolution.RebindRequired
             }
         }
         return [pscustomobject]@{
             Action = "Wait"
             Reason = "bound-controller-in-bootloader-mode"
             EndpointInstanceId = [string]$bootloaderEndpoints[0].InstanceId
+            ResolvedHubInstanceId = $resolvedHubInstanceId
+            RebindRequired = [bool]$hubResolution.RebindRequired
         }
     }
 
@@ -618,6 +716,8 @@ function Get-HS2ControllerReadiness {
         Action = "Wait"
         Reason = "bound-controller-endpoint-missing"
         EndpointInstanceId = $null
+        ResolvedHubInstanceId = $resolvedHubInstanceId
+        RebindRequired = [bool]$hubResolution.RebindRequired
     }
 }
 
@@ -646,32 +746,24 @@ function Get-HS2LConnectServiceRecoveryEligibility {
     else {
         $Snapshot
     }
-    $boundHub = @(
-        $snapshot.Devices | Where-Object {
-            [bool]$_.Present -and
-            [string]$_.InstanceId -ieq [string]$binding.HubInstanceId -and
-            [string]$_.InstanceId -like "USB\VID_1A86&PID_8091\*" -and
-            [string]$_.Status -eq "OK" -and
-            [int]$_.ProblemCode -eq 0
-        }
-    )
-    if ($boundHub.Count -ne 1) {
+    $hubResolution = Resolve-HS2ControllerHub `
+        -Binding $binding `
+        -Snapshot $snapshot
+    if ($null -eq $hubResolution.Hub) {
         return [pscustomobject]@{
             Eligible = $false
-            Reason = if ($boundHub.Count -eq 0) {
-                "bound-hub-not-healthy"
-            }
-            else {
-                "bound-hub-ambiguous"
-            }
+            Reason = [string]$hubResolution.Reason
             EndpointInstanceId = $null
+            ResolvedHubInstanceId = $null
+            RebindRequired = $false
         }
     }
+    $resolvedHubInstanceId = [string]$hubResolution.Hub.InstanceId
 
     $controllerEndpoints = @(
         $snapshot.Devices | Where-Object {
             [bool]$_.Present -and
-            [string]$_.ParentInstanceId -ieq [string]$binding.HubInstanceId -and
+            [string]$_.ParentInstanceId -ieq $resolvedHubInstanceId -and
             [string]$_.Status -eq "OK" -and
             [int]$_.ProblemCode -eq 0 -and
             (
@@ -690,6 +782,8 @@ function Get-HS2LConnectServiceRecoveryEligibility {
                 "bound-controller-endpoint-ambiguous"
             }
             EndpointInstanceId = $null
+            ResolvedHubInstanceId = $resolvedHubInstanceId
+            RebindRequired = [bool]$hubResolution.RebindRequired
         }
     }
 
@@ -697,6 +791,8 @@ function Get-HS2LConnectServiceRecoveryEligibility {
         Eligible = $true
         Reason = "bound-controller-endpoint-healthy"
         EndpointInstanceId = [string]$controllerEndpoints[0].InstanceId
+        ResolvedHubInstanceId = $resolvedHubInstanceId
+        RebindRequired = [bool]$hubResolution.RebindRequired
     }
 }
 

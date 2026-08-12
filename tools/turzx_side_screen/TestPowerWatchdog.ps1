@@ -954,6 +954,91 @@ try {
         $nativeLConnectEligibility.EndpointInstanceId -cne $nativeA068Endpoint.InstanceId) {
         throw "A present A068 endpoint on the previously bound healthy hub must permit the one L-Connect recovery decision."
     }
+
+    # Moving the AIO cable from an unsupported inline USB hub to the
+    # motherboard header changes the Windows instance id of the same 8091
+    # device. A unique new 8091 + port-two controller + port-three LED topology
+    # must be admitted provisionally so the verified AD23 path can replace the
+    # persisted binding. Identity ambiguity must still fail closed.
+    $reenumeratedHub = [pscustomobject]@{
+        InstanceId = "USB\VID_1A86&PID_8091\reenumerated-direct-hub"
+        ParentInstanceId = "USB\ROOT_HUB30\direct-root"
+        Present = $true
+        Status = "OK"
+        ProblemCode = 0
+    }
+    $reenumeratedLed = [pscustomobject]@{
+        InstanceId = $validBinding.LedInstanceId
+        ParentInstanceId = $reenumeratedHub.InstanceId
+        Present = $true
+        Status = "OK"
+        ProblemCode = 0
+        LocationInfo = "Port_#0003.Hub_#0008"
+    }
+    $reenumeratedA068 = [pscustomobject]@{
+        InstanceId = "USB\VID_1CBE&PID_A068\reenumerated-controller"
+        ParentInstanceId = $reenumeratedHub.InstanceId
+        Present = $true
+        Status = "OK"
+        ProblemCode = 0
+        LocationInfo = "Port_#0002.Hub_#0008"
+    }
+    $reenumeratedSnapshot = [pscustomobject]@{
+        Devices = @($reenumeratedHub, $reenumeratedLed, $reenumeratedA068)
+    }
+    $reenumeratedReadiness = Get-HS2ControllerReadiness `
+        -BindingPath $nativeLConnectBindingPath `
+        -Snapshot $reenumeratedSnapshot
+    if ($reenumeratedReadiness.Action -cne "Ready" -or
+        -not [bool]$reenumeratedReadiness.RebindRequired -or
+        $reenumeratedReadiness.ResolvedHubInstanceId -cne $reenumeratedHub.InstanceId -or
+        $reenumeratedReadiness.EndpointInstanceId -cne $reenumeratedA068.InstanceId) {
+        throw "A unique healthy HS2 topology re-enumerated on a direct motherboard header must resume activation and request binding replacement."
+    }
+    $reenumeratedEligibility = Get-HS2LConnectServiceRecoveryEligibility `
+        -BindingPath $nativeLConnectBindingPath `
+        -Snapshot $reenumeratedSnapshot
+    if (-not $reenumeratedEligibility.Eligible -or
+        -not [bool]$reenumeratedEligibility.RebindRequired -or
+        $reenumeratedEligibility.ResolvedHubInstanceId -cne $reenumeratedHub.InstanceId) {
+        throw "A uniquely re-enumerated direct-header topology must permit the one bounded L-Connect service recovery."
+    }
+    $reenumeratedBootloader = $bootloaderEndpoint.PSObject.Copy()
+    $reenumeratedBootloader.ParentInstanceId = $reenumeratedHub.InstanceId
+    $reenumeratedBootloader.LocationInfo = "Port_#0002.Hub_#0008"
+    $reenumeratedBootloaderReadiness = Get-HS2ControllerReadiness `
+        -BindingPath $nativeLConnectBindingPath `
+        -Snapshot ([pscustomobject]@{
+            Devices = @($reenumeratedHub, $reenumeratedLed, $reenumeratedBootloader)
+        })
+    if ($reenumeratedBootloaderReadiness.Action -cne "Wait" -or
+        $reenumeratedBootloaderReadiness.Reason -cne "bound-controller-in-bootloader-mode" -or
+        -not [bool]$reenumeratedBootloaderReadiness.RebindRequired) {
+        throw "A re-enumerated A108 bootloader topology must remain passive while retaining the future binding-replacement receipt."
+    }
+    $secondReenumeratedHub = $reenumeratedHub.PSObject.Copy()
+    $secondReenumeratedHub.InstanceId = "USB\VID_1A86&PID_8091\second-direct-hub"
+    $secondReenumeratedLed = $reenumeratedLed.PSObject.Copy()
+    $secondReenumeratedLed.InstanceId = "USB\VID_0416&PID_8051\second-led"
+    $secondReenumeratedLed.ParentInstanceId = $secondReenumeratedHub.InstanceId
+    $secondReenumeratedA068 = $reenumeratedA068.PSObject.Copy()
+    $secondReenumeratedA068.InstanceId = "USB\VID_1CBE&PID_A068\second-controller"
+    $secondReenumeratedA068.ParentInstanceId = $secondReenumeratedHub.InstanceId
+    $ambiguousRebindReadiness = Get-HS2ControllerReadiness `
+        -BindingPath $nativeLConnectBindingPath `
+        -Snapshot ([pscustomobject]@{
+            Devices = @(
+                $reenumeratedHub,
+                $reenumeratedLed,
+                $reenumeratedA068,
+                $secondReenumeratedHub,
+                $secondReenumeratedLed,
+                $secondReenumeratedA068)
+        })
+    if ($ambiguousRebindReadiness.Action -cne "Wait" -or
+        $ambiguousRebindReadiness.Reason -cne "controller-topology-rebind-ambiguous") {
+        throw "Multiple complete re-enumerated HS2 topologies must fail closed."
+    }
     $nativeApiEmptyFirstDecision = Get-HS2LConnectRecoveryFollowUpDecision `
         -DisplayHealthy $nativeLConnectEligibility.Eligible `
         -RecoveryAttempted $false `

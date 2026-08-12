@@ -77,7 +77,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start.ps1 -Port CO
 
 看门狗在连续 3 次子进程退出或心跳故障后进入 30 秒有界熔断，再确认旧流进程已经释放 COM 后重新启动；不会再以成功退出的方式永久停在“paused”状态。睡眠/关机即使遇到旧流退出证明失败，也会继续执行 HS2 电源策略；而正常启动仍拒绝在旧串口写入者未退出时创建第二个流。
 
-HS2 水冷屏的恢复入口先核对已绑定专用 Hub 下的控制器身份。正常 `A068` 或 `AD23` 端点出现后才调用 L-Connect；端点缺失或仅出现 `A108:EAEF` Boot ROM 身份时只读等待，不发送模式命令，也不重启 Hub、删除设备或扫描 PnP。端点恢复后会自动重新进入保留模式、L-Connect 绑定和浮层验收，无需重启 watchdog。
+HS2 水冷屏的恢复入口先核对已绑定专用 Hub 下的控制器身份。正常 `A068` 或 `AD23` 端点出现后才调用 L-Connect；端点缺失或仅出现 `A108:EAEF` Boot ROM 身份时只读等待，不发送模式命令，也不重启 Hub、删除设备或扫描 PnP。[LIAN LI 官方说明](https://lian-li.com/product/hs2-oled-curved/)要求 OLED Curved 的 USB 主线直连主板 USB 2.0 9-pin 排针（或官方 EDGE HUB），随附 1 分 2 Hub 只给非 LCD 设备使用；主板 USB 供电不足时按[官方接线手册](https://drive.google.com/file/d/100nRyDLIbXY8mkVBAG5gv92xSe4A7tpN/view?usp=sharing)使用随附 SATA 辅助供电。若纠正接线使 8091 的 Windows 实例号变化，看门狗只接受唯一的 8091 + port 2 控制器 + port 3 LED 拓扑，待 AD23/MI_00 完整验证后原子替换旧绑定。端点恢复后会自动重新进入保留模式、L-Connect 绑定和浮层验收，无需重启 watchdog。内部 USB 排针不得带电插拔。
 
 为兼容既有安装，Windows 计划任务、快捷方式及本机脚本中的内部标识仍保留 `TURZX SideScreen`；这不再是公开项目名称，也无需为改名迁移现有运行路径。
 
