@@ -653,10 +653,12 @@ namespace TURZX.SideScreen
 
         private static int ResolveFullBaselineRepeatCount(bool hybridRefresh, bool hasPreviousFrame)
         {
-            // Every Hybrid full-frame boundary owns a freshly opened serial
-            // session, so repeat the same vendor-shaped baseline used at
-            // startup instead of treating it as an in-session redraw.
-            return hybridRefresh ? 2 : 1;
+            // Keep the vendor-shaped duplicate baseline at process startup,
+            // where the panel has no prior framebuffer. A periodic recovery
+            // already reopens and primes the serial session, so one verified
+            // command-200 frame is enough to re-establish the full baseline
+            // without freezing the 1 Hz clock for a second full transfer.
+            return hybridRefresh && !hasPreviousFrame ? 2 : 1;
         }
 
         private static bool ShouldPrimeFullBaseline(bool hybridRefresh, bool hasPreviousFrame)

@@ -127,7 +127,7 @@ public static class TestStreamCadenceProgram
             SideScreenStreamApp.ShouldSendFullFrameForTest(300, true, 0));
         Equal("hybrid startup follows the vendor duplicate baseline", 2,
             SideScreenStreamApp.ResolveFullBaselineRepeatCountForTest(true, false));
-        Equal("periodic hybrid recovery repeats the vendor baseline after rebuilding the session", 2,
+        Equal("periodic hybrid recovery uses one verified full baseline after rebuilding the session", 1,
             SideScreenStreamApp.ResolveFullBaselineRepeatCountForTest(true, true));
         Equal("hybrid startup primes the panel before its first baseline", true,
             SideScreenStreamApp.ShouldPrimeFullBaselineForTest(true, false));

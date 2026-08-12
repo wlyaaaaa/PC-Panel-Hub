@@ -38,13 +38,13 @@ worker to exit and reopen under the watchdog. Heartbeat timing checks also rejec
 live-but-stalled process. Diagnostic preview encoding is asynchronous and never sits
 on the COM7 send path.
 
-When explicitly enabled, Hybrid startup/recovery follows the vendor 8.8-inch lifecycle: raw `0x2C` priming,
+When explicitly enabled, Hybrid startup follows the vendor 8.8-inch lifecycle: raw `0x2C` priming,
 brightness restore, then two identical command-200 baselines before command 204 begins.
 After startup, every 900-frame boundary (about 15 minutes) closes and reopens the
-serial session, repeats priming/brightness and the duplicate command-200 baseline,
+serial session, repeats priming/brightness and sends one complete command-200 baseline,
 then restarts command-204 sequence numbering. The normal clock remains 1Hz; this hard
-recovery boundary causes one roughly five-second pause instead of making every clock
-tick three seconds long.
+recovery boundary causes one roughly 2.5-second pause instead of duplicating the full
+transfer or making every clock tick three seconds long.
 The watchdog verifies that this recovery cadence remains enabled and is actually reached.
 This is still a host-side recovery strategy rather than device acknowledgement.
 The repository default remains the 3-second verified full-frame path; HybridRefresh

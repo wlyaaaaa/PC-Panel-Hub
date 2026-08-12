@@ -26,13 +26,13 @@ PC Panel Hub is intentionally split into small local processes:
    - Renders 480x1920 bitmaps with `System.Drawing`.
    - Keeps verified command `200` as the conservative 3-second mode.
    - Provides an explicit hybrid candidate for the required 1Hz clock: vendor-shaped
-     priming/brightness/two-frame command-200 baseline, followed by bounded command-204
-     deltas between recovery boundaries. Because command 204 has no device ACK, the
-     default hybrid configuration rebuilds the serial session every 900 frames (about
-     15 minutes at normal 1Hz cadence), repeats priming/brightness and the duplicate
-     command-200 baseline, then restarts the command-204 sequence. This costs one brief
-     recovery pause but reproduces the startup lifecycle that actually restores the panel;
-     failures still exit and let the watchdog rebuild the process.
+     priming/brightness/two-frame command-200 startup baseline, followed by bounded
+     command-204 deltas between recovery boundaries. Because command 204 has no device
+     ACK, the default hybrid configuration rebuilds the serial session every 900 frames
+     (about 15 minutes at normal 1Hz cadence), repeats priming/brightness, sends one
+     complete command-200 recovery baseline, then restarts the command-204 sequence.
+     This halves the periodic recovery pause while retaining a freshly opened session
+     and a verified full redraw; failures still exit and let the watchdog rebuild the process.
    - Runs at `AboveNormal` process/thread priority while the serial sender thread uses
      `Highest`; neither the process nor the sender uses realtime scheduling.
    - Writes the diagnostic PNG on a low-priority, single-flight background worker after
