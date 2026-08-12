@@ -60,9 +60,96 @@ function Wait-TurzxStreamProcessesExit {
     }
 }
 
+function Stop-RecordedWatchdogProcess {
+    param(
+        [Parameter(Mandatory = $true)][string]$PidPath,
+        [Parameter(Mandatory = $true)][string]$StackChildPidPath,
+        [Parameter(Mandatory = $true)][object[]]$Snapshot
+    )
+
+    if (-not (Test-Path -LiteralPath $PidPath)) {
+        return
+    }
+
+    $rawPid = (Get-Content -Raw -LiteralPath $PidPath -ErrorAction Stop).Trim()
+    $recordedPid = 0
+    if (-not [int]::TryParse($rawPid, [ref]$recordedPid) -or $recordedPid -le 0) {
+        throw "Invalid recorded watchdog PID: $rawPid"
+    }
+
+    $candidate = @($Snapshot | Where-Object { [int]$_.ProcessId -eq $recordedPid })
+    if ($candidate.Count -eq 0) {
+        Write-StopLog ("recorded watchdog already exited PID={0}" -f $recordedPid)
+        return
+    }
+    if ($candidate.Count -ne 1) {
+        throw "Recorded watchdog PID is ambiguous: $recordedPid"
+    }
+
+    $processName = [string]$candidate[0].Name
+    $commandLine = [string]$candidate[0].CommandLine
+    $commandIdentityMatches =
+        ($processName -like "powershell*" -or $processName -like "pwsh*") -and
+        $commandLine -like "*StartSideScreenWatchdog.ps1*" -and
+        $commandLine -like $sidePattern
+
+    $treeIdentityMatches = $false
+    if (Test-Path -LiteralPath $StackChildPidPath) {
+        $rawChildPid = (Get-Content -Raw -LiteralPath $StackChildPidPath -ErrorAction SilentlyContinue).Trim()
+        $recordedChildPid = 0
+        if ([int]::TryParse($rawChildPid, [ref]$recordedChildPid) -and $recordedChildPid -gt 0) {
+            $recordedChild = @(
+                $Snapshot | Where-Object {
+                    [int]$_.ProcessId -eq $recordedChildPid -and
+                    [int]$_.ParentProcessId -eq $recordedPid -and
+                    ($_.Name -like "powershell*" -or $_.Name -like "pwsh*")
+                }
+            )
+            $treeIdentityMatches = $recordedChild.Count -eq 1
+        }
+    }
+
+    if (-not ($commandIdentityMatches -or $treeIdentityMatches)) {
+        Write-StopLog ("recorded watchdog identity not verified PID={0} name={1}; refusing to stop" -f $recordedPid, $processName)
+        throw "Recorded watchdog identity not verified: $recordedPid"
+    }
+
+    Write-StopLog ("stopping recorded watchdog PID={0} identity={1}" -f `
+            $recordedPid,
+            $(if ($commandIdentityMatches) { "command-line" } else { "process-tree" }))
+    Stop-Process -Id $recordedPid -Force -ErrorAction Stop
+
+    $deadline = [DateTime]::UtcNow.AddSeconds(10)
+    do {
+        if ($null -eq (Get-Process -Id $recordedPid -ErrorAction SilentlyContinue)) {
+            return
+        }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTime]::UtcNow -lt $deadline)
+
+    throw "Recorded watchdog did not exit before timeout: $recordedPid"
+}
+
 $sidePattern = "*" + $side + "*"
 $weatherPattern = "*" + $weather + "*"
 $processSnapshot = @(Get-CimInstance Win32_Process)
+
+if ($IncludeWatchdog) {
+    Stop-RecordedWatchdogProcess `
+        -PidPath (Join-Path $outDir "side-screen-watchdog.pid") `
+        -StackChildPidPath (Join-Path $outDir "side-screen-stack-child.pid") `
+        -Snapshot $processSnapshot
+
+    # Also catch an additional visible-command-line watchdog, but do it before
+    # stopping the stack so no old owner can respawn a COM writer mid-stop.
+    Stop-MatchingProcess -Reason "watchdog-script" -Predicate {
+        param($p)
+        ($p.Name -like "powershell*" -or $p.Name -like "pwsh*") -and
+            $p.CommandLine -like "*-File*StartSideScreenWatchdog.ps1*" -and
+            $p.CommandLine -like "*StartSideScreenWatchdog.ps1*" -and
+            $p.CommandLine -like $sidePattern
+    }
+}
 
 Stop-MatchingProcess -Reason "metrics-agent" -Predicate {
     param($p)
@@ -118,16 +205,6 @@ if (-not $SkipStackEntrypoint) {
         ($p.Name -like "powershell*" -or $p.Name -like "pwsh*") -and
             $p.CommandLine -like "*-File*StartSideScreenStack.ps1*" -and
             $p.CommandLine -like "*StartSideScreenStack.ps1*" -and
-            $p.CommandLine -like $sidePattern
-    }
-}
-
-if ($IncludeWatchdog) {
-    Stop-MatchingProcess -Reason "watchdog-script" -Predicate {
-        param($p)
-        ($p.Name -like "powershell*" -or $p.Name -like "pwsh*") -and
-            $p.CommandLine -like "*-File*StartSideScreenWatchdog.ps1*" -and
-            $p.CommandLine -like "*StartSideScreenWatchdog.ps1*" -and
             $p.CommandLine -like $sidePattern
     }
 }

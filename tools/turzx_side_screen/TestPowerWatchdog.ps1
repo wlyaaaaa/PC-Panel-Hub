@@ -1566,10 +1566,16 @@ $stopText = Get-Content -Raw -LiteralPath $stop
 foreach ($pattern in @(
         "Wait-TurzxStreamProcessesExit",
         "stream processes did not exit",
-        'side-screen-stack.pid')) {
+        'side-screen-stack.pid',
+        'Stop-RecordedWatchdogProcess',
+        'side-screen-watchdog.pid',
+        'recorded watchdog identity not verified')) {
     if ($stopText -notmatch [regex]::Escape($pattern)) {
         throw "Stack stop must prove the old stream released COM before restart; missing: $pattern"
     }
+}
+if ($stopText -notmatch '(?s)if\s*\(\$IncludeWatchdog\).*?Stop-RecordedWatchdogProcess.*?Stop-MatchingProcess\s+-Reason\s+"stream-exe"') {
+    throw "IncludeWatchdog must stop the verified recorded owner before stopping the stream, otherwise the old watchdog can respawn it."
 }
 if ($watchdogText -notmatch '(?s)function Stop-Stack.*?\$LASTEXITCODE\s+-ne\s+0.*?throw') {
     throw "Watchdog Start-Stack must fail closed when StopSideScreenStack cannot prove stream exit."
