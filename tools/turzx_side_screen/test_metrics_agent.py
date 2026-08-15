@@ -1189,6 +1189,133 @@ class MetricsAgentTests(unittest.TestCase):
         self.assertEqual(2048.0, second["rx_bytes_per_sec"])
         self.assertEqual(2048.0, second["tx_bytes_per_sec"])
 
+    def test_public_network_counter_reader_uses_only_configured_physical_interface(self):
+        class FakePsutil:
+            def __init__(self):
+                self.calls = []
+
+            def net_io_counters(self, pernic=False):
+                self.calls.append(pernic)
+                if not pernic:
+                    raise AssertionError("aggregate counters must never be used")
+                return {
+                    "Synthetic Ethernet": SimpleNamespace(bytes_recv=10_000, bytes_sent=2_000),
+                    "Synthetic Tunnel": SimpleNamespace(bytes_recv=9_000, bytes_sent=8_000),
+                }
+
+        fake = FakePsutil()
+        with (
+            patch.object(metrics_agent, "_optional_import", return_value=fake),
+            patch.object(
+                metrics_agent,
+                "_configured_public_network_interface",
+                return_value="Synthetic Ethernet",
+            ),
+        ):
+            reading = metrics_agent._read_network_counters_psutil()
+
+        self.assertEqual([True], fake.calls)
+        self.assertEqual(10_000, reading["bytes_recv"])
+        self.assertEqual(2_000, reading["bytes_sent"])
+        self.assertEqual("Synthetic Ethernet", reading["interface_name"])
+        self.assertEqual("psutil_public_egress", reading["source"])
+
+    def test_public_network_counter_reader_fails_closed_when_interface_is_missing(self):
+        fake = SimpleNamespace(
+            net_io_counters=lambda pernic=False: {
+                "Synthetic Tunnel": SimpleNamespace(bytes_recv=9_000, bytes_sent=8_000)
+            }
+        )
+        with (
+            patch.object(metrics_agent, "_optional_import", return_value=fake),
+            patch.object(
+                metrics_agent,
+                "_configured_public_network_interface",
+                return_value="Synthetic Ethernet",
+            ),
+        ):
+            reading = metrics_agent._read_network_counters_psutil()
+
+        self.assertIsNone(reading)
+
+    def test_network_rate_sampler_resets_baseline_when_public_interface_changes(self):
+        readings = iter(
+            [
+                {"bytes_recv": 1_000, "bytes_sent": 2_000, "interface_name": "Ethernet", "source": "psutil_public_egress"},
+                {"bytes_recv": 2_000, "bytes_sent": 3_000, "interface_name": "Ethernet", "source": "psutil_public_egress"},
+                {"bytes_recv": 50, "bytes_sent": 80, "interface_name": "Wi-Fi", "source": "psutil_public_egress"},
+            ]
+        )
+        timestamps = iter([10.0, 11.0, 12.0])
+        sampler = metrics_agent.NetworkRateSampler(
+            read_counters=lambda: next(readings),
+            now=lambda: next(timestamps),
+        )
+
+        sampler.sample()
+        second = sampler.sample()
+        changed = sampler.sample()
+
+        self.assertEqual(1_000.0, second["rx_bytes_per_sec"])
+        self.assertIsNone(changed["rx_bytes_per_sec"])
+        self.assertIsNone(changed["tx_bytes_per_sec"])
+        self.assertEqual("Wi-Fi", changed["interface_name"])
+
+    def test_network_rate_sampler_discards_baseline_across_missing_interface(self):
+        readings = iter(
+            [
+                {"bytes_recv": 1_000, "bytes_sent": 2_000, "interface_name": "Ethernet", "source": "psutil_public_egress"},
+                None,
+                {"bytes_recv": 9_000, "bytes_sent": 5_000, "interface_name": "Ethernet", "source": "psutil_public_egress"},
+                {"bytes_recv": 10_000, "bytes_sent": 5_500, "interface_name": "Ethernet", "source": "psutil_public_egress"},
+            ]
+        )
+        timestamps = iter([10.0, 11.0, 20.0, 21.0])
+        sampler = metrics_agent.NetworkRateSampler(
+            read_counters=lambda: next(readings),
+            now=lambda: next(timestamps),
+        )
+
+        sampler.sample()
+        missing = sampler.sample()
+        recovered_baseline = sampler.sample()
+        recovered_rate = sampler.sample()
+
+        self.assertIsNone(missing["rx_bytes_per_sec"])
+        self.assertIsNone(recovered_baseline["rx_bytes_per_sec"])
+        self.assertEqual(1_000.0, recovered_rate["rx_bytes_per_sec"])
+        self.assertEqual(500.0, recovered_rate["tx_bytes_per_sec"])
+
+    def test_public_egress_selector_rejects_virtual_and_ambiguous_candidates(self):
+        candidates = [
+            {
+                "interface_alias": "Synthetic Tunnel",
+                "hardware_interface": False,
+                "virtual": True,
+                "status": "Up",
+                "ipv4_gateway": "198.18.0.2",
+                "route_metric": 0,
+                "interface_metric": 0,
+            },
+            {
+                "interface_alias": "Synthetic Ethernet",
+                "hardware_interface": True,
+                "virtual": False,
+                "status": "Up",
+                "ipv4_gateway": "192.0.2.1",
+                "route_metric": 5,
+                "interface_metric": 20,
+            },
+        ]
+        self.assertEqual(
+            "Synthetic Ethernet",
+            metrics_agent._select_public_egress_interface(candidates),
+        )
+
+        ambiguous = [dict(candidates[1]), dict(candidates[1])]
+        ambiguous[1]["interface_alias"] = "Synthetic Wi-Fi"
+        self.assertIsNone(metrics_agent._select_public_egress_interface(ambiguous))
+
     def test_network_latency_sampler_reports_ping_jitter_and_loss(self):
         readings = iter([55.0, 61.0, None])
         sampler = metrics_agent.NetworkLatencySampler(

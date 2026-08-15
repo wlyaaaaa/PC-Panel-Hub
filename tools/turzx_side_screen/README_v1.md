@@ -37,7 +37,7 @@ time, weather, alert, foreground_app, cpu, gpu, fps, memory, disks, network, top
 - CPU 使用率：Windows `% Processor Utility`（任务管理器口径）；不可用时回退 `GetSystemTimes`
 - 频率：MHz，UI 可显示 GHz
 - 电压：V
-- 网络：B/s 或 KB/s，renderer 负责格式化
+- 网络：只统计 `network.publicInterface` 指定的物理公网出口网卡；不汇总 TUN、Tailscale、Hyper-V、VMware 等虚拟接口，避免代理流量被重复计算。单位为 B/s 或 KB/s，renderer 负责格式化。若指定接口不存在则速率失败关闭为空，不回退到全网卡总和。
 - DPC：Windows `% DPC Time`
 
 ## Current Build Order

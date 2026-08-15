@@ -27,7 +27,8 @@
     "timezone": "Asia/Shanghai"
   },
   "network": {
-    "pingHost": "223.5.5.5"
+    "pingHost": "223.5.5.5",
+    "publicInterface": "以太网"
   },
   "ui": {
     "designSvg": "tools\\turzx_side_screen\\design\\dashboard-final-candidate.svg",

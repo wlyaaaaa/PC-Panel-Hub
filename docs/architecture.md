@@ -9,6 +9,9 @@ PC Panel Hub is intentionally split into small local processes:
 2. `metrics_agent.py`
    - Serves `GET http://127.0.0.1:18765/snapshot`.
    - Collects hardware, network, disk, weather, FPS, foreground app, and health data.
+   - Reads throughput from the configured physical public-egress interface only.
+     Tunnel and virtualization adapters are excluded instead of being added to the
+     physical counters; a missing or ambiguous interface fails closed.
    - Reports CPU load from PDH `% Processor Time`, which is ordinary busy time and
      matches the user-facing Task Manager interpretation. Frequency-scaled
      `% Processor Utility` is intentionally not used as CPU load.

@@ -48,6 +48,8 @@ PHYSICAL_DISK_TOPOLOGY_FAILURE_TTL_SECONDS = 10.0
 SMALL_REMOVABLE_DISK_BYTES = 32_000_000_000
 NETWORK_LATENCY_TTL_SECONDS = 2.0
 NETWORK_PING_TARGET = "223.5.5.5"
+NETWORK_INTERFACE_CACHE_TTL_SECONDS = 300.0
+NETWORK_INTERFACE_FAILURE_TTL_SECONDS = 30.0
 # The collector writes the hardware/FPS lane every second. Keep this cache
 # shorter than one display tick so a 1 Hz renderer never deliberately carries
 # the same database snapshot for a second extra tick.
@@ -108,6 +110,10 @@ _top_processes_refreshing = False
 _data_trust_log_lock = threading.Lock()
 _data_trust_last_logged_at = 0.0
 _data_trust_last_log_key: str | None = None
+_network_interface_cache_value: str | None = None
+_network_interface_cache_expires_at = 0.0
+_network_interface_cache_lock = threading.Lock()
+_network_interface_refreshing = False
 _cpu_history: deque[float] = deque(maxlen=120)
 _gpu_history: deque[float] = deque(maxlen=120)
 
@@ -2989,7 +2995,7 @@ class NetworkRateSampler:
         self._read_counters = read_counters or _read_network_counters_psutil
         self._now = now or time.monotonic
         self._latency_sampler = latency_sampler or NetworkLatencySampler()
-        self._last: tuple[float, int, int] | None = None
+        self._last: tuple[float, int, int, str] | None = None
 
     def sample(self) -> dict[str, Any]:
         current = self._safe_read_counters()
@@ -2999,22 +3005,38 @@ class NetworkRateSampler:
         latency = self._latency_sampler.sample()
 
         if current is not None:
-            rx_total = _parse_counter_int(getattr(current, "bytes_recv", None))
-            tx_total = _parse_counter_int(getattr(current, "bytes_sent", None))
+            rx_total = _parse_counter_int(_network_counter_field(current, "bytes_recv"))
+            tx_total = _parse_counter_int(_network_counter_field(current, "bytes_sent"))
+            interface_name = _empty_to_none(
+                _network_counter_field(current, "interface_name")
+            ) or "legacy"
             if rx_total is not None and tx_total is not None:
                 if self._last is not None:
-                    previous_time, previous_rx, previous_tx = self._last
+                    previous_time, previous_rx, previous_tx, previous_interface = self._last
                     elapsed = timestamp - previous_time
                     rx_delta = rx_total - previous_rx
                     tx_delta = tx_total - previous_tx
-                    if elapsed > 0 and rx_delta >= 0 and tx_delta >= 0:
+                    if (
+                        interface_name == previous_interface
+                        and elapsed > 0
+                        and rx_delta >= 0
+                        and tx_delta >= 0
+                    ):
                         rx_rate = round(rx_delta / elapsed, 1)
                         tx_rate = round(tx_delta / elapsed, 1)
-                self._last = (timestamp, rx_total, tx_total)
+                self._last = (timestamp, rx_total, tx_total, interface_name)
+        else:
+            interface_name = None
+            # A missing/ambiguous public interface is an evidence gap, not a
+            # zero-traffic sample. Discard the old baseline so a later recovery
+            # cannot report an average that spans the unobserved interval.
+            self._last = None
 
         source_parts = []
         if current is not None:
-            source_parts.append("psutil")
+            source_parts.append(
+                _empty_to_none(_network_counter_field(current, "source")) or "psutil"
+            )
         if latency.get("source") == "ping":
             source_parts.append("ping")
 
@@ -3028,6 +3050,7 @@ class NetworkRateSampler:
             "packet_loss_percent": latency.get("packet_loss_percent"),
             "latency_status": latency.get("status"),
             "addresses": _local_addresses(),
+            "interface_name": interface_name,
             "source": "+".join(source_parts) if source_parts else "fallback",
         }
 
@@ -3043,9 +3066,170 @@ def _read_network_counters_psutil() -> Any | None:
     if psutil is None:
         return None
     try:
-        return psutil.net_io_counters()
+        counters = psutil.net_io_counters(pernic=True)
     except Exception:
         return None
+    if not isinstance(counters, dict):
+        return None
+    interface_name = (
+        _configured_public_network_interface()
+        or _cached_public_network_interface()
+    )
+    if interface_name is None or interface_name not in counters:
+        return None
+    counter = counters[interface_name]
+    rx_total = _parse_counter_int(getattr(counter, "bytes_recv", None))
+    tx_total = _parse_counter_int(getattr(counter, "bytes_sent", None))
+    if rx_total is None or tx_total is None:
+        return None
+    return {
+        "bytes_recv": rx_total,
+        "bytes_sent": tx_total,
+        "interface_name": interface_name,
+        "source": "psutil_public_egress",
+    }
+
+
+def _network_counter_field(counter: Any, name: str) -> Any:
+    if isinstance(counter, dict):
+        return counter.get(name)
+    return getattr(counter, name, None)
+
+
+def _configured_public_network_interface() -> str | None:
+    config = _load_config()
+    network = config.get("network")
+    if not isinstance(network, dict):
+        return None
+    return _empty_to_none(network.get("publicInterface"))
+
+
+def _select_public_egress_interface(candidates: list[dict[str, Any]]) -> str | None:
+    eligible: list[tuple[float, str]] = []
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        alias = _empty_to_none(candidate.get("interface_alias"))
+        gateway = _empty_to_none(candidate.get("ipv4_gateway"))
+        if (
+            alias is None
+            or gateway is None
+            or candidate.get("hardware_interface") is not True
+            or candidate.get("virtual") is True
+            or str(candidate.get("status") or "").casefold() != "up"
+        ):
+            continue
+        route_metric = _parse_float(candidate.get("route_metric"))
+        interface_metric = _parse_float(candidate.get("interface_metric"))
+        if route_metric is None or interface_metric is None:
+            continue
+        eligible.append((route_metric + interface_metric, alias))
+    if not eligible:
+        return None
+    eligible.sort(key=lambda item: (item[0], item[1].casefold()))
+    best_metric = eligible[0][0]
+    best = [alias for metric, alias in eligible if metric == best_metric]
+    return best[0] if len(best) == 1 else None
+
+
+def _cached_public_network_interface() -> str | None:
+    global _network_interface_refreshing
+
+    now = time.monotonic()
+    with _network_interface_cache_lock:
+        if (
+            _network_interface_cache_value is not None
+            and now < _network_interface_cache_expires_at
+        ):
+            return _network_interface_cache_value
+        if not _network_interface_refreshing:
+            _network_interface_refreshing = True
+            threading.Thread(
+                target=_refresh_public_network_interface,
+                daemon=True,
+            ).start()
+        return _network_interface_cache_value
+
+
+def _refresh_public_network_interface() -> None:
+    global _network_interface_cache_value, _network_interface_cache_expires_at
+    global _network_interface_refreshing
+
+    try:
+        selected = _select_public_egress_interface(
+            _read_public_egress_candidates_windows()
+        )
+    except Exception:
+        selected = None
+    ttl = (
+        NETWORK_INTERFACE_CACHE_TTL_SECONDS
+        if selected is not None
+        else NETWORK_INTERFACE_FAILURE_TTL_SECONDS
+    )
+    with _network_interface_cache_lock:
+        _network_interface_cache_value = selected
+        _network_interface_cache_expires_at = time.monotonic() + ttl
+        _network_interface_refreshing = False
+
+
+def _read_public_egress_candidates_windows() -> list[dict[str, Any]]:
+    if os.name != "nt":
+        return []
+    powershell = shutil.which("powershell.exe") or shutil.which("pwsh.exe")
+    if powershell is None:
+        return []
+    script = r"""
+$ErrorActionPreference = 'Stop'
+$OutputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$result = @(
+    Get-NetIPConfiguration -All -ErrorAction Stop | ForEach-Object {
+        $configuration = $_
+        $adapter = $configuration.NetAdapter
+        $gateway = @($configuration.IPv4DefaultGateway | Select-Object -First 1)
+        if ($null -eq $adapter -or $gateway.Count -ne 1) { return }
+        $routes = @(
+            Get-NetRoute -InterfaceIndex $configuration.InterfaceIndex -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
+                Sort-Object RouteMetric
+        )
+        $ipInterface = Get-NetIPInterface -InterfaceIndex $configuration.InterfaceIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue
+        if ($routes.Count -lt 1 -or $null -eq $ipInterface) { return }
+        [pscustomobject]@{
+            interface_alias = [string]$configuration.InterfaceAlias
+            interface_index = [int]$configuration.InterfaceIndex
+            hardware_interface = [bool]$adapter.HardwareInterface
+            virtual = [bool]$adapter.Virtual
+            status = [string]$adapter.Status
+            ipv4_gateway = [string]$gateway[0].NextHop
+            route_metric = [int]$routes[0].RouteMetric
+            interface_metric = [int]$ipInterface.InterfaceMetric
+        }
+    }
+)
+ConvertTo-Json -InputObject @($result) -Depth 4 -Compress
+"""
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        result = subprocess.run(
+            [powershell, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=15.0,
+            creationflags=creationflags,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if result.returncode != 0:
+        return []
+    text = result.stdout.lstrip("\ufeff").strip()
+    if not text:
+        return []
+    payload = json.loads(text)
+    if isinstance(payload, dict):
+        payload = [payload]
+    return [item for item in payload if isinstance(item, dict)] if isinstance(payload, list) else []
 
 
 def _parse_counter_int(value: Any) -> int | None:
