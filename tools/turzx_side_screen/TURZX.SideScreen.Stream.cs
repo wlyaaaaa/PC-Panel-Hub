@@ -20,6 +20,8 @@ namespace TURZX.SideScreen
         private const int DefaultDifferentialSendTimeoutMilliseconds = 900;
         private const int DefaultMaxConsecutiveSendFailures = 1;
         private const int DefaultHybridFullResyncEveryFrames = 900;
+        private const int DefaultHybridWarmupFullResyncEveryFrames = 60;
+        private const int DefaultHybridWarmupFullResyncUntilFrame = 180;
         private const long DefaultMaxMetricsPayloadBytes = 4L * 1024L * 1024L;
         private static int previewWorkerActive;
         private static readonly HttpClient MetricsHttpClient = CreateMetricsHttpClient();
@@ -119,7 +121,8 @@ namespace TURZX.SideScreen
                                 sendWatch = Stopwatch.StartNew();
                                 byte[] currentFrameData = diffSession.Convert(bitmap);
                                 bool hasPreviousFrame = previousFrameData != null;
-                                if (ShouldSendFullFrame(frame, hasPreviousFrame, options.FullResyncEveryFrames))
+                                if (ShouldSendFullFrame(frame, hasPreviousFrame, options.FullResyncEveryFrames) ||
+                                    ShouldSendHybridWarmupFullFrame(frame, options.HybridRefresh, hasPreviousFrame))
                                 {
                                     frameTransport = "full_200";
                                     if (ShouldReopenDiffSessionBeforeFull(options.HybridRefresh, hasPreviousFrame))
@@ -344,6 +347,16 @@ namespace TURZX.SideScreen
             return DefaultHybridFullResyncEveryFrames;
         }
 
+        internal static int DefaultHybridWarmupFullResyncEveryFramesForTest()
+        {
+            return DefaultHybridWarmupFullResyncEveryFrames;
+        }
+
+        internal static int DefaultHybridWarmupFullResyncUntilFrameForTest()
+        {
+            return DefaultHybridWarmupFullResyncUntilFrame;
+        }
+
         internal static bool IsSendTimeoutMillisecondsValidForTest(int timeoutMs)
         {
             return timeoutMs > 0;
@@ -420,6 +433,11 @@ namespace TURZX.SideScreen
         internal static bool ShouldSendFullFrameForTest(int frame, bool hasPreviousFrame, int fullResyncEveryFrames)
         {
             return ShouldSendFullFrame(frame, hasPreviousFrame, fullResyncEveryFrames);
+        }
+
+        internal static bool ShouldSendHybridWarmupFullFrameForTest(int frame, bool hybridRefresh, bool hasPreviousFrame)
+        {
+            return ShouldSendHybridWarmupFullFrame(frame, hybridRefresh, hasPreviousFrame);
         }
 
         internal static int ResolveFullBaselineRepeatCountForTest(bool hybridRefresh, bool hasPreviousFrame)
@@ -658,6 +676,19 @@ namespace TURZX.SideScreen
         private static bool ShouldSendFullFrame(int frame, bool hasPreviousFrame, int fullResyncEveryFrames)
         {
             return !hasPreviousFrame || (fullResyncEveryFrames > 0 && frame > 1 && frame % fullResyncEveryFrames == 0);
+        }
+
+        private static bool ShouldSendHybridWarmupFullFrame(int frame, bool hybridRefresh, bool hasPreviousFrame)
+        {
+            // A restarted host stream can report healthy command-204 writes
+            // while the physical panel never accepted the new session. Retry
+            // a complete baseline during the first three minutes, then return
+            // to uninterrupted 1 Hz deltas until the long-term boundary.
+            return hybridRefresh &&
+                hasPreviousFrame &&
+                frame > 1 &&
+                frame <= DefaultHybridWarmupFullResyncUntilFrame &&
+                frame % DefaultHybridWarmupFullResyncEveryFrames == 0;
         }
 
         private static int ResolveFullBaselineRepeatCount(bool hybridRefresh, bool hasPreviousFrame)
@@ -1262,7 +1293,7 @@ namespace TURZX.SideScreen
         private static void PrintUsage()
         {
             Console.WriteLine("TURZX.SideScreen.Stream.exe [--sample] [--dry-run] [--hybrid-refresh] [--diff --allow-unverified-diff] [--alt-helper] [--frames N] [--interval-ms 3000] [--send-timeout-ms 10000] [--diff-send-timeout-ms 900] [--baseline-brightness 170] [--preview-interval-seconds 45] [--full-resync-every-frames 900] [--max-consecutive-send-failures 1] [--metrics-url URL] [--root TURZX_ROOT] [--port COM7]");
-            Console.WriteLine("frames=0 means infinite. --hybrid-refresh is an explicit 1Hz command-204 candidate with command-200 startup/recovery baselines; default production remains verified command 200 at 3 seconds.");
+            Console.WriteLine("frames=0 means infinite. --hybrid-refresh keeps a 1Hz command-204 cadence with command-200 baselines at startup, frames 60/120/180, and the configured long-term boundary. Launch scripts default to Hybrid; omit the flag only for the explicit 3-second full-frame compatibility fallback.");
         }
 
         private sealed class StreamOptions

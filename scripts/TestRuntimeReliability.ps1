@@ -22,9 +22,11 @@ $testEntry = Get-Content -Raw -LiteralPath (Join-Path $Root "scripts\test.ps1")
 $runtimeCheck = Get-Content -Raw -LiteralPath (Join-Path $Root "scripts\check-runtime.ps1")
 $startEntryPath = Join-Path $Root "scripts\start.ps1"
 $startEntry = Get-Content -Raw -LiteralPath $startEntryPath
+$installerEntry = Get-Content -Raw -LiteralPath (Join-Path $Root "scripts\install-startup-admin.ps1")
 
-# Hybrid refresh is an explicit production mode.  It must not weaken the default
-# command-200 path or turn the legacy -Diff experiment into an implicit default.
+# Hybrid refresh is the installed one-second production mode.  It must remain
+# distinct from the legacy -Diff experiment and keep command 200 as a bounded
+# startup/recovery baseline and explicit compatibility fallback.
 foreach ($entry in @(
     @{ Name = "stack"; Text = $stackStart },
     @{ Name = "watchdog"; Text = $watchdogStart },
@@ -85,7 +87,10 @@ foreach ($pattern in @(
     'public int FullResyncEveryFrames = DefaultHybridFullResyncEveryFrames;',
     'ResolveFullBaselineRepeatCount(options.HybridRefresh, hasPreviousFrame)',
     'ShouldPrimeFullBaseline(options.HybridRefresh, hasPreviousFrame)',
-    'DefaultHybridFullResyncEveryFrames = 900'
+    'DefaultHybridFullResyncEveryFrames = 900',
+    'DefaultHybridWarmupFullResyncEveryFrames = 60',
+    'DefaultHybridWarmupFullResyncUntilFrame = 180',
+    'ShouldSendHybridWarmupFullFrame(frame, options.HybridRefresh, hasPreviousFrame)'
 )) {
     if ($streamSource -notmatch [regex]::Escape($pattern)) {
         throw "Hybrid startup baseline contract is missing: $pattern"
@@ -132,7 +137,13 @@ foreach ($pattern in @(
 if ($stackStart -notmatch [regex]::Escape('[int]$IntervalMs = 3000') -or
     $watchdogStart -notmatch [regex]::Escape('[int]$IntervalMs = 3000') -or
     $streamStart -notmatch [regex]::Escape('[int]$IntervalMs = 3000')) {
-    throw "Default production refresh must remain verified full command 200 at 3000ms."
+    throw "Explicit full-frame compatibility fallback must remain command 200 at 3000ms."
+}
+if ($installerEntry -notmatch [regex]::Escape('[switch]$HybridRefresh = $true')) {
+    throw "Installed production task must default to one-second HybridRefresh."
+}
+if ($startEntry -notmatch [regex]::Escape('[switch]$HybridRefresh = $true')) {
+    throw "Manual production start must default to one-second HybridRefresh."
 }
 
 foreach ($pattern in @(

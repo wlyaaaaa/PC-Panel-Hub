@@ -54,8 +54,13 @@ PC Panel Hub is intentionally split into small local processes:
 - Main metrics sampling target: `1000ms`. Sources that are too expensive or inherently
   slower (notably top-process ranking and some TimeAudit data) keep their own `3s` cadence.
 - Hybrid rendering is forced to `1000ms`; typical command-204 host writes are tens of
-  milliseconds and have a dedicated `900ms` bound. Verified full-frame fallback remains
-  `3000ms`, leaving COM7 idle headroom after the measured ~2.3s send.
+  milliseconds and have a dedicated `900ms` bound. This is the installed **1 Hz**
+  default. The verified command-200-only path remains an explicit **3-second compatibility fallback**,
+  leaving COM7 idle headroom after the measured ~2.3s send.
+- After every process/watchdog start, frames **60, 120, and 180** rebuild the serial
+  session and send one verified full baseline. These bounded warmup corrections target
+  a physical panel that missed a new host session without degrading steady cadence;
+  the long-term hard baseline remains every 900 frames.
 - A full-frame send has a `10000ms` bound. The first timeout or send failure exits the
   worker so the watchdog can reopen the process and COM port instead of leaving a hung
   sender alive for minutes.

@@ -23,28 +23,21 @@ foreach ($relative in $defaultFiles) {
     $path = Join-Path $Root $relative
     $text = Get-Content -Raw -LiteralPath $path
     if ($text -notmatch [regex]::Escape('[int]$IntervalMs = 3000')) {
-        throw "Verified full-frame panel refresh default should be 3000ms in $relative"
+        throw "The explicit full-frame compatibility fallback should remain 3000ms in $relative"
     }
 }
 
-# The panel has repeatedly entered a silent physical freeze while the host-side
-# command-204 heartbeat remained healthy.  Production entry points therefore
-# default to the verified command-200 transport; HybridRefresh stays available
-# only as an explicit diagnostic opt-in.
-$productionEntryFiles = @(
-    "scripts\start.ps1",
-    "scripts\install-startup-admin.ps1"
-)
-
-foreach ($relative in $productionEntryFiles) {
-    $path = Join-Path $Root $relative
-    $text = Get-Content -Raw -LiteralPath $path
-    if ($text -match [regex]::Escape('[switch]$HybridRefresh = $true')) {
-        throw "Production entry must default HybridRefresh to false: $relative"
-    }
-    if ($text -notmatch [regex]::Escape('[switch]$HybridRefresh')) {
-        throw "Production entry must retain HybridRefresh as an explicit opt-in: $relative"
-    }
+# The installed task must preserve the user's one-second panel contract.  The
+# ordinary start entry also defaults to one second when no task exists; when a
+# task exists, an omitted switch still adopts the registered task action.
+$startText = Get-Content -Raw -LiteralPath (Join-Path $Root "scripts\start.ps1")
+if ($startText -notmatch [regex]::Escape('[switch]$HybridRefresh = $true') -or
+    $startText -notmatch [regex]::Escape('$PSBoundParameters.ContainsKey("HybridRefresh")')) {
+    throw "Start entry must default to one-second HybridRefresh while retaining registered-task mode adoption."
+}
+$installerText = Get-Content -Raw -LiteralPath (Join-Path $Root "scripts\install-startup-admin.ps1")
+if ($installerText -notmatch [regex]::Escape('[switch]$HybridRefresh = $true')) {
+    throw "Installed production task must default to one-second HybridRefresh."
 }
 
 # The aggregate test runner must recognize every production transport before
@@ -98,7 +91,7 @@ foreach ($relative in $hiddenLaunchers) {
     $path = Join-Path $Root $relative
     $text = Get-Content -Raw -LiteralPath $path
     if ($text -notmatch [regex]::Escape('intervalMs = "3000"')) {
-        throw "Hidden launcher must preserve the safe 3000ms full-frame interval: $relative"
+        throw "Hidden launcher must preserve the explicit 3000ms full-frame fallback interval: $relative"
     }
     foreach ($pattern in @(
         'hybridRefresh = False',
@@ -107,7 +100,7 @@ foreach ($relative in $hiddenLaunchers) {
         'Case "-noalthelper"'
     )) {
         if ($text -notmatch [regex]::Escape($pattern)) {
-            throw "Hidden launcher must preserve and explicitly propagate safe false modes; missing '$pattern' in $relative"
+            throw "Hidden launcher must preserve and explicitly propagate false mode overrides; missing '$pattern' in $relative"
         }
     }
 }
@@ -125,7 +118,7 @@ foreach ($pattern in @(
 $resumeText = Get-Content -Raw -LiteralPath (Join-Path $Root "tools\turzx_side_screen\RestartSideScreenAfterResume.ps1")
 if ($resumeText -notmatch [regex]::Escape('[switch]$HybridRefresh,') -or
     $resumeText -match [regex]::Escape('[switch]$HybridRefresh = $true')) {
-    throw "Resume PowerShell worker must default HybridRefresh to false so the hidden launcher's safe false mode survives downstream."
+    throw "Resume PowerShell worker must retain an explicit false override so the task action remains the mode owner."
 }
 
 $explicitEntries = @(
@@ -140,17 +133,24 @@ foreach ($relative in $explicitEntries) {
     $path = Join-Path $Root $relative
     $text = Get-Content -Raw -LiteralPath $path
     if ($text -match [regex]::Escape("-IntervalMs 500") -or
-        $text -match [regex]::Escape("-IntervalMs 1000") -or
         $text -match [regex]::Escape("0.5s updates") -or
-        $text -match [regex]::Escape('Default refresh: `500ms`') -or
-        $text -match [regex]::Escape('Default refresh: `1000ms`')) {
-        throw "Public entry or docs still advertise an unsafe saturated panel refresh: $relative"
+        $text -match [regex]::Escape('Default refresh: `500ms`')) {
+        throw "Public entry or docs still advertise an unsupported sub-second panel refresh: $relative"
+    }
+}
+
+foreach ($relative in @("README.md", "docs\startup.md", "docs\architecture.md")) {
+    $text = Get-Content -Raw -LiteralPath (Join-Path $Root $relative)
+    foreach ($pattern in @("1 Hz", "3-second compatibility fallback", "60, 120, and 180")) {
+        if ($text -notmatch [regex]::Escape($pattern)) {
+            throw "One-second installed mode contract missing '$pattern' in $relative"
+        }
     }
 }
 
 $config = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $Root "tools\turzx_side_screen\config.json") | ConvertFrom-Json
 if ([int]$config.screen.dataRefreshMs -ne 1000 -or [int]$config.metrics.pollMs -ne 1000) {
-    throw "Metrics sampling must remain 1000ms even though verified panel transfers are paced at 3000ms."
+    throw "Metrics sampling and the installed Hybrid panel cadence must remain 1000ms."
 }
 if ([int]$config.ui.maxDiskRows -ne 4) {
     throw "Runtime config must cap the physical-disk UI at four rows."

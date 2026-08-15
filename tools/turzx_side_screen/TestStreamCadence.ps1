@@ -42,7 +42,7 @@ public static class TestStreamCadenceProgram
         Equal("sleep keeps one-second start cadence", 980, SideScreenStreamApp.ComputeSleepMillisecondsForTest(1000, 1000, 1020, 1000));
         Equal("sleep clamps overruns", 0, SideScreenStreamApp.ComputeSleepMillisecondsForTest(1000, 1000, 2050, 1000));
         Equal("zero interval does not sleep", 0, SideScreenStreamApp.ComputeSleepMillisecondsForTest(1000, 0, 1001, 1000));
-        Equal("default production refresh remains three seconds", 3000,
+        Equal("explicit full-frame compatibility fallback remains three seconds", 3000,
             SideScreenStreamApp.ResolveRefreshIntervalMillisecondsForTest(false, 3000));
         Equal("explicit hybrid refresh owns a one-second clock cadence", 1000,
             SideScreenStreamApp.ResolveRefreshIntervalMillisecondsForTest(true, 3000));
@@ -114,6 +114,24 @@ public static class TestStreamCadenceProgram
             SideScreenStreamApp.ShouldSendFullFrameForTest(1, false, 0));
         Equal("hybrid production schedules a host-side recovery attempt every fifteen minutes", 900,
             SideScreenStreamApp.DefaultHybridFullResyncEveryFramesForTest());
+        Equal("hybrid startup recovery retries a hard baseline every minute", 60,
+            SideScreenStreamApp.DefaultHybridWarmupFullResyncEveryFramesForTest());
+        Equal("hybrid startup recovery ends after three minutes", 180,
+            SideScreenStreamApp.DefaultHybridWarmupFullResyncUntilFrameForTest());
+        Equal("startup recovery does not interrupt the frame before its first boundary", false,
+            SideScreenStreamApp.ShouldSendHybridWarmupFullFrameForTest(59, true, true));
+        Equal("startup recovery redraws the complete panel at one minute", true,
+            SideScreenStreamApp.ShouldSendHybridWarmupFullFrameForTest(60, true, true));
+        Equal("startup recovery redraws the complete panel at two minutes", true,
+            SideScreenStreamApp.ShouldSendHybridWarmupFullFrameForTest(120, true, true));
+        Equal("startup recovery redraws the complete panel at three minutes", true,
+            SideScreenStreamApp.ShouldSendHybridWarmupFullFrameForTest(180, true, true));
+        Equal("startup recovery stops interrupting one-second cadence after three minutes", false,
+            SideScreenStreamApp.ShouldSendHybridWarmupFullFrameForTest(181, true, true));
+        Equal("startup recovery never adds a second startup baseline", false,
+            SideScreenStreamApp.ShouldSendHybridWarmupFullFrameForTest(1, true, false));
+        Equal("full-frame compatibility fallback never inherits Hybrid warmup baselines", false,
+            SideScreenStreamApp.ShouldSendHybridWarmupFullFrameForTest(60, false, true));
         Equal("frame before the production recovery boundary remains incremental", false,
             SideScreenStreamApp.ShouldSendFullFrameForTest(899, true, 900));
         Equal("production recovery boundary redraws the complete panel", true,
@@ -148,7 +166,7 @@ public static class TestStreamCadenceProgram
             SideScreenStreamApp.IsDifferentialTransportAllowedForTest(true, true, false));
         Equal("live differential transport requires explicit experimental opt-in", true,
             SideScreenStreamApp.IsDifferentialTransportAllowedForTest(true, false, true));
-        Equal("default production heartbeat identifies command 200", "verified_full_200",
+        Equal("explicit full-frame fallback heartbeat identifies command 200", "verified_full_200",
             SideScreenStreamApp.ResolveTransportModeForTest(false, false));
         Equal("explicit hybrid heartbeat identifies command 204 plus command 200 baselines", "hybrid_diff_204_full_200",
             SideScreenStreamApp.ResolveTransportModeForTest(true, false));

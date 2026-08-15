@@ -4,7 +4,7 @@ param(
     [string]$ResumeTaskName = "TURZX SideScreen Resume",
     [string]$Port = "COM7",
     [int]$IntervalMs = 3000,
-    [switch]$HybridRefresh,
+    [switch]$HybridRefresh = $true,
     [switch]$AltHelper,
     [switch]$DoNotDisableOldTasks
 )
