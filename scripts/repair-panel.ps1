@@ -1,0 +1,70 @@
+param(
+    [string]$Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path,
+    [string]$TaskName = "TURZX SideScreen",
+    [string]$Port = "COM7",
+    [ValidateRange(10, 120)][int]$WaitSeconds = 45,
+    [switch]$HybridRefresh = $true
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+
+if (-not $HybridRefresh) {
+    throw "Fast repair is intentionally fixed to the one-second HybridRefresh production mode."
+}
+
+$Root = (Resolve-Path -LiteralPath $Root).Path
+$startPath = Join-Path $Root "scripts\start.ps1"
+$streamOut = Join-Path $Root "tools\turzx_side_screen\out\stream"
+$heartbeatPaths = @(
+    (Join-Path $streamOut "stream-heartbeat-a.json"),
+    (Join-Path $streamOut "stream-heartbeat-b.json"),
+    (Join-Path $streamOut "stream-heartbeat.json")
+)
+
+$serial = @(Get-CimInstance Win32_SerialPort -ErrorAction Stop | Where-Object { [string]$_.DeviceID -ieq $Port })
+if ($serial.Count -ne 1) {
+    throw "Fast repair requires exactly one $Port serial endpoint; found $($serial.Count)."
+}
+$instanceId = [string]$serial[0].PNPDeviceID
+if ($instanceId -notmatch '(?i)^USB\\VID_0525&PID_A4A7\\') {
+    throw "Fast repair refused unexpected $Port identity: $instanceId"
+}
+$device = Get-PnpDevice -InstanceId $instanceId -ErrorAction Stop
+if ($device.Present -ne $true -or [string]$device.Status -ne 'OK' -or [int]$device.ConfigManagerErrorCode -ne 0) {
+    throw "Fast repair requires healthy exact TURZX COM device: present=$($device.Present) status=$($device.Status) problem=$($device.ConfigManagerErrorCode)"
+}
+
+& pwsh.exe -NoProfile -ExecutionPolicy Bypass -File $startPath -Root $Root -TaskName $TaskName -Port $Port -HybridRefresh
+if ($LASTEXITCODE -ne 0) {
+    throw "scripts\start.ps1 failed with exit code $LASTEXITCODE."
+}
+
+$deadline = [datetime]::UtcNow.AddSeconds($WaitSeconds)
+do {
+    Start-Sleep -Milliseconds 500
+    $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    $streams = @(Get-Process -Name 'TURZX.SideScreen.Stream' -ErrorAction SilentlyContinue)
+    $heartbeat = $null
+    foreach ($path in @($heartbeatPaths | Where-Object { Test-Path -LiteralPath $_ } | Sort-Object { (Get-Item -LiteralPath $_).LastWriteTimeUtc } -Descending)) {
+        try {
+            $candidate = Get-Content -Raw -LiteralPath $path | ConvertFrom-Json -ErrorAction Stop
+            $utc = [datetime]::Parse([string]$candidate.utc, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
+            if (([datetime]::UtcNow - $utc.ToUniversalTime()).TotalSeconds -le 5) {
+                $heartbeat = $candidate
+                break
+            }
+        }
+        catch { }
+    }
+    if ($null -ne $task -and [string]$task.State -eq 'Running' -and $streams.Count -eq 1 -and $null -ne $heartbeat -and
+        [string]$heartbeat.status -eq 'ok' -and [string]$heartbeat.transport_mode -eq 'hybrid_diff_204_full_200' -and
+        [bool]$heartbeat.send_attempted -and [int]$heartbeat.frame -ge 2 -and
+        [int]$heartbeat.period_ms -ge 500 -and [int]$heartbeat.period_ms -le 2000) {
+        Write-Host ("repair-panel healthy task={0} streamPid={1} frame={2} period_ms={3} transport={4}" -f `
+            $task.State, $streams[0].Id, $heartbeat.frame, $heartbeat.period_ms, $heartbeat.transport_mode)
+        exit 0
+    }
+} while ([datetime]::UtcNow -lt $deadline)
+
+throw "Fast repair did not reach one-writer fresh 1 Hz Hybrid health within $WaitSeconds seconds."

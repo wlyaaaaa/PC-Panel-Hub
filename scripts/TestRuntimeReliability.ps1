@@ -23,6 +23,8 @@ $runtimeCheck = Get-Content -Raw -LiteralPath (Join-Path $Root "scripts\check-ru
 $startEntryPath = Join-Path $Root "scripts\start.ps1"
 $startEntry = Get-Content -Raw -LiteralPath $startEntryPath
 $installerEntry = Get-Content -Raw -LiteralPath (Join-Path $Root "scripts\install-startup-admin.ps1")
+$fastRepairPath = Join-Path $Root "scripts\repair-panel.ps1"
+$fastRepair = if (Test-Path -LiteralPath $fastRepairPath) { Get-Content -Raw -LiteralPath $fastRepairPath } else { '' }
 
 # Hybrid refresh is the installed one-second production mode.  It must remain
 # distinct from the legacy -Diff experiment and keep command 200 as a bounded
@@ -156,6 +158,78 @@ foreach ($pattern in @(
 }
 if ($startEntry -notmatch 'if\s*\(\s*-not\s+\$modeMatches\s*\)[\s\S]{0,4000}schtasks\.exe\s+/Run') {
     throw "Start entrypoint must branch on task action mode before invoking schtasks /Run."
+}
+
+# A recoverable child/start failure must remain inside the long-lived watchdog.
+# The 2026-08-15 incident froze the panel for hours because the first retry
+# threw out of the main loop and the scheduled task did not relaunch it.
+$restartTokens = $null
+$restartParseErrors = $null
+$restartAst = [System.Management.Automation.Language.Parser]::ParseFile(
+    (Join-Path $side "StartSideScreenWatchdog.ps1"),
+    [ref]$restartTokens,
+    [ref]$restartParseErrors)
+if ($restartParseErrors.Count -gt 0) {
+    throw "Unable to parse watchdog script for contained restart behavior."
+}
+$restartFunction = $restartAst.Find(
+    {
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq "Invoke-TurzxStackRestartAttempt"
+    },
+    $true)
+if ($null -eq $restartFunction) {
+    throw "Watchdog must define Invoke-TurzxStackRestartAttempt."
+}
+. ([scriptblock]::Create($restartFunction.Extent.Text))
+$script:restartAttemptCalls = 0
+function Start-Stack {
+    $script:restartAttemptCalls++
+    if ($script:restartAttemptCalls -eq 1) { throw "synthetic start failure" }
+    return [pscustomobject]@{ Id = 4242; HasExited = $false }
+}
+function Write-WatchdogLog { param([string]$Message) }
+function Start-Sleep { param([int]$Seconds, [int]$Milliseconds) }
+$failedAttempt = Invoke-TurzxStackRestartAttempt -Reason "test-first"
+if ($failedAttempt.Succeeded -or $null -ne $failedAttempt.Child -or $failedAttempt.Error -notmatch "synthetic start failure") {
+    throw "A failed stack restart must return a contained failure receipt without escaping the watchdog."
+}
+$successfulAttempt = Invoke-TurzxStackRestartAttempt -Reason "test-second"
+if (-not $successfulAttempt.Succeeded -or $successfulAttempt.Child.Id -ne 4242) {
+    throw "A later stack restart must recover after the contained failure."
+}
+$mainLoopStart = $watchdogStart.IndexOf('$child = $null', [StringComparison]::Ordinal)
+$mainLoopEnd = $watchdogStart.IndexOf('finally {', $mainLoopStart, [StringComparison]::Ordinal)
+if ($mainLoopStart -lt 0 -or $mainLoopEnd -le $mainLoopStart) {
+    throw "Unable to locate watchdog main loop for restart containment checks."
+}
+$mainLoopText = $watchdogStart.Substring($mainLoopStart, $mainLoopEnd - $mainLoopStart)
+if ($mainLoopText -match '(?m)^\s*\$child\s*=\s*Start-Stack\s+-Reason') {
+    throw "Watchdog main loop must not call Start-Stack without the contained restart adapter."
+}
+foreach ($pattern in @(
+    'if ($null -eq $child)',
+    'Invoke-TurzxStackRestartAttempt',
+    'stack restart deferred'
+)) {
+    if ($watchdogStart -notmatch [regex]::Escape($pattern)) {
+        throw "Watchdog missing unattended restart containment contract: $pattern"
+    }
+}
+
+foreach ($pattern in @(
+    '[switch]$HybridRefresh = $true',
+    'scripts\start.ps1',
+    'Get-ScheduledTask',
+    'TURZX.SideScreen.Stream',
+    'hybrid_diff_204_full_200',
+    'period_ms',
+    'repair-panel healthy'
+)) {
+    if ($fastRepair -notmatch [regex]::Escape($pattern)) {
+        throw "Fast panel repair entrypoint missing exact 1 Hz recovery contract: $pattern"
+    }
 }
 foreach ($pattern in @(
     'StopSideScreenStack.ps1',

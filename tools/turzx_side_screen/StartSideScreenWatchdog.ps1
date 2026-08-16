@@ -165,15 +165,20 @@ function Invoke-TurzxFailureCircuitBreaker {
     Set-Content -LiteralPath $pausedPath -Value (Get-Date -Format "o") -Encoding ASCII
     Write-WatchdogLog ("failure circuit open reason={0} cooldownSeconds={1}" -f $Reason, $FailureCircuitBreakerSeconds)
     try {
-        Stop-Stack -Reason ("failure-circuit/{0}" -f $Reason)
+        try {
+            Stop-Stack -Reason ("failure-circuit/{0}" -f $Reason)
+        }
+        catch {
+            Write-WatchdogLog ("failure circuit stop proof deferred reason={0} type={1} error={2}" -f `
+                $Reason, $_.Exception.GetType().FullName, $_.Exception.Message)
+        }
         Start-Sleep -Seconds $FailureCircuitBreakerSeconds
     }
     finally {
         Remove-Item -LiteralPath $pausedPath -Force -ErrorAction SilentlyContinue
     }
     Write-WatchdogLog ("failure circuit closed reason={0}; retrying stack" -f $Reason)
-    $newChild = Start-Stack -Reason ("failure-circuit/{0}" -f $Reason)
-    return $newChild
+    return Invoke-TurzxStackRestartAttempt -Reason ("failure-circuit/{0}" -f $Reason)
 }
 
 function Set-TurzxPanelBrightness {
@@ -1009,6 +1014,38 @@ function Start-Stack {
     return $process
 }
 
+function Invoke-TurzxStackRestartAttempt {
+    param(
+        [Parameter(Mandatory = $true)][string]$Reason,
+        [ValidateRange(0, 300)][int]$DelaySeconds = 0
+    )
+
+    if ($DelaySeconds -gt 0) {
+        Start-Sleep -Seconds $DelaySeconds
+    }
+    try {
+        $newChild = Start-Stack -Reason $Reason
+        return [pscustomobject]@{
+            Succeeded = $true
+            Child = $newChild
+            Error = $null
+            ErrorType = $null
+        }
+    }
+    catch {
+        $errorType = $_.Exception.GetType().FullName
+        $errorMessage = $_.Exception.Message
+        Write-WatchdogLog ("stack restart deferred reason={0} type={1} error={2}; watchdog remains active" -f `
+            $Reason, $errorType, $errorMessage)
+        return [pscustomobject]@{
+            Succeeded = $false
+            Child = $null
+            Error = $errorMessage
+            ErrorType = $errorType
+        }
+    }
+}
+
 function Get-StreamHeartbeatHealth {
     $candidates = @(
         $heartbeatPaths |
@@ -1256,7 +1293,9 @@ try {
     Set-ActiveDisplayState -Reason "watchdog-start"
     Invoke-HS2OverlayHealthCheck
     Invoke-HS2ExclusiveWindowProtection
-    $child = Start-Stack -Reason "watchdog-start"
+    $initialAttempt = Invoke-TurzxStackRestartAttempt -Reason "watchdog-start"
+    $child = $initialAttempt.Child
+    if (-not $initialAttempt.Succeeded) { $consecutiveFailures = 1 }
     $childStartedUtc = [DateTime]::UtcNow
     while ($true) {
         $event = $null
@@ -1299,10 +1338,20 @@ try {
                             $script:hs2LastResumeHandledUtc = $resumeNowUtc
                             $consecutiveFailures = 0
                             Remove-Item -LiteralPath $pausedPath -Force -ErrorAction SilentlyContinue
-                            Stop-Stack -Reason "resume"
+                            try {
+                                Stop-Stack -Reason "resume"
+                            }
+                            catch {
+                                Write-WatchdogLog ("resume stop proof deferred type={0} error={1}; watchdog remains active" -f `
+                                    $_.Exception.GetType().FullName, $_.Exception.Message)
+                                $child = $null
+                                continue
+                            }
                             Start-Sleep -Seconds $ResumeDelaySeconds
                             Set-ActiveDisplayState -Reason ("resume-event-{0}" -f $eventType)
-                            $child = Start-Stack -Reason ("resume-event-{0}" -f $eventType)
+                            $resumeAttempt = Invoke-TurzxStackRestartAttempt -Reason ("resume-event-{0}" -f $eventType)
+                            $child = $resumeAttempt.Child
+                            if (-not $resumeAttempt.Succeeded) { $consecutiveFailures++ }
                             $childStartedUtc = [DateTime]::UtcNow
                             $heartbeatFailures = 0
                         }
@@ -1327,6 +1376,10 @@ try {
                     Write-WatchdogLog ("ignored event source={0}" -f $event.SourceIdentifier)
                 }
             }
+            catch {
+                Write-WatchdogLog ("power event handling deferred type={0} error={1}; watchdog remains active" -f `
+                    $_.Exception.GetType().FullName, $_.Exception.Message)
+            }
             finally {
                 Remove-Event -EventIdentifier $event.EventIdentifier -ErrorAction SilentlyContinue
             }
@@ -1336,7 +1389,9 @@ try {
             Write-WatchdogLog "restart request detected; recycling stack through active watchdog"
             $consecutiveFailures = 0
             $heartbeatFailures = 0
-            $child = Start-Stack -Reason "restart-request"
+            $restartAttempt = Invoke-TurzxStackRestartAttempt -Reason "restart-request"
+            $child = $restartAttempt.Child
+            if (-not $restartAttempt.Succeeded) { $consecutiveFailures++ }
             $childStartedUtc = [DateTime]::UtcNow
             continue
         }
@@ -1345,22 +1400,38 @@ try {
         Invoke-HS2OverlayHealthCheck
         Invoke-HS2ExclusiveWindowProtection
 
-        if ($child -and $child.HasExited) {
+        if ($null -eq $child) {
+            $consecutiveFailures++
+            Write-WatchdogLog ("stack child unavailable; consecutiveFailures={0}; retry remains inside watchdog" -f $consecutiveFailures)
+            if ($consecutiveFailures -ge $MaxConsecutiveFailures) {
+                $missingChildAttempt = Invoke-TurzxFailureCircuitBreaker -Reason "child-unavailable"
+                $consecutiveFailures = 0
+            }
+            else {
+                $missingChildAttempt = Invoke-TurzxStackRestartAttempt -Reason "child-unavailable" -DelaySeconds 3
+            }
+            $child = $missingChildAttempt.Child
+            $childStartedUtc = [DateTime]::UtcNow
+            $heartbeatFailures = 0
+            continue
+        }
+        if ($child.HasExited) {
             $consecutiveFailures++
             Write-WatchdogLog ("stack child exited code={0}; consecutiveFailures={1}" -f $child.ExitCode, $consecutiveFailures)
             if ($consecutiveFailures -ge $MaxConsecutiveFailures) {
-                $child = Invoke-TurzxFailureCircuitBreaker -Reason "child-exit"
+                $childExitAttempt = Invoke-TurzxFailureCircuitBreaker -Reason "child-exit"
+                $child = $childExitAttempt.Child
                 $childStartedUtc = [DateTime]::UtcNow
                 $consecutiveFailures = 0
                 $heartbeatFailures = 0
                 continue
             }
-            Start-Sleep -Seconds 3
-            $child = Start-Stack -Reason "child-exit"
+            $childExitAttempt = Invoke-TurzxStackRestartAttempt -Reason "child-exit" -DelaySeconds 3
+            $child = $childExitAttempt.Child
             $childStartedUtc = [DateTime]::UtcNow
             $heartbeatFailures = 0
         }
-        elseif ($child -and (([DateTime]::UtcNow - $childStartedUtc).TotalSeconds -ge $HeartbeatStartupGraceSeconds)) {
+        elseif (([DateTime]::UtcNow - $childStartedUtc).TotalSeconds -ge $HeartbeatStartupGraceSeconds) {
             $heartbeatHealth = Get-StreamHeartbeatHealth
             if ($heartbeatHealth.Healthy) {
                 if ($heartbeatFailures -gt 0) {
@@ -1375,15 +1446,15 @@ try {
                 if ($heartbeatFailures -ge $MaxConsecutiveHeartbeatFailures) {
                     $consecutiveFailures++
                     if ($consecutiveFailures -ge $MaxConsecutiveFailures) {
-                        $child = Invoke-TurzxFailureCircuitBreaker -Reason "heartbeat-stalls"
+                        $heartbeatAttempt = Invoke-TurzxFailureCircuitBreaker -Reason "heartbeat-stalls"
+                        $child = $heartbeatAttempt.Child
                         $childStartedUtc = [DateTime]::UtcNow
                         $consecutiveFailures = 0
                         $heartbeatFailures = 0
                         continue
                     }
-                    Stop-Stack -Reason "heartbeat-unhealthy"
-                    Start-Sleep -Seconds 3
-                    $child = Start-Stack -Reason "heartbeat-unhealthy"
+                    $heartbeatAttempt = Invoke-TurzxStackRestartAttempt -Reason "heartbeat-unhealthy" -DelaySeconds 3
+                    $child = $heartbeatAttempt.Child
                     $childStartedUtc = [DateTime]::UtcNow
                     $heartbeatFailures = 0
                 }
@@ -1398,7 +1469,13 @@ finally {
         Get-Event -SourceIdentifier $eventSourceId -ErrorAction SilentlyContinue |
             Remove-Event -ErrorAction SilentlyContinue
     }
-    Stop-Stack -Reason "watchdog-exit"
+    try {
+        Stop-Stack -Reason "watchdog-exit"
+    }
+    catch {
+        Write-WatchdogLog ("watchdog exit stop proof failed type={0} error={1}" -f `
+            $_.Exception.GetType().FullName, $_.Exception.Message)
+    }
     try {
         if ((Get-Content -Raw -LiteralPath $watchdogPidPath -ErrorAction Stop).Trim() -eq [string]$PID) {
             Remove-Item -LiteralPath $watchdogPidPath -Force -ErrorAction SilentlyContinue

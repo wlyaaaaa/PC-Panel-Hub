@@ -149,7 +149,19 @@ and leaving the panel frozen. The scheduled task retains a long restart budget
 for an actual worker fault. Sleep and shutdown still execute the HS2 power policy
 even if old-stream exit proof or the TURZX brightness fallback fails; normal
 startup remains fail-closed and will not create a second COM writer until the old
-one is gone.
+one is gone. A failed restart attempt is returned to the long-lived watchdog as a
+contained receipt; it cannot unwind the owner loop and strand the task in Ready.
+
+For a frozen panel or an unexpectedly stopped task, run the bounded repair entry:
+
+```powershell
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\repair-panel.ps1
+```
+
+It verifies that `COM7` is still the one present and healthy
+`VID_0525&PID_A4A7` device, starts the registered one-hertz Hybrid mode, and
+returns only after exactly one stream process and a fresh Hybrid heartbeat are
+observed.
 
 Install:
 
