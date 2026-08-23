@@ -199,7 +199,9 @@ $successfulAttempt = Invoke-TurzxStackRestartAttempt -Reason "test-second"
 if (-not $successfulAttempt.Succeeded -or $successfulAttempt.Child.Id -ne 4242) {
     throw "A later stack restart must recover after the contained failure."
 }
-$mainLoopStart = $watchdogStart.IndexOf('$child = $null', [StringComparison]::Ordinal)
+$mainLoopStart = $watchdogStart.IndexOf(
+    '$child = Set-TurzxChildHeartbeatStartupWindow -Child $null',
+    [StringComparison]::Ordinal)
 $mainLoopEnd = $watchdogStart.IndexOf('finally {', $mainLoopStart, [StringComparison]::Ordinal)
 if ($mainLoopStart -lt 0 -or $mainLoopEnd -le $mainLoopStart) {
     throw "Unable to locate watchdog main loop for restart containment checks."
@@ -218,6 +220,198 @@ foreach ($pattern in @(
     }
 }
 
+# A stalled local CIM provider previously left the watchdog blocked inside
+# pre-start for minutes.  Both the process enumeration and the watchdog's
+# child StopSideScreenStack invocation must now have independently testable
+# bounds, so an unavailable provider cannot turn into an unbounded restart.
+$stopTokens = $null
+$stopParseErrors = $null
+$stopAst = [System.Management.Automation.Language.Parser]::ParseFile(
+    (Join-Path $side "StopSideScreenStack.ps1"),
+    [ref]$stopTokens,
+    [ref]$stopParseErrors)
+if ($stopParseErrors.Count -gt 0) {
+    throw "Unable to parse StopSideScreenStack.ps1 for bounded recovery behavior."
+}
+$processSnapshotFunction = $stopAst.Find(
+    {
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq "Get-TurzxProcessSnapshot"
+    },
+    $true)
+if ($null -eq $processSnapshotFunction) {
+    throw "StopSideScreenStack must define Get-TurzxProcessSnapshot."
+}
+if ($processSnapshotFunction.Extent.Text -notmatch [regex]::Escape('-OperationTimeoutSec $TimeoutSeconds')) {
+    throw "StopSideScreenStack must pass its bounded timeout to Get-CimInstance."
+}
+& {
+    $script:capturedCimTimeoutSeconds = $null
+    function Write-StopLog { param([string]$Message) }
+    function Get-CimInstance {
+        [CmdletBinding()]
+        param(
+            [string]$ClassName,
+            [uint32]$OperationTimeoutSec
+        )
+        $script:capturedCimTimeoutSeconds = $OperationTimeoutSec
+        throw "synthetic CIM provider timeout"
+    }
+
+    . ([scriptblock]::Create($processSnapshotFunction.Extent.Text))
+    $snapshot = @(Get-TurzxProcessSnapshot -TimeoutSeconds 7)
+    if ($snapshot.Count -ne 0 -or $script:capturedCimTimeoutSeconds -ne 7) {
+        throw "A failed bounded process snapshot must fall back to an empty safe snapshot."
+    }
+}
+
+$watchdogStopFunction = $restartAst.Find(
+    {
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq "Stop-Stack"
+    },
+    $true)
+if ($null -eq $watchdogStopFunction) {
+    throw "Watchdog must define Stop-Stack."
+}
+foreach ($pattern in @(
+    '[int]$StopStackTimeoutSeconds',
+    'WaitForExit',
+    'Stop-Process',
+    '$script:turzxStackChild',
+    'StopSideScreenStack exceeded strict total timeout'
+)) {
+    if ($watchdogStart -notmatch [regex]::Escape($pattern)) {
+        throw "Watchdog Stop-Stack missing strict total timeout contract: $pattern"
+    }
+}
+& {
+    $script:stopWaitMilliseconds = $null
+    $script:forcedStopIds = @()
+    $fakeStopProcess = [pscustomobject]@{
+        Id = 7171
+        HasExited = $false
+        ExitCode = -1
+    }
+    $fakeStopProcess | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value {
+        param([int]$Milliseconds)
+        $script:stopWaitMilliseconds = $Milliseconds
+        return $false
+    }
+    function Write-WatchdogLog { param([string]$Message) }
+    function Start-Process {
+        [CmdletBinding()]
+        param(
+            [string]$FilePath,
+            [object]$ArgumentList,
+            [object]$WindowStyle,
+            [switch]$PassThru
+        )
+        return $fakeStopProcess
+    }
+    function Stop-Process {
+        [CmdletBinding()]
+        param([int]$Id, [switch]$Force)
+        $script:forcedStopIds += $Id
+    }
+
+    $Root = 'C:\synthetic-turzx'
+    $stopScript = 'C:\synthetic-turzx\StopSideScreenStack.ps1'
+    $StopProcessSnapshotTimeoutSeconds = 7
+    $StopStackTimeoutSeconds = 9
+    $script:turzxStackChild = [pscustomobject]@{ Id = 4242; HasExited = $false }
+    . ([scriptblock]::Create($watchdogStopFunction.Extent.Text))
+    $timeoutError = $null
+    try {
+        Stop-Stack -Reason 'synthetic-timeout'
+    }
+    catch {
+        $timeoutError = $_.Exception.Message
+    }
+    if ($script:stopWaitMilliseconds -ne 9000 -or
+        $script:forcedStopIds -notcontains 4242 -or
+        $script:forcedStopIds -notcontains 7171 -or
+        $timeoutError -notmatch 'strict total timeout') {
+        throw "Watchdog must stop the tracked child and force-stop a stalled StopSideScreenStack child at its strict total deadline."
+    }
+}
+
+# A freshly launched child has one monotonic window to produce its first
+# heartbeat.  If no heartbeat ever appears, take the circuit path directly
+# instead of clearing the slots repeatedly through rapid ordinary retries.
+$monotonicClockFunction = $restartAst.Find(
+    {
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq "Get-TurzxMonotonicMilliseconds"
+    },
+    $true)
+$startupWindowFunction = $restartAst.Find(
+    {
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq "Set-TurzxChildHeartbeatStartupWindow"
+    },
+    $true)
+$startupDeadlineFunction = $restartAst.Find(
+    {
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq "Test-TurzxChildHeartbeatStartupDeadline"
+    },
+    $true)
+if ($null -eq $monotonicClockFunction -or
+    $null -eq $startupWindowFunction -or
+    $null -eq $startupDeadlineFunction) {
+    throw "Watchdog must define the monotonic startup-heartbeat deadline helpers."
+}
+& {
+    # This script is exercised by both powershell.exe 5.1 and pwsh.exe 7.
+    # Executing the real helper here prevents a PS7-only clock API from being
+    # deployed into the Windows PowerShell scheduled-task owner again.
+    . ([scriptblock]::Create($monotonicClockFunction.Extent.Text))
+    $firstMonotonicMilliseconds = Get-TurzxMonotonicMilliseconds
+    Start-Sleep -Milliseconds 2
+    $secondMonotonicMilliseconds = Get-TurzxMonotonicMilliseconds
+    if ($firstMonotonicMilliseconds -isnot [int64] -or
+        $secondMonotonicMilliseconds -lt $firstMonotonicMilliseconds) {
+        throw "Monotonic clock must execute and advance safely on the current PowerShell runtime."
+    }
+}
+& {
+    $script:syntheticMonotonicMilliseconds = 1000
+    function Get-TurzxMonotonicMilliseconds {
+        return $script:syntheticMonotonicMilliseconds
+    }
+
+    $HeartbeatStartupGraceSeconds = 60
+    . ([scriptblock]::Create($startupWindowFunction.Extent.Text))
+    . ([scriptblock]::Create($startupDeadlineFunction.Extent.Text))
+    Set-TurzxChildHeartbeatStartupWindow -Child ([pscustomobject]@{ Id = 4242 }) | Out-Null
+    if ($script:childHeartbeatStartupDeadlineMilliseconds -ne 61000) {
+        throw "Startup heartbeat deadline must be based on a monotonic clock."
+    }
+    $script:syntheticMonotonicMilliseconds = 60999
+    if (Test-TurzxChildHeartbeatStartupDeadline) {
+        throw "Startup heartbeat deadline fired before the monotonic grace window elapsed."
+    }
+    $script:syntheticMonotonicMilliseconds = 61000
+    if (-not (Test-TurzxChildHeartbeatStartupDeadline)) {
+        throw "Startup heartbeat deadline did not fire when the monotonic grace window elapsed."
+    }
+}
+foreach ($pattern in @(
+    'Test-TurzxChildHeartbeatStartupDeadline',
+    'heartbeat-missing-startup',
+    'Invoke-TurzxFailureCircuitBreaker'
+)) {
+    if ($watchdogStart -notmatch [regex]::Escape($pattern)) {
+        throw "Watchdog main loop missing startup heartbeat convergence contract: $pattern"
+    }
+}
+
 foreach ($pattern in @(
     '[switch]$HybridRefresh = $true',
     'scripts\start.ps1',
@@ -230,6 +424,30 @@ foreach ($pattern in @(
     if ($fastRepair -notmatch [regex]::Escape($pattern)) {
         throw "Fast panel repair entrypoint missing exact 1 Hz recovery contract: $pattern"
     }
+}
+foreach ($pattern in @(
+    '[int]$WaitSeconds = 120',
+    'side-screen-watchdog.pid',
+    'side-screen-stack-child.pid',
+    'restart-on-start.flag',
+    'StartSideScreenWatchdog-Hidden.vbs',
+    '$liveWatchdogOwner',
+    '$repairRequestedUtc',
+    '$priorStackChildPid',
+    '$postRepairStackOwner',
+    '$restartRequestAcknowledged',
+    '$utc.ToUniversalTime() -gt $repairRequestedUtc',
+    'Requested in-place stack recycle from live watchdog',
+    'HS2/display ownership preserved'
+)) {
+    if ($fastRepair -notmatch [regex]::Escape($pattern)) {
+        throw "Fast panel repair must prefer the live watchdog owner without disturbing HS2: $pattern"
+    }
+}
+$liveRecycleIndex = $fastRepair.IndexOf('if ($liveWatchdogOwner)', [StringComparison]::Ordinal)
+$fullRestartIndex = $fastRepair.IndexOf('& pwsh.exe', [StringComparison]::OrdinalIgnoreCase)
+if ($liveRecycleIndex -lt 0 -or $fullRestartIndex -le $liveRecycleIndex) {
+    throw "Fast panel repair must try the in-place watchdog recycle before a full watchdog restart."
 }
 foreach ($pattern in @(
     'StopSideScreenStack.ps1',

@@ -2,7 +2,8 @@ param(
     [string]$Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path,
     [switch]$IncludeWatchdog,
     [switch]$SkipStackEntrypoint,
-    [switch]$Quiet
+    [switch]$Quiet,
+    [ValidateRange(1, 30)][int]$ProcessSnapshotTimeoutSeconds = 8
 )
 
 Set-StrictMode -Version Latest
@@ -21,6 +22,22 @@ function Write-StopLog {
     Add-Content -LiteralPath $logPath -Value $line -Encoding UTF8
     if (-not $Quiet) {
         Write-Host $line
+    }
+}
+
+function Get-TurzxProcessSnapshot {
+    param([ValidateRange(1, 30)][int]$TimeoutSeconds)
+
+    try {
+        return @(Get-CimInstance -ClassName Win32_Process -OperationTimeoutSec $TimeoutSeconds -ErrorAction Stop)
+    }
+    catch {
+        # A local CIM provider can stall while a device/driver is unhealthy.
+        # The caller still runs the name-bound stream stop and proof path, but
+        # skips command-line based helper cleanup instead of blocking forever.
+        Write-StopLog ("process snapshot unavailable timeoutSeconds={0}: {1}" -f `
+                $TimeoutSeconds, $_.Exception.Message)
+        return @()
     }
 }
 
@@ -132,7 +149,7 @@ function Stop-RecordedWatchdogProcess {
 
 $sidePattern = "*" + $side + "*"
 $weatherPattern = "*" + $weather + "*"
-$processSnapshot = @(Get-CimInstance Win32_Process)
+$processSnapshot = @(Get-TurzxProcessSnapshot -TimeoutSeconds $ProcessSnapshotTimeoutSeconds)
 
 if ($IncludeWatchdog) {
     Stop-RecordedWatchdogProcess `
