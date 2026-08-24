@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from collections.abc import Mapping
 from collections import deque
 import csv
 import ctypes
@@ -20,7 +21,7 @@ import subprocess
 import threading
 import time
 from typing import Any, Callable
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import quote, urlencode, urlsplit
 import urllib.request
 import warnings
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -60,7 +61,61 @@ FPS_SAMPLE_FRESH_SECONDS = 10.0
 TOP_PROCESSES_CACHE_TTL_SECONDS = 5.0
 TOP_PROCESSES_HELPER_MAX_AGE_SECONDS = 10.0
 DEFAULT_DISPLAY_TIMEZONE = "Asia/Shanghai"
-TIMEAUDIT_DSN = os.environ.get("TIMEAUDIT_DSN") or None
+DEFAULT_TIMEAUDIT_DB_HOST_PORT = 45432
+LEGACY_TIMEAUDIT_DB_HOST_PORT = 55432
+
+
+def _configured_timeaudit_host_port(environ: Mapping[str, str]) -> int:
+    raw_value = environ.get(
+        "TIMEAUDIT_DB_HOST_PORT",
+        str(DEFAULT_TIMEAUDIT_DB_HOST_PORT),
+    )
+    try:
+        port = int(raw_value)
+    except (TypeError, ValueError):
+        return DEFAULT_TIMEAUDIT_DB_HOST_PORT
+    if not 1 <= port <= 65535:
+        return DEFAULT_TIMEAUDIT_DB_HOST_PORT
+    return port
+
+
+def _configured_timeaudit_dsn(
+    environ: Mapping[str, str] | None = None,
+) -> str | None:
+    source = environ if environ is not None else os.environ
+    explicit = (source.get("TIMEAUDIT_DSN") or "").strip()
+    host_port = _configured_timeaudit_host_port(source)
+
+    if explicit:
+        try:
+            parsed = urlsplit(explicit)
+            local_host = (parsed.hostname or "").lower() in {
+                "127.0.0.1",
+                "localhost",
+                "::1",
+            }
+            if local_host and parsed.port == LEGACY_TIMEAUDIT_DB_HOST_PORT:
+                legacy_suffix = f":{LEGACY_TIMEAUDIT_DB_HOST_PORT}"
+                if parsed.netloc.endswith(legacy_suffix):
+                    migrated_netloc = (
+                        parsed.netloc[: -len(legacy_suffix)] + f":{host_port}"
+                    )
+                    return parsed._replace(netloc=migrated_netloc).geturl()
+        except ValueError:
+            return explicit
+        return explicit
+
+    password = source.get("TIMEAUDIT_DB_PASSWORD")
+    if not password:
+        return None
+    encoded_password = quote(password, safe="")
+    return (
+        f"postgresql://leyang:{encoded_password}"
+        f"@127.0.0.1:{host_port}/time_audit"
+    )
+
+
+TIMEAUDIT_DSN = _configured_timeaudit_dsn()
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
 WEATHER_SHIM_BASE_URL = "http://127.0.0.1:18080"
 TOP_PROCESSES_CACHE_PATH = os.environ.get(

@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path,
     [switch]$AsJson
 )
@@ -37,7 +37,10 @@ function Test-PythonModules {
 }
 
 function Find-Python {
-    $requiresTimeAudit = -not [string]::IsNullOrWhiteSpace($env:TIMEAUDIT_DSN)
+    $requiresTimeAudit = (
+        -not [string]::IsNullOrWhiteSpace($env:TIMEAUDIT_DSN) -or
+        -not [string]::IsNullOrWhiteSpace($env:TIMEAUDIT_DB_PASSWORD)
+    )
     $requiredModules = if ($requiresTimeAudit) { @("psutil", "asyncpg") } else { @() }
     $command = Get-Command python -ErrorAction SilentlyContinue
     $commandPath = if ($command) { $command.Source } else { $null }
@@ -75,7 +78,10 @@ $found = [ordered]@{}
 
 $python = Find-Python
 if ([string]::IsNullOrWhiteSpace($python)) {
-    if ([string]::IsNullOrWhiteSpace($env:TIMEAUDIT_DSN)) {
+    if (
+        [string]::IsNullOrWhiteSpace($env:TIMEAUDIT_DSN) -and
+        [string]::IsNullOrWhiteSpace($env:TIMEAUDIT_DB_PASSWORD)
+    ) {
         $missing.Add("python")
     } else {
         $missing.Add("python with psutil+asyncpg")

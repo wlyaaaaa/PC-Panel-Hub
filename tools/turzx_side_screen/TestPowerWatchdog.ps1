@@ -2223,8 +2223,15 @@ if ($stopText -notmatch [regex]::Escape("SkipStackEntrypoint")) {
     throw "Stop script must support SkipStackEntrypoint for elevated self-cleanup."
 }
 
-$processSnapshotCount = [regex]::Matches($stopText, [regex]::Escape("Get-CimInstance Win32_Process")).Count
-if ($processSnapshotCount -ne 1 -or $stopText -notmatch [regex]::Escape('$processSnapshot')) {
+$processSnapshotQueryCount = [regex]::Matches(
+    $stopText,
+    'Get-CimInstance\s+-ClassName\s+Win32_Process'
+).Count
+$processSnapshotCaptureCount = [regex]::Matches(
+    $stopText,
+    '\$processSnapshot\s*=\s*@\(Get-TurzxProcessSnapshot'
+).Count
+if ($processSnapshotQueryCount -ne 1 -or $processSnapshotCaptureCount -ne 1) {
     throw "Stop script must take one Win32_Process snapshot so watchdog recovery is not delayed by repeated WMI scans."
 }
 

@@ -42,7 +42,7 @@ HS2 的设计、数据来源、配置方法和明确限制见 [docs/hs2-crystal-
 - 建议 Python 3.11 或更高版本。
 - 渲染器和串流程序需要 .NET Framework 编译器 `csc.exe`。
 - 硬件指标建议使用 NVIDIA NVML 和 LibreHardwareMonitor。
-- FPS 来自可选的 TimeAudit/PresentMon 链，通过 `TIMEAUDIT_DSN` 启用，不需要 RTSS 集成；仓库不保存数据库密码。
+- FPS 来自可选的 TimeAudit/PresentMon 链，通过 `TIMEAUDIT_DSN` 或本机 `TIMEAUDIT_DB_PASSWORD` 启用，不需要 RTSS 集成；仓库不保存数据库密码。遗留的本机 `127.0.0.1:55432` DSN 会在内存中迁移到避开 Windows 动态端口池的 `45432`，不会回写秘密。
 - 新鲜但全为零的 FPS 样本表示“等待游戏帧”，不等于采集故障；连接中、陈旧和错误状态会单独显示。
 - DPC 显示值来自 Windows `Processor Information(_Total)\% DPC Time`，不是合成的调度延迟指标。
 - 物理磁盘会按其盘符合并；名称为 `RECOVER` 的卷、虚拟盘、RAM 盘，以及小于 `32,000,000,000` 字节的 USB/可移动介质会被排除。

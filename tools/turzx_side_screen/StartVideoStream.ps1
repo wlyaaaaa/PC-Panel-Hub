@@ -79,7 +79,10 @@ function Test-PythonModules {
 }
 
 function Find-Python {
-    $requiresTimeAudit = -not [string]::IsNullOrWhiteSpace($env:TIMEAUDIT_DSN)
+    $requiresTimeAudit = (
+        -not [string]::IsNullOrWhiteSpace($env:TIMEAUDIT_DSN) -or
+        -not [string]::IsNullOrWhiteSpace($env:TIMEAUDIT_DB_PASSWORD)
+    )
     $requiredModules = if ($requiresTimeAudit) { @("psutil", "asyncpg") } else { @() }
     $command = Get-Command python -ErrorAction SilentlyContinue
     $commandPath = if ($command) { $command.Source } else { $null }
@@ -218,7 +221,10 @@ if (!$Sample -and !$DryRun) {
     if ([string]::IsNullOrWhiteSpace($PythonPath)) {
         $PythonPath = Find-Python
     }
-    $requiredModules = if ([string]::IsNullOrWhiteSpace($env:TIMEAUDIT_DSN)) { @() } else { @("psutil", "asyncpg") }
+    $requiredModules = if (
+        [string]::IsNullOrWhiteSpace($env:TIMEAUDIT_DSN) -and
+        [string]::IsNullOrWhiteSpace($env:TIMEAUDIT_DB_PASSWORD)
+    ) { @() } else { @("psutil", "asyncpg") }
     if (!(Test-PythonModules -Path $PythonPath -Modules $requiredModules)) {
         throw "Selected Python interpreter is missing required runtime modules."
     }

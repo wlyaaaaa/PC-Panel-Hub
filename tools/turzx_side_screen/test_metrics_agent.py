@@ -1631,6 +1631,38 @@ class MetricsAgentTests(unittest.TestCase):
         self.assertGreater(metrics_agent.TIMEAUDIT_CACHE_TTL_SECONDS, 0.0)
         self.assertLess(metrics_agent.TIMEAUDIT_CACHE_TTL_SECONDS, 1.0)
 
+    def test_legacy_local_timeaudit_dsn_moves_to_stable_host_port(self):
+        dsn = metrics_agent._configured_timeaudit_dsn(
+            {
+                "TIMEAUDIT_DSN": (
+                    "postgresql://local:example@127.0.0.1:55432/time_audit"
+                )
+            }
+        )
+
+        self.assertEqual(
+            "postgresql://local:example@127.0.0.1:45432/time_audit",
+            dsn,
+        )
+
+    def test_remote_timeaudit_dsn_is_not_rewritten(self):
+        remote = "postgresql://local:example@db.internal:55432/time_audit"
+
+        self.assertEqual(
+            remote,
+            metrics_agent._configured_timeaudit_dsn({"TIMEAUDIT_DSN": remote}),
+        )
+
+    def test_timeaudit_password_builds_local_dsn_without_persisting_it(self):
+        dsn = metrics_agent._configured_timeaudit_dsn(
+            {"TIMEAUDIT_DB_PASSWORD": "example value"}
+        )
+
+        self.assertEqual(
+            "postgresql://leyang:example%20value@127.0.0.1:45432/time_audit",
+            dsn,
+        )
+
     def test_fps_snapshot_cold_cache_reports_connecting_not_idle(self):
         with patch.object(
             metrics_agent,
