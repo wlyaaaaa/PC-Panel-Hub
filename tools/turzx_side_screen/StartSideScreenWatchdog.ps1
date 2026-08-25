@@ -872,10 +872,20 @@ function Invoke-HS2ExclusiveWindowProtection {
                 [string]$result.SafeMonitorDevice
         }
 
-        $status = "{0}|target={1}|safe={2}" -f `
+        if ([string]$result.OverlayPlacementStatus -ceq "drifted") {
+            # Let the existing display-rebind path recreate every overlay
+            # window from the verified HS2 geometry on the next watchdog
+            # cycle.  Moving only the currently visible HWND would leave
+            # hidden card windows with stale coordinates.
+            $script:hs2OverlayRebindRequired = $true
+        }
+
+        $status = "{0}|target={1}|safe={2}|overlay={3}|visible={4}" -f `
             [string]$result.Status,
             [string]$result.TargetMonitorDevice,
-            [string]$result.SafeMonitorDevice
+            [string]$result.SafeMonitorDevice,
+            [string]$result.OverlayPlacementStatus,
+            [int]$result.OverlayVisibleWindowCount
         if ($status -cne $script:hs2WindowGuardLastStatus) {
             Write-WatchdogLog ("HS2 exclusive-window guard {0}" -f $status)
             $script:hs2WindowGuardLastStatus = $status

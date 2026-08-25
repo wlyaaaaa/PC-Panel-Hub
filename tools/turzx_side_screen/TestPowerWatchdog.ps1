@@ -114,7 +114,9 @@ function New-GuardWindow {
         [string]$ProcessName,
         [string]$ClassName,
         [string]$MonitorDevice,
-        [bool]$Minimized = $false
+        [bool]$Minimized = $false,
+        [bool]$Visible = $true,
+        [bool]$Cloaked = $false
     )
 
     return [pscustomobject]@{
@@ -124,9 +126,9 @@ function New-GuardWindow {
         Title = $ProcessName
         ClassName = $ClassName
         MonitorDevice = $MonitorDevice
-        IsVisible = $true
+        IsVisible = $Visible
         IsMinimized = $Minimized
-        IsCloaked = $false
+        IsCloaked = $Cloaked
         PlacementLeft = 4000
         PlacementTop = -900
         PlacementRight = 5200
@@ -172,7 +174,9 @@ $guardPlan = Get-HS2ExclusiveWindowGuardPlan `
     -OverlayProcessIds @(900)
 if ($guardPlan.Status -cne "active" -or
     $guardPlan.TargetMonitorDevice -cne $hs2Monitor.DeviceName -or
-    $guardPlan.SafeMonitorDevice -cne $primaryMonitor.DeviceName) {
+    $guardPlan.SafeMonitorDevice -cne $primaryMonitor.DeviceName -or
+    $guardPlan.OverlayPlacementStatus -cne "healthy" -or
+    $guardPlan.OverlayVisibleWindowCount -ne 1) {
     throw "HS2 exclusive-window guard failed to identify the overlay and safe monitor."
 }
 if ($guardPlan.Actions.Count -ne 1 -or
@@ -197,9 +201,28 @@ $geometryGuardPlan = Get-HS2ExclusiveWindowGuardPlan `
     -OverlayProcessIds @(900)
 if ($geometryGuardPlan.TargetMonitorDevice -cne $hs2Monitor.DeviceName -or
     $geometryGuardPlan.SafeMonitorDevice -cne $primaryMonitor.DeviceName -or
+    $geometryGuardPlan.OverlayPlacementStatus -cne "drifted" -or
+    $geometryGuardPlan.MisplacedOverlayWindows.Count -ne 1 -or
+    $geometryGuardPlan.MisplacedOverlayWindows[0].Hwnd -ne 6 -or
     $geometryGuardPlan.Actions.Count -ne 1 -or
     $geometryGuardPlan.Actions[0].ProcessId -ne 901) {
-    throw "HS2 geometry must prevent a misplaced overlay window from reversing the guard direction."
+    throw "HS2 geometry must detect a misplaced overlay without reversing the guard direction."
+}
+
+$hiddenMisplacedOverlay = New-GuardWindow `
+    -Hwnd 7 `
+    -ProcessId 900 `
+    -ProcessName "HS2.CrystalOverlay" `
+    -ClassName "Static" `
+    -MonitorDevice $primaryMonitor.DeviceName `
+    -Visible $false
+$hiddenOverlayPlan = Get-HS2ExclusiveWindowGuardPlan `
+    -Monitors @($primaryMonitor, $hs2Monitor) `
+    -Windows @($hiddenMisplacedOverlay, $guardWindows[1]) `
+    -OverlayProcessIds @(900)
+if ($hiddenOverlayPlan.OverlayPlacementStatus -cne "not-visible" -or
+    $hiddenOverlayPlan.MisplacedOverlayWindows.Count -ne 0) {
+    throw "Hidden overlay helper windows must not trigger a display-rebind loop."
 }
 
 $targetOnlyMonitor = $hs2Monitor.PSObject.Copy()
@@ -1905,6 +1928,18 @@ $overlayHealthAst = @(
 )[0]
 if ($overlayHealthAst.Extent.Text -notmatch '(?s)-not\s+\$script:hs2DisplayStateActive.*?Get-HS2OverlayProcess.*?Stop-HS2OverlayForRebind.*?return') {
     throw "An inactive or missing HS2 display must recycle a stale overlay before returning."
+}
+$exclusiveProtectionAst = @(
+    $watchdogAst.FindAll(
+        {
+            param($node)
+            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq "Invoke-HS2ExclusiveWindowProtection"
+        },
+        $true)
+)[0]
+if ($exclusiveProtectionAst.Extent.Text -notmatch '(?s)OverlayPlacementStatus.*?drifted.*?hs2OverlayRebindRequired\s*=\s*\$true') {
+    throw "A live overlay remapped away from HS2 must schedule a full display rebind."
 }
 
 foreach ($pattern in @(

@@ -561,6 +561,9 @@ function Get-HS2ExclusiveWindowGuardPlan {
             Status = "overlay-monitor-unavailable"
             TargetMonitorDevice = $null
             SafeMonitorDevice = $PreferredSafeMonitorDevice
+            OverlayPlacementStatus = "target-unavailable"
+            OverlayVisibleWindowCount = 0
+            MisplacedOverlayWindows = @()
             Actions = @()
         }
     }
@@ -576,8 +579,46 @@ function Get-HS2ExclusiveWindowGuardPlan {
             Status = "overlay-monitor-missing"
             TargetMonitorDevice = $targetDevice
             SafeMonitorDevice = $PreferredSafeMonitorDevice
+            OverlayPlacementStatus = "target-missing"
+            OverlayVisibleWindowCount = 0
+            MisplacedOverlayWindows = @()
             Actions = @()
         }
+    }
+
+    # Windows can silently remap an already-running top-level overlay window
+    # to the primary monitor when the display topology changes.  Process
+    # liveness alone is therefore not proof that the overlay is healthy.  Only
+    # meaningful visible overlay windows participate: hidden helper, IME and
+    # one-pixel staging windows must not cause a recycle loop.
+    $visibleOverlayWindows = @(
+        $overlayWindows |
+            Where-Object {
+                $placementWidth =
+                    [int]$_.PlacementRight - [int]$_.PlacementLeft
+                $placementHeight =
+                    [int]$_.PlacementBottom - [int]$_.PlacementTop
+                [bool]$_.IsVisible -and
+                    -not [bool]$_.IsCloaked -and
+                    $placementWidth -gt 32 -and
+                    $placementHeight -gt 32
+            }
+    )
+    $misplacedOverlayWindows = @(
+        $visibleOverlayWindows |
+            Where-Object {
+                [bool]$_.IsMinimized -or
+                    [string]$_.MonitorDevice -cne $targetDevice
+            }
+    )
+    $overlayPlacementStatus = if ($visibleOverlayWindows.Count -eq 0) {
+        "not-visible"
+    }
+    elseif ($misplacedOverlayWindows.Count -gt 0) {
+        "drifted"
+    }
+    else {
+        "healthy"
     }
 
     $safeMonitor = $null
@@ -693,6 +734,9 @@ function Get-HS2ExclusiveWindowGuardPlan {
         else {
             [string]$safeMonitor.DeviceName
         }
+        OverlayPlacementStatus = $overlayPlacementStatus
+        OverlayVisibleWindowCount = $visibleOverlayWindows.Count
+        MisplacedOverlayWindows = @($misplacedOverlayWindows)
         Actions = $actions.ToArray()
     }
 }
@@ -756,6 +800,9 @@ function Invoke-HS2ExclusiveWindowGuard {
         Status = [string]$plan.Status
         TargetMonitorDevice = $plan.TargetMonitorDevice
         SafeMonitorDevice = $plan.SafeMonitorDevice
+        OverlayPlacementStatus = [string]$plan.OverlayPlacementStatus
+        OverlayVisibleWindowCount = [int]$plan.OverlayVisibleWindowCount
+        MisplacedOverlayWindows = @($plan.MisplacedOverlayWindows)
         PlannedActions = @($plan.Actions)
         AppliedActions = $applied.ToArray()
         FailedActions = $failures.ToArray()
