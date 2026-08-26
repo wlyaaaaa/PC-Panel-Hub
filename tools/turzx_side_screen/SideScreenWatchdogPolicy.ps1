@@ -1,5 +1,55 @@
 Set-StrictMode -Version Latest
 
+function Get-TurzxSerialEndpointRecoveryDecision {
+    [CmdletBinding()]
+    param(
+        [ValidateRange(0, 1000)]
+        [int]$ConsecutiveBrightnessFailures,
+
+        [Parameter(Mandatory)]
+        [DateTime]$LastAttemptUtc,
+
+        [DateTime]$NowUtc = [DateTime]::UtcNow,
+
+        [ValidateRange(2, 20)]
+        [int]$FailureThreshold = 3,
+
+        [ValidateRange(30, 3600)]
+        [int]$RetrySeconds = 300
+    )
+
+    if ($ConsecutiveBrightnessFailures -lt $FailureThreshold) {
+        return [pscustomobject]@{
+            Action = "None"
+            RetryAfterSeconds = 0
+        }
+    }
+
+    if ($LastAttemptUtc -eq [DateTime]::MinValue) {
+        return [pscustomobject]@{
+            Action = "RestartEndpoint"
+            RetryAfterSeconds = 0
+        }
+    }
+
+    $elapsedSeconds = [Math]::Max(
+        0,
+        ($NowUtc.ToUniversalTime() -
+            $LastAttemptUtc.ToUniversalTime()).TotalSeconds)
+    if ($elapsedSeconds -ge $RetrySeconds) {
+        return [pscustomobject]@{
+            Action = "RestartEndpoint"
+            RetryAfterSeconds = 0
+        }
+    }
+
+    return [pscustomobject]@{
+        Action = "Wait"
+        RetryAfterSeconds = [int][Math]::Ceiling(
+            $RetrySeconds - $elapsedSeconds)
+    }
+}
+
 function Get-TurzxShutdownEventDecision {
     [CmdletBinding()]
     param(

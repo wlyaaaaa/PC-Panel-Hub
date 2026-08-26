@@ -25,6 +25,9 @@ param(
     [int]$MaxConsecutiveHeartbeatFailures = 3,
     [int]$MaxConsecutiveFailures = 3,
     [ValidateRange(10, 3600)][int]$FailureCircuitBreakerSeconds = 30,
+    [ValidateRange(2, 20)][int]$TurzxSerialRecoveryFailureThreshold = 3,
+    [ValidateRange(30, 3600)][int]$TurzxSerialRecoveryRetrySeconds = 300,
+    [ValidateRange(5, 60)][int]$TurzxSerialRecoveryWaitSeconds = 20,
     [ValidateRange(5, 3600)][int]$HS2OverlayRetrySeconds = 30,
     [ValidateRange(5, 300)][int]$HS2ActiveRetrySeconds = 15,
     [ValidateRange(30, 3600)][int]$HS2ActiveSlowRetrySeconds = 60,
@@ -97,6 +100,8 @@ $script:hs2WindowGuardLastStatus = $null
 $script:hs2WindowGuardLastFailure = $null
 $script:hs2LastResumeHandledUtc = [DateTime]::MinValue
 $script:turzxStackChild = $null
+$script:turzxBrightnessConsecutiveFailures = 0
+$script:turzxSerialRecoveryLastAttemptUtc = [DateTime]::MinValue
 
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 . $shutdownPolicy
@@ -201,6 +206,138 @@ function Stop-Stack {
     }
 }
 
+function Get-TurzxExactSerialEndpoint {
+    $serial = @(
+        Get-CimInstance Win32_SerialPort -ErrorAction Stop |
+            Where-Object { [string]$_.DeviceID -ieq $Port }
+    )
+    if ($serial.Count -ne 1) {
+        throw "Expected exactly one TURZX serial endpoint on $Port; found $($serial.Count)."
+    }
+
+    $instanceId = [string]$serial[0].PNPDeviceID
+    if ($instanceId -notmatch '(?i)^USB\\VID_0525&PID_A4A7\\') {
+        throw "Refusing unexpected TURZX serial identity on ${Port}: $instanceId"
+    }
+
+    $device = Get-PnpDevice -InstanceId $instanceId -ErrorAction Stop
+    if (-not [bool]$device.Present -or
+        [string]$device.Status -cne "OK" -or
+        [int]$device.ConfigManagerErrorCode -ne 0) {
+        throw (
+            "Exact TURZX serial endpoint is not healthy: " +
+            "present={0} status={1} problem={2}" -f
+                [bool]$device.Present,
+                [string]$device.Status,
+                [int]$device.ConfigManagerErrorCode)
+    }
+
+    return [pscustomobject]@{
+        Port = [string]$serial[0].DeviceID
+        InstanceId = $instanceId
+    }
+}
+
+function Wait-TurzxExactSerialEndpointHealthy {
+    param(
+        [Parameter(Mandatory = $true)][string]$ExpectedInstanceId,
+        [ValidateRange(5, 60)][int]$TimeoutSeconds = 20
+    )
+
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    do {
+        try {
+            $endpoint = Get-TurzxExactSerialEndpoint
+            if ([string]$endpoint.InstanceId -ieq $ExpectedInstanceId) {
+                return $endpoint
+            }
+        }
+        catch {
+            # The exact endpoint may disappear briefly during re-enumeration.
+        }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTime]::UtcNow -lt $deadline)
+
+    return $null
+}
+
+function Invoke-TurzxSerialEndpointRecovery {
+    $nowUtc = [DateTime]::UtcNow
+    $decision = Get-TurzxSerialEndpointRecoveryDecision `
+        -ConsecutiveBrightnessFailures `
+            $script:turzxBrightnessConsecutiveFailures `
+        -LastAttemptUtc $script:turzxSerialRecoveryLastAttemptUtc `
+        -NowUtc $nowUtc `
+        -FailureThreshold $TurzxSerialRecoveryFailureThreshold `
+        -RetrySeconds $TurzxSerialRecoveryRetrySeconds
+    if ($decision.Action -ne "RestartEndpoint") {
+        return [pscustomobject]@{
+            Action = [string]$decision.Action
+            Recovered = $false
+            RetryAfterSeconds = [int]$decision.RetryAfterSeconds
+            Reason = if ($decision.Action -eq "Wait") {
+                "serial-restart-rate-limited"
+            }
+            else {
+                "serial-failure-threshold-not-reached"
+            }
+        }
+    }
+
+    $streamOwners = @(
+        Get-Process "TURZX.SideScreen.Stream*" -ErrorAction SilentlyContinue)
+    if ($streamOwners.Count -ne 0) {
+        Write-WatchdogLog (
+            "TURZX exact serial recovery refused; active stream owners={0}" -f `
+                (@($streamOwners | ForEach-Object Id) -join ","))
+        return [pscustomobject]@{
+            Action = "Blocked"
+            Recovered = $false
+            RetryAfterSeconds = 0
+            Reason = "active-stream-owner"
+        }
+    }
+
+    $script:turzxSerialRecoveryLastAttemptUtc = $nowUtc
+    try {
+        $endpoint = Get-TurzxExactSerialEndpoint
+        $restartOutput = & pnputil.exe `
+            /restart-device `
+            ([string]$endpoint.InstanceId) 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw "pnputil restart failed exitCode=$LASTEXITCODE"
+        }
+
+        $ready = Wait-TurzxExactSerialEndpointHealthy `
+            -ExpectedInstanceId ([string]$endpoint.InstanceId) `
+            -TimeoutSeconds $TurzxSerialRecoveryWaitSeconds
+        if ($null -eq $ready) {
+            throw "exact endpoint did not return before timeout"
+        }
+
+        Write-WatchdogLog (
+            "TURZX exact serial endpoint recovered port={0} identity=VID_0525&PID_A4A7" -f `
+                [string]$ready.Port)
+        return [pscustomobject]@{
+            Action = "RestartEndpoint"
+            Recovered = $true
+            RetryAfterSeconds = 0
+            Reason = "exact-endpoint-restarted"
+        }
+    }
+    catch {
+        Write-WatchdogLog (
+            "TURZX exact serial endpoint recovery failed: {0}" -f `
+                $_.Exception.Message)
+        return [pscustomobject]@{
+            Action = "Failed"
+            Recovered = $false
+            RetryAfterSeconds = $TurzxSerialRecoveryRetrySeconds
+            Reason = $_.Exception.Message
+        }
+    }
+}
+
 function Invoke-TurzxFailureCircuitBreaker {
     param([Parameter(Mandatory = $true)][string]$Reason)
 
@@ -214,7 +351,20 @@ function Invoke-TurzxFailureCircuitBreaker {
             Write-WatchdogLog ("failure circuit stop proof deferred reason={0} type={1} error={2}" -f `
                 $Reason, $_.Exception.GetType().FullName, $_.Exception.Message)
         }
-        Start-Sleep -Seconds $FailureCircuitBreakerSeconds
+        $serialRecovery = Invoke-TurzxSerialEndpointRecovery
+        $cooldownSeconds = if ([bool]$serialRecovery.Recovered) {
+            2
+        }
+        else {
+            $FailureCircuitBreakerSeconds
+        }
+        Write-WatchdogLog (
+            "failure circuit serial recovery action={0} recovered={1} reason={2} cooldownSeconds={3}" -f `
+                [string]$serialRecovery.Action,
+                [bool]$serialRecovery.Recovered,
+                [string]$serialRecovery.Reason,
+                $cooldownSeconds)
+        Start-Sleep -Seconds $cooldownSeconds
     }
     finally {
         Remove-Item -LiteralPath $pausedPath -Force -ErrorAction SilentlyContinue
@@ -238,10 +388,12 @@ function Set-TurzxPanelBrightness {
         if ($LASTEXITCODE -ne 0) {
             throw ($output -join " ")
         }
+        $script:turzxBrightnessConsecutiveFailures = 0
         Write-WatchdogLog ("TURZX brightness applied brightness={0}" -f $Brightness)
         return $true
     }
     catch {
+        $script:turzxBrightnessConsecutiveFailures++
         Write-WatchdogLog ("TURZX brightness failed brightness={0}: {1}" -f $Brightness, $_.Exception.Message)
         return $false
     }
@@ -1361,6 +1513,11 @@ if (-not $NoPowerEvents) {
 }
 Write-WatchdogLog ("display power policy=hs2-preserve-current-mode-then-verified-secondary/turzx-brightness-123 activeBrightness={0} lconnectPort={1}" -f `
     $ActiveBrightness, $LConnectServicePort)
+Write-WatchdogLog (
+    "TURZX exact serial recovery=enabled identity=VID_0525&PID_A4A7 failureThreshold={0} retrySeconds={1} waitSeconds={2}" -f `
+        $TurzxSerialRecoveryFailureThreshold,
+        $TurzxSerialRecoveryRetrySeconds,
+        $TurzxSerialRecoveryWaitSeconds)
 Write-WatchdogLog ("HS2 secondary promotion graceSeconds={0} mode=one-attempt-per-startup-or-resume-epoch" -f `
     $HS2SecondaryPromotionGraceSeconds)
 Write-WatchdogLog ("HS2 overlay watchdog=secondary-verified-only retrySeconds={0}" -f $HS2OverlayRetrySeconds)

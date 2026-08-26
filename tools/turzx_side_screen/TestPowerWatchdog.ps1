@@ -1661,6 +1661,14 @@ foreach ($pattern in @(
     "FailureCircuitBreakerSeconds = 30"
     "failure circuit open"
     "failure circuit closed"
+    "Get-TurzxExactSerialEndpoint"
+    "Wait-TurzxExactSerialEndpointHealthy"
+    "Invoke-TurzxSerialEndpointRecovery"
+    "Get-TurzxSerialEndpointRecoveryDecision"
+    "VID_0525&PID_A4A7"
+    "/restart-device"
+    "turzxBrightnessConsecutiveFailures"
+    "TurzxSerialRecoveryRetrySeconds = 300"
 )) {
     if ($watchdogText -notmatch [regex]::Escape($pattern)) {
         throw "Watchdog missing expected pattern: $pattern"
@@ -1668,6 +1676,9 @@ foreach ($pattern in @(
 }
 if ($watchdogText -match 'watchdog paused') {
     throw "Repeated stream failures must enter a bounded retry circuit instead of permanently pausing the watchdog."
+}
+if ($watchdogText -match [regex]::Escape('/restart-device "USB\ROOT')) {
+    throw "TURZX serial recovery must never restart a USB root hub."
 }
 
 $stopText = Get-Content -Raw -LiteralPath $stop
@@ -1957,6 +1968,46 @@ if ($watchdogText -match [regex]::Escape('Send-Blank -Reason "watchdog-exit"')) 
 . $shutdownPolicy
 $watchdogStartedUtc = [DateTime]::Parse("2026-07-23T02:00:00Z").ToUniversalTime()
 
+$serialRecoveryNow = [DateTime]::Parse(
+    "2026-08-26T05:00:00Z").ToUniversalTime()
+$serialRecoveryBelowThreshold = Get-TurzxSerialEndpointRecoveryDecision `
+    -ConsecutiveBrightnessFailures 2 `
+    -LastAttemptUtc ([DateTime]::MinValue) `
+    -NowUtc $serialRecoveryNow `
+    -FailureThreshold 3 `
+    -RetrySeconds 300
+if ($serialRecoveryBelowThreshold.Action -cne "None") {
+    throw "TURZX must not reset COM7 before repeated open failures are proven."
+}
+$serialRecoveryInitial = Get-TurzxSerialEndpointRecoveryDecision `
+    -ConsecutiveBrightnessFailures 3 `
+    -LastAttemptUtc ([DateTime]::MinValue) `
+    -NowUtc $serialRecoveryNow `
+    -FailureThreshold 3 `
+    -RetrySeconds 300
+if ($serialRecoveryInitial.Action -cne "RestartEndpoint") {
+    throw "TURZX must restart its exact endpoint after repeated open failures."
+}
+$serialRecoveryRateLimited = Get-TurzxSerialEndpointRecoveryDecision `
+    -ConsecutiveBrightnessFailures 4 `
+    -LastAttemptUtc $serialRecoveryNow.AddSeconds(-60) `
+    -NowUtc $serialRecoveryNow `
+    -FailureThreshold 3 `
+    -RetrySeconds 300
+if ($serialRecoveryRateLimited.Action -cne "Wait" -or
+    $serialRecoveryRateLimited.RetryAfterSeconds -ne 240) {
+    throw "TURZX endpoint restart retries must remain rate limited."
+}
+$serialRecoveryRetry = Get-TurzxSerialEndpointRecoveryDecision `
+    -ConsecutiveBrightnessFailures 4 `
+    -LastAttemptUtc $serialRecoveryNow.AddSeconds(-300) `
+    -NowUtc $serialRecoveryNow `
+    -FailureThreshold 3 `
+    -RetrySeconds 300
+if ($serialRecoveryRetry.Action -cne "RestartEndpoint") {
+    throw "TURZX endpoint recovery must retry after its bounded backoff."
+}
+
 $logoffDecision = Get-TurzxShutdownEventDecision `
     -EventType 0 `
     -WatchdogStartedUtc $watchdogStartedUtc `
@@ -2049,6 +2100,13 @@ Assert-OrderAfter `
     -First 'Stop-Stack -Reason ("pre-start/{0}" -f $Reason)' `
     -Second 'Set-TurzxPanelBrightness -Brightness $ActiveBrightness' `
     -Message "Stack startup must restore the configured TURZX brightness after releasing stale COM owners."
+
+Assert-OrderAfter `
+    -Text $watchdogText `
+    -Anchor 'function Invoke-TurzxFailureCircuitBreaker' `
+    -First 'Stop-Stack -Reason ("failure-circuit/{0}" -f $Reason)' `
+    -Second 'Invoke-TurzxSerialEndpointRecovery' `
+    -Message "Exact COM7 recovery must run only after the current stream owner is stopped."
 
 Assert-OrderAfter `
     -Text $watchdogText `
