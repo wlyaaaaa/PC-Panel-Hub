@@ -174,6 +174,7 @@ _network_interface_cache_lock = threading.Lock()
 _network_interface_refreshing = False
 _cpu_history: deque[float] = deque(maxlen=120)
 _gpu_history: deque[float] = deque(maxlen=120)
+_snapshot_build_lock = threading.Lock()
 
 DRIVE_TYPE_NAMES = {
     0: "unknown",
@@ -360,6 +361,14 @@ def empty_snapshot() -> dict[str, Any]:
 
 
 def build_snapshot() -> dict[str, Any]:
+    # ThreadingHTTPServer may dispatch overlapping /snapshot requests. The
+    # collectors below share rate-sampler baselines and history buffers, so a
+    # second build must not advance or rewind that mutable state mid-sample.
+    with _snapshot_build_lock:
+        return _build_snapshot_unlocked()
+
+
+def _build_snapshot_unlocked() -> dict[str, Any]:
     snapshot = empty_snapshot()
     now_dt = dt.datetime.now(dt.timezone.utc)
     now = (

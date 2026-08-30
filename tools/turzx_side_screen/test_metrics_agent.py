@@ -94,6 +94,54 @@ class MetricsAgentTests(unittest.TestCase):
         self.assertIn("score", snapshot["trust"])
         self.assertIn("items", snapshot["trust"])
 
+    def test_build_snapshot_serializes_shared_sampler_state(self):
+        state_lock = threading.Lock()
+        first_entered = threading.Event()
+        release_collectors = threading.Event()
+        state = {"active": 0, "calls": 0, "peak": 0}
+        errors = []
+
+        def blocking_build():
+            with state_lock:
+                state["active"] += 1
+                state["calls"] += 1
+                state["peak"] = max(state["peak"], state["active"])
+                if state["calls"] == 1:
+                    first_entered.set()
+            release_collectors.wait(timeout=1.0)
+            with state_lock:
+                state["active"] -= 1
+            return {}
+
+        def build_in_thread():
+            try:
+                metrics_agent.build_snapshot()
+            except Exception as exc:
+                errors.append(exc)
+
+        with patch.object(
+            metrics_agent,
+            "_build_snapshot_unlocked",
+            side_effect=blocking_build,
+        ):
+            first = threading.Thread(target=build_in_thread)
+            second = threading.Thread(target=build_in_thread)
+            try:
+                first.start()
+                self.assertTrue(first_entered.wait(timeout=1.0))
+                second.start()
+                time.sleep(0.05)
+            finally:
+                release_collectors.set()
+                first.join(timeout=2.0)
+                second.join(timeout=2.0)
+
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertEqual([], errors)
+        self.assertEqual(2, state["calls"])
+        self.assertEqual(1, state["peak"])
+
     def test_data_trust_scores_missing_fallback_sources_lower(self):
         snapshot = metrics_agent.empty_snapshot()
         snapshot["weather"]["source"] = "fallback"
