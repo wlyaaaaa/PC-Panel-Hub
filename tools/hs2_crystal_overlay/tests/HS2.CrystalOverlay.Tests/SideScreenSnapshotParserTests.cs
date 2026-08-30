@@ -7,7 +7,7 @@ public sealed class SideScreenSnapshotParserTests
     private const string Snapshot = """
         {
           "weather": {
-            "city": "淮南·田家庵",
+            "city": "示例城市",
             "condition": "多云",
             "temperature_celsius": 31,
             "high_temperature_celsius": 34,
@@ -62,7 +62,7 @@ public sealed class SideScreenSnapshotParserTests
         Assert.Equal(TimeSpan.FromSeconds(31), hardware.NetworkDownFor);
         Assert.Equal(2, hardware.Disks.Count);
         Assert.Equal("Healthy", hardware.Disks[0].HealthStatus);
-        Assert.Equal("淮南·田家庵", weather?.City);
+        Assert.Equal("示例城市", weather?.City);
         Assert.Equal(34, weather?.HighTemperatureCelsius);
         Assert.Equal(45, weather?.RainProbabilityPercent);
         Assert.Equal(

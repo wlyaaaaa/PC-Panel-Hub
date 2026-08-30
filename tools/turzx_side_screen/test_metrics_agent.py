@@ -120,7 +120,7 @@ class MetricsAgentTests(unittest.TestCase):
         snapshot["weather"].update(
             {
                 "source": "weather_shim",
-                "city": "田家庵",
+                "city": "Test City",
                 "temperature_celsius": 31,
                 "condition": "晴",
                 "updated_at": "2026-07-05T08:20:00+08:00",
@@ -642,9 +642,9 @@ class MetricsAgentTests(unittest.TestCase):
             },
         }
 
-        weather = metrics_agent._weather_from_qweather_payload("北京", payload)
+        weather = metrics_agent._weather_from_qweather_payload("Test City", payload)
 
-        self.assertEqual("北京", weather["city"])
+        self.assertEqual("Test City", weather["city"])
         self.assertEqual(31.0, weather["temperature_celsius"])
         self.assertEqual("31°C", weather["temperature_text"])
         self.assertEqual("晴", weather["condition"])
@@ -655,6 +655,24 @@ class MetricsAgentTests(unittest.TestCase):
         self.assertEqual(25.8, weather["low_temperature_celsius"])
         self.assertEqual(45.0, weather["rain_probability_percent"])
         self.assertEqual("weather_shim", weather["source"])
+
+    def test_weather_request_has_no_built_in_location(self):
+        city, location = metrics_agent._configured_weather_request({}, {})
+
+        self.assertIsNone(city)
+        self.assertEqual("configured", location)
+
+    def test_weather_request_accepts_external_location(self):
+        city, location = metrics_agent._configured_weather_request(
+            {},
+            {
+                "TURZX_WEATHER_CITY": "Test City",
+                "TURZX_WEATHER_LOCATION": "test-location",
+            },
+        )
+
+        self.assertEqual("Test City", city)
+        self.assertEqual("test-location", location)
 
     def test_weather_cold_refresh_is_non_blocking_when_shim_is_slow(self):
         entered = threading.Event()
@@ -672,7 +690,7 @@ class MetricsAgentTests(unittest.TestCase):
             patch.object(
                 metrics_agent,
                 "_load_config",
-                return_value={"weather": {"city": "田家庵"}},
+                return_value={"weather": {"city": "Test City"}},
             ),
             patch.object(metrics_agent, "_fetch_json", side_effect=slow_fetch),
         ):
@@ -705,7 +723,7 @@ class MetricsAgentTests(unittest.TestCase):
             patch.object(
                 metrics_agent,
                 "_load_config",
-                return_value={"weather": {"city": "田家庵"}},
+                return_value={"weather": {"city": "Test City"}},
             ),
             patch.object(metrics_agent, "_fetch_json", side_effect=slow_fetch),
             patch.object(metrics_agent, "read_foreground_app", return_value=metrics_agent.empty_snapshot()["foreground_app"]),

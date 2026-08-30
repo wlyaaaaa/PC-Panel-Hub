@@ -148,7 +148,11 @@ foreach ($relative in @("README.md", "docs\startup.md", "docs\architecture.md"))
     }
 }
 
-$config = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $Root "tools\turzx_side_screen\config.json") | ConvertFrom-Json
+$configPath = Join-Path $Root "tools\turzx_side_screen\config.json"
+if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) {
+    $configPath = Join-Path $Root "tools\turzx_side_screen\config.example.json"
+}
+$config = Get-Content -Raw -Encoding UTF8 -LiteralPath $configPath | ConvertFrom-Json
 if ([int]$config.screen.dataRefreshMs -ne 1000 -or [int]$config.metrics.pollMs -ne 1000) {
     throw "Metrics sampling and the installed Hybrid panel cadence must remain 1000ms."
 }

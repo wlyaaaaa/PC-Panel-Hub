@@ -5,6 +5,8 @@ PC Panel Hub is intentionally split into small local processes:
 1. `turzx_weather_shim.py`
    - Provides short weather text for the dashboard.
    - Keeps weather API behavior isolated from screen rendering.
+   - Loads coordinates and display metadata from `TURZX_WEATHER_CONFIG` or
+     machine-injected environment variables; the source has no built-in location.
 
 2. `metrics_agent.py`
    - Serves `GET http://127.0.0.1:18765/snapshot`.
@@ -12,9 +14,9 @@ PC Panel Hub is intentionally split into small local processes:
    - Reads throughput from the configured physical public-egress interface only.
      Tunnel and virtualization adapters are excluded instead of being added to the
      physical counters; a missing or ambiguous interface fails closed.
-   - Reports CPU load from PDH `% Processor Time`, which is ordinary busy time and
-     matches the user-facing Task Manager interpretation. Frequency-scaled
-     `% Processor Utility` is intentionally not used as CPU load.
+   - Reports CPU load from PDH `\Processor Information(_Total)\% Processor Utility`
+     when available. If that counter is unavailable, it falls back to Win32
+     `GetSystemTimes` busy time and then `psutil`.
    - Adds `trust` scoring to every snapshot.
    - Writes data trust diagnostics to `out\data-trust.jsonl`.
 
@@ -91,4 +93,5 @@ Do not commit:
 - Local logs and generated previews.
 - Device configs copied from a specific machine.
 - Weather/API credentials.
+- Weather locations or machine-local JSON configuration.
 - Large binary assets from the original package.

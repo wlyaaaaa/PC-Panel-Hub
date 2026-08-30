@@ -41,7 +41,7 @@
     <rect class="card" width="432" height="130" rx="14"/>
     <text id="time" class="mono dark" x="12" y="60" font-size="44" font-weight="900">11:46:04</text>
     <text id="date" class="sans muted" x="14" y="93" font-size="13" font-weight="700">2026-07-05 周日</text>
-    <text id="weather" class="sans dark" x="408" y="46" text-anchor="end" font-size="16" font-weight="800">淮南·田家庵 30°C 多云</text>
+    <text id="weather" class="sans dark" x="408" y="46" text-anchor="end" font-size="16" font-weight="800">示例城市 30°C 多云</text>
     <text id="weather-detail" class="sans muted" x="408" y="76" text-anchor="end" font-size="13" font-weight="700">湿度 73%</text>
     <rect x="24" y="106" width="384" height="18" rx="4" fill="#dcfce7"/>
     <text id="status-strip" class="sans green" x="216" y="119" text-anchor="middle" font-size="12" font-weight="800">系统正常 · 前台 Codex (Beta).exe · 更新 0.5s</text>

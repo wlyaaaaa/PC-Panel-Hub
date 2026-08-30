@@ -9,6 +9,13 @@ $appPath = if (Test-Path -LiteralPath $metricsAppPath) { $metricsAppPath } else 
 $appProcessName = [IO.Path]::GetFileNameWithoutExtension($appPath)
 $hostAddress = "127.0.0.1"
 $port = 18080
+$weatherConfigPath = $env:TURZX_WEATHER_CONFIG
+if ([string]::IsNullOrWhiteSpace($weatherConfigPath)) {
+    $localConfigPath = Join-Path $rootDir "tools\turzx_side_screen\config.json"
+    if (Test-Path -LiteralPath $localConfigPath -PathType Leaf) {
+        $weatherConfigPath = $localConfigPath
+    }
+}
 
 function Find-Python {
     $cmd = Get-Command python -ErrorAction SilentlyContinue
@@ -33,8 +40,12 @@ function Find-Python {
 $listener = Get-NetTCPConnection -LocalAddress $hostAddress -LocalPort $port -State Listen -ErrorAction SilentlyContinue
 if (-not $listener) {
     $python = Find-Python
+    $shimArguments = @($shimScript, "--host", $hostAddress, "--port", "$port")
+    if (-not [string]::IsNullOrWhiteSpace($weatherConfigPath)) {
+        $shimArguments += @("--config", $weatherConfigPath)
+    }
     Start-Process -FilePath $python `
-        -ArgumentList @($shimScript, "--host", $hostAddress, "--port", "$port") `
+        -ArgumentList $shimArguments `
         -WorkingDirectory $shimDir `
         -WindowStyle Hidden
 

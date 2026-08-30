@@ -68,6 +68,9 @@ $runningStream = Get-LiveStreamEvidence
 python (Join-Path $side "test_metrics_agent.py")
 if ($LASTEXITCODE -ne 0) { throw "test_metrics_agent.py failed" }
 
+python (Join-Path $Root "tools\turzx_weather_shim\test_weather_shim.py")
+if ($LASTEXITCODE -ne 0) { throw "test_weather_shim.py failed" }
+
 powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $side "TestRenderer.ps1")
 if ($LASTEXITCODE -ne 0) { throw "TestRenderer.ps1 failed" }
 

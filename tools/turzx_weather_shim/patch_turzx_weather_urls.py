@@ -1,12 +1,12 @@
 import argparse
+import json
+import os
 from pathlib import Path
 
 
-OLD_GEO = "https://mx2x86mrma.re.qweatherapi.com/geo/v2/city/lookup?location="
-OLD_NOW = "https://mx2x86mrma.re.qweatherapi.com/v7/weather/now?location="
-NEW_GEO = "http://127.0.0.1:18080/geo/v2/city/lookup?p=xxxxxxxxxxxx&location="
-NEW_NOW = "http://127.0.0.1:18080/v7/weather/now?p=xxxxxxxxxxxx&location="
+URL_CONFIG_ENV = "TURZX_WEATHER_URL_PATCH_CONFIG"
 URL_SEED = 19
+REQUIRED_URL_FIELDS = ("old_geo", "new_geo", "old_now", "new_now")
 
 
 def encode_turzx_string(text, seed=URL_SEED):
@@ -28,26 +28,56 @@ def encoded_bytes(text):
     return encode_turzx_string(text).encode("utf-16le", "surrogatepass")
 
 
-def patch_bytes(data, old_text, new_text):
+def load_url_config(path):
+    if not path:
+        raise ValueError(
+            "URL patch config is required. Set TURZX_WEATHER_URL_PATCH_CONFIG or use --url-config."
+        )
+    payload = json.loads(Path(path).read_text(encoding="utf-8-sig"))
+    if not isinstance(payload, dict):
+        raise ValueError("URL patch config must be a JSON object.")
+
+    result = {}
+    for field in REQUIRED_URL_FIELDS:
+        value = payload.get(field)
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"URL patch config requires non-empty {field}.")
+        result[field] = value
+    return result
+
+
+def patch_bytes(data, old_text, new_text, label):
     if len(old_text) != len(new_text):
-        raise ValueError(f"Replacement length mismatch: {len(old_text)} != {len(new_text)}")
+        raise ValueError(
+            f"{label} replacement length mismatch: {len(old_text)} != {len(new_text)}"
+        )
 
     old_bytes = encoded_bytes(old_text)
     new_bytes = encoded_bytes(new_text)
     offset = data.find(old_bytes)
     if offset < 0:
-        raise ValueError(f"Could not find encoded URL: {old_text}")
+        raise ValueError(f"Could not find encoded {label} URL.")
     if data.find(old_bytes, offset + 1) >= 0:
-        raise ValueError(f"Encoded URL appears more than once: {old_text}")
+        raise ValueError(f"Encoded {label} URL appears more than once.")
 
     data[offset : offset + len(old_bytes)] = new_bytes
     return offset
 
 
-def patch_exe(exe_path, output_path):
+def patch_exe(exe_path, output_path, url_config):
     data = bytearray(exe_path.read_bytes())
-    geo_offset = patch_bytes(data, OLD_GEO, NEW_GEO)
-    now_offset = patch_bytes(data, OLD_NOW, NEW_NOW)
+    geo_offset = patch_bytes(
+        data,
+        url_config["old_geo"],
+        url_config["new_geo"],
+        "geo",
+    )
+    now_offset = patch_bytes(
+        data,
+        url_config["old_now"],
+        url_config["new_now"],
+        "current-weather",
+    )
     output_path.write_bytes(data)
     return geo_offset, now_offset
 
@@ -56,9 +86,23 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--exe", default="TURZX.exe")
     parser.add_argument("--out", default="TURZX.weatherfix.exe")
+    parser.add_argument(
+        "--url-config",
+        default=os.environ.get(URL_CONFIG_ENV),
+        help="Machine-local JSON URL config path.",
+    )
     args = parser.parse_args()
 
-    geo_offset, now_offset = patch_exe(Path(args.exe), Path(args.out))
+    try:
+        url_config = load_url_config(args.url_config)
+        geo_offset, now_offset = patch_exe(
+            Path(args.exe),
+            Path(args.out),
+            url_config,
+        )
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        parser.error(str(exc))
+
     print(f"Patched geo URL at byte offset {geo_offset}")
     print(f"Patched now URL at byte offset {now_offset}")
     print(f"Output: {Path(args.out).resolve()}")

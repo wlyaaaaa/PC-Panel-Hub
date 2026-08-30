@@ -116,7 +116,10 @@ def _configured_timeaudit_dsn(
 
 
 TIMEAUDIT_DSN = _configured_timeaudit_dsn()
-CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
+CONFIG_PATH = os.environ.get(
+    "TURZX_SIDE_SCREEN_CONFIG",
+    os.path.join(os.path.dirname(__file__), "config.json"),
+)
 WEATHER_SHIM_BASE_URL = "http://127.0.0.1:18080"
 TOP_PROCESSES_CACHE_PATH = os.environ.get(
     "TURZX_TOP_PROCESSES_CACHE",
@@ -171,13 +174,6 @@ _network_interface_cache_lock = threading.Lock()
 _network_interface_refreshing = False
 _cpu_history: deque[float] = deque(maxlen=120)
 _gpu_history: deque[float] = deque(maxlen=120)
-
-WEATHER_LOCATION_ALIASES = {
-    "北京": "116.4074,39.9042",
-    "beijing": "116.4074,39.9042",
-    "田家庵": "101220405",
-    "tianjiaan": "101220405",
-}
 
 DRIVE_TYPE_NAMES = {
     0: "unknown",
@@ -858,12 +854,22 @@ def _maybe_write_data_trust_log(snapshot: dict[str, Any]) -> None:
         _data_trust_last_log_key = key
 
 
+def _configured_weather_request(weather_config, environ=None):
+    source = os.environ if environ is None else environ
+    city = _empty_to_none(weather_config.get("city")) or _empty_to_none(
+        source.get("TURZX_WEATHER_CITY")
+    )
+    location = _empty_to_none(weather_config.get("location")) or _empty_to_none(
+        source.get("TURZX_WEATHER_LOCATION")
+    )
+    return city, location or "configured"
+
+
 def read_weather_snapshot() -> dict[str, Any]:
     config = _load_config()
     weather_config = config.get("weather") if isinstance(config.get("weather"), dict) else {}
-    city = _empty_to_none(weather_config.get("city")) or "北京"
-    location = _weather_location_for_city(city)
-    cache_key = f"{city}|{location}"
+    city, location = _configured_weather_request(weather_config)
+    cache_key = f"{city or ''}|{location}"
     now = time.monotonic()
     with _weather_cache_lock:
         cache_matches = (
@@ -884,7 +890,7 @@ def read_weather_snapshot() -> dict[str, Any]:
 
 
 def _start_weather_refresh_locked(
-    city: str,
+    city: str | None,
     location: str,
     cache_key: str,
 ) -> None:
@@ -901,7 +907,7 @@ def _start_weather_refresh_locked(
     _weather_refresh_thread.start()
 
 
-def _refresh_weather_cache(city: str, location: str, cache_key: str) -> None:
+def _refresh_weather_cache(city: str | None, location: str, cache_key: str) -> None:
     global _weather_cache_expires_at, _weather_cache_key, _weather_cache_value
     global _weather_refreshing
 
@@ -1006,19 +1012,8 @@ def _fallback_weather_snapshot(
     return snapshot
 
 
-def _weather_location_for_city(city: str | None) -> str:
-    text = _empty_to_none(city)
-    if text is None:
-        return WEATHER_LOCATION_ALIASES["北京"]
-    return WEATHER_LOCATION_ALIASES.get(text, WEATHER_LOCATION_ALIASES.get(text.lower(), text))
-
-
 def _weather_display_city(city: str | None) -> str | None:
-    text = _empty_to_none(city)
-    if text == "田家庵":
-        return "淮南·田家庵"
-    return text
-
+    return _empty_to_none(city)
 
 def _fetch_json(url: str, timeout: float) -> dict[str, Any]:
     with urllib.request.urlopen(url, timeout=timeout) as response:

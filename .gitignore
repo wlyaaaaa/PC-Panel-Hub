@@ -30,6 +30,9 @@ tools/*
 !tools/turzx_weather_shim/**
 !tools/hs2_crystal_overlay/
 !tools/hs2_crystal_overlay/**
+tools/turzx_side_screen/config.json
+tools/turzx_side_screen/config.local.json
+tools/turzx_weather_shim/*.local.json
 tools/**/out/
 tools/**/__pycache__/
 tools/**/bin/

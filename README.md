@@ -46,6 +46,13 @@ HS2 的设计、数据来源、配置方法和明确限制见 [docs/hs2-crystal-
 - 新鲜但全为零的 FPS 样本表示“等待游戏帧”，不等于采集故障；连接中、陈旧和错误状态会单独显示。
 - DPC 显示值来自 Windows `Processor Information(_Total)\% DPC Time`，不是合成的调度延迟指标。
 - 物理磁盘会按其盘符合并；名称为 `RECOVER` 的卷、虚拟盘、RAM 盘，以及小于 `32,000,000,000` 字节的 USB/可移动介质会被排除。
+- 天气适配器不内置城市或坐标。默认读取被 Git 忽略的本机 `config.json`；也可用 `TURZX_WEATHER_CONFIG` 指向外部私有文件，或同时注入 `TURZX_WEATHER_LATITUDE` 与 `TURZX_WEATHER_LONGITUDE`。公开源码包只保留无实际值的 `config.example.json`。
+
+首次配置时复制 `tools\turzx_side_screen\config.example.json` 为同目录
+`config.json`，再填写本机串口、物理公网接口和天气经纬度。`config.json`
+会被 Git 忽略；`start_turzx_weatherfix.ps1` 在未显式设置
+`TURZX_WEATHER_CONFIG` 时会自动使用这份本机文件。示例中的天气坐标为
+`null`，未填写时天气 shim 失败关闭，不会回落到作者位置。
 
 公开仓库不包含原版 TURZX 二进制。启动串流前，需在仓库根目录旁准备：
 

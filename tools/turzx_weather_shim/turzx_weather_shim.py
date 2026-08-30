@@ -1,5 +1,8 @@
 import argparse
 import json
+import math
+import os
+from pathlib import Path
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
@@ -8,18 +11,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 18080
-
-KNOWN_LOCATIONS = {
-    "101220405": {
-        "id": "101220405",
-        "name": "田家庵",
-        "adm2": "淮南",
-        "adm1": "安徽",
-        "country": "中国",
-        "latitude": 32.65,
-        "longitude": 117.02,
-    }
-}
+LOCATION_CONFIG_ENV = "TURZX_WEATHER_CONFIG"
+LOCATION_LATITUDE_ENV = "TURZX_WEATHER_LATITUDE"
+LOCATION_LONGITUDE_ENV = "TURZX_WEATHER_LONGITUDE"
+LOCATION_ID_ENV = "TURZX_WEATHER_LOCATION_ID"
+LOCATION_NAME_ENV = "TURZX_WEATHER_LOCATION_NAME"
 
 WEATHER_TEXT_ZH = {
     0: "晴",
@@ -53,30 +49,103 @@ WEATHER_TEXT_ZH = {
 }
 
 
-def resolve_location(location_id):
-    text = str(location_id or "").strip()
-    if text in KNOWN_LOCATIONS:
-        return dict(KNOWN_LOCATIONS[text])
+def optional_text(value):
+    text = str(value or "").strip()
+    return text or None
 
-    if "," in text:
-        first, second = [part.strip() for part in text.split(",", 1)]
-        first_value = float(first)
-        second_value = float(second)
-        if abs(first_value) > 90:
-            longitude, latitude = first_value, second_value
-        else:
-            latitude, longitude = first_value, second_value
-        return {
+
+def normalize_location(payload):
+    if not isinstance(payload, dict):
+        raise ValueError("Weather location config must be a JSON object.")
+
+    try:
+        latitude = float(payload["latitude"])
+        longitude = float(payload["longitude"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(
+            "Weather location config requires numeric latitude and longitude."
+        ) from exc
+
+    if not math.isfinite(latitude) or not -90 <= latitude <= 90:
+        raise ValueError("Weather latitude must be between -90 and 90.")
+    if not math.isfinite(longitude) or not -180 <= longitude <= 180:
+        raise ValueError("Weather longitude must be between -180 and 180.")
+
+    location_id = optional_text(payload.get("id")) or f"{longitude:.4f},{latitude:.4f}"
+    name = optional_text(payload.get("name")) or optional_text(payload.get("city")) or location_id
+    return {
+        "id": location_id,
+        "name": name,
+        "adm2": optional_text(payload.get("adm2")) or "",
+        "adm1": optional_text(payload.get("adm1")) or "",
+        "country": optional_text(payload.get("country")) or "",
+        "timezone": optional_text(payload.get("timezone")) or "",
+        "utc_offset": optional_text(payload.get("utc_offset")) or "",
+        "latitude": latitude,
+        "longitude": longitude,
+    }
+
+
+def load_location_config(config_path=None, environ=None):
+    source = os.environ if environ is None else environ
+    selected_path = optional_text(config_path) or optional_text(
+        source.get(LOCATION_CONFIG_ENV)
+    )
+    if selected_path:
+        payload = json.loads(Path(selected_path).read_text(encoding="utf-8-sig"))
+        if isinstance(payload, dict) and isinstance(payload.get("weather"), dict):
+            payload = payload["weather"]
+        return normalize_location(payload)
+
+    latitude = optional_text(source.get(LOCATION_LATITUDE_ENV))
+    longitude = optional_text(source.get(LOCATION_LONGITUDE_ENV))
+    if latitude is None and longitude is None:
+        raise ValueError(
+            "Weather location is not configured. Set TURZX_WEATHER_CONFIG or both "
+            "TURZX_WEATHER_LATITUDE and TURZX_WEATHER_LONGITUDE."
+        )
+    if latitude is None or longitude is None:
+        raise ValueError(
+            "TURZX_WEATHER_LATITUDE and TURZX_WEATHER_LONGITUDE must be set together."
+        )
+
+    return normalize_location(
+        {
+            "latitude": latitude,
+            "longitude": longitude,
+            "id": source.get(LOCATION_ID_ENV),
+            "name": source.get(LOCATION_NAME_ENV),
+        }
+    )
+
+
+def coordinate_location(text):
+    first, second = [part.strip() for part in text.split(",", 1)]
+    first_value = float(first)
+    second_value = float(second)
+    if abs(first_value) > 90:
+        longitude, latitude = first_value, second_value
+    else:
+        latitude, longitude = first_value, second_value
+    return normalize_location(
+        {
             "id": f"{longitude:.4f},{latitude:.4f}",
             "name": text,
-            "adm2": "",
-            "adm1": "",
-            "country": "",
             "latitude": latitude,
             "longitude": longitude,
         }
+    )
 
-    return dict(KNOWN_LOCATIONS["101220405"])
+
+def resolve_location(requested_location, configured_location=None):
+    text = optional_text(requested_location) or ""
+    if "," in text:
+        return coordinate_location(text)
+    if configured_location is not None:
+        return normalize_location(configured_location)
+    raise ValueError(
+        "Weather location is not configured. The shim has no built-in location."
+    )
 
 
 def weather_text(code, lang="zh"):
@@ -113,7 +182,7 @@ def rounded_text(value):
     return str(int(round(float(value))))
 
 
-def build_now_payload(location_id, open_meteo_payload, lang="zh"):
+def build_now_payload(open_meteo_payload, lang="zh"):
     current = open_meteo_payload["current"]
     daily = open_meteo_payload.get("daily")
     daily = daily if isinstance(daily, dict) else {}
@@ -165,8 +234,8 @@ def first_value(value):
     return None
 
 
-def build_city_lookup_payload(query):
-    location = resolve_location(query)
+def build_city_lookup_payload(query, configured_location=None):
+    location = resolve_location(query, configured_location)
     return {
         "code": "200",
         "location": [
@@ -178,8 +247,8 @@ def build_city_lookup_payload(query):
                 "adm2": location["adm2"],
                 "adm1": location["adm1"],
                 "country": location["country"],
-                "tz": "Asia/Shanghai",
-                "utcOffset": "+08:00",
+                "tz": location["timezone"],
+                "utcOffset": location["utc_offset"],
                 "isDst": "0",
                 "type": "city",
                 "rank": "10",
@@ -249,25 +318,32 @@ class WeatherShimHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
         query = urllib.parse.parse_qs(parsed.query)
-        location_id = query.get("location", ["101220405"])[0]
+        location_id = query.get("location", [""])[0]
         lang = query.get("lang", ["zh"])[0]
+        configured_location = getattr(self.server, "configured_location", None)
 
         try:
             if parsed.path.endswith("/v7/weather/now"):
-                location = resolve_location(location_id)
+                location = resolve_location(location_id, configured_location)
                 weather_payload = fetch_open_meteo(location)
                 try:
                     weather_payload = merge_air_quality(weather_payload, fetch_open_meteo_air_quality(location))
                 except Exception:
                     pass
-                payload = build_now_payload(location_id, weather_payload, lang)
+                payload = build_now_payload(weather_payload, lang)
                 self.write_json(200, payload)
             elif parsed.path.endswith("/geo/v2/city/lookup"):
-                self.write_json(200, build_city_lookup_payload(location_id))
+                self.write_json(
+                    200,
+                    build_city_lookup_payload(location_id, configured_location),
+                )
             else:
                 self.write_json(404, {"code": "404", "message": "Unknown TURZX weather shim endpoint"})
+        except ValueError as exc:
+            self.write_json(503, {"code": "503", "message": str(exc)})
         except Exception as exc:
-            self.write_json(500, {"code": "500", "message": str(exc)})
+            print(f"Weather upstream failed: {type(exc).__name__}")
+            self.write_json(502, {"code": "502", "message": "Weather upstream failed"})
 
     def log_message(self, fmt, *args):
         print("[%s] %s" % (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), fmt % args))
@@ -281,8 +357,20 @@ class WeatherShimHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
 
-def run_server(host=DEFAULT_HOST, port=DEFAULT_PORT):
+def run_server(
+    host=DEFAULT_HOST,
+    port=DEFAULT_PORT,
+    configured_location=None,
+    config_path=None,
+    environ=None,
+):
+    location = (
+        normalize_location(configured_location)
+        if configured_location is not None
+        else load_location_config(config_path, environ)
+    )
     server = ThreadingHTTPServer((host, port), WeatherShimHandler)
+    server.configured_location = location
     print(f"TURZX weather shim listening on http://{host}:{port}")
     server.serve_forever()
 
@@ -291,8 +379,16 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default=DEFAULT_HOST)
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+    parser.add_argument(
+        "--config",
+        default=os.environ.get(LOCATION_CONFIG_ENV),
+        help="Machine-local JSON config path (or set TURZX_WEATHER_CONFIG).",
+    )
     args = parser.parse_args()
-    run_server(args.host, args.port)
+    try:
+        run_server(args.host, args.port, config_path=args.config)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        parser.error(str(exc))
 
 
 if __name__ == "__main__":

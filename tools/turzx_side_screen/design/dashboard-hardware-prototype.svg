@@ -133,7 +133,7 @@
     <text x="295" y="824" class="ink mono" font-size="25" font-weight="850">118</text>
     <text x="382" y="790" class="label">FRAME</text>
     <text x="382" y="824" class="ink mono" font-size="25" font-weight="850">6.9</text>
-    <text x="44" y="852" class="muted" font-size="14" font-weight="750">前台 game.exe · PresentMon / RTSS</text>
+    <text x="44" y="852" class="muted" font-size="14" font-weight="750">前台 game.exe · TimeAudit / PresentMon</text>
   </g>
 
   <!-- Memory and VRAM -->

@@ -10,6 +10,79 @@ $ErrorActionPreference = "Stop"
 $Root = (Resolve-Path $Root).Path
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 
+$publicToolExtensions = @(
+    ".appxmanifest",
+    ".cmd",
+    ".cs",
+    ".csproj",
+    ".ico",
+    ".json",
+    ".manifest",
+    ".md",
+    ".png",
+    ".ps1",
+    ".py",
+    ".slnx",
+    ".svg",
+    ".vbs",
+    ".xaml"
+)
+$excludedToolDirectories = @(
+    ".vs",
+    "AppPackages",
+    "bin",
+    "obj",
+    "out",
+    "__pycache__"
+)
+
+function Copy-PublicToolTree {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Source,
+        [Parameter(Mandatory = $true)]
+        [string]$Destination
+    )
+
+    New-Item -ItemType Directory -Force -Path $Destination | Out-Null
+    Get-ChildItem -LiteralPath $Source -Recurse -File | ForEach-Object {
+        $relativePath = $_.FullName.Substring($Source.Length) -replace '^[\\/]+', ''
+        $relativeDirectory = Split-Path -Parent $relativePath
+        $directoryNames = if ([string]::IsNullOrWhiteSpace($relativeDirectory)) {
+            @()
+        }
+        else {
+            @($relativeDirectory -split '[\\/]')
+        }
+        $hasExcludedDirectory = @(
+            $directoryNames | Where-Object { $_ -in $excludedToolDirectories }
+        ).Count -gt 0
+        $extension = $_.Extension.ToLowerInvariant()
+        $normalizedRelativePath = $relativePath -replace '\\', '/'
+        $isApprovedHs2Asset = (
+            (Split-Path -Leaf $Source) -eq "hs2_crystal_overlay" -and
+            $normalizedRelativePath -match '^src/HS2\.CrystalOverlay/Assets/[^/]+\.(ico|png)$'
+        )
+        $isApprovedConfigExample = (
+            (Split-Path -Leaf $Source) -eq "turzx_side_screen" -and
+            $normalizedRelativePath -eq "config.example.json"
+        )
+
+        if (
+            $hasExcludedDirectory -or
+            $extension -notin $publicToolExtensions -or
+            ($extension -eq ".json" -and -not $isApprovedConfigExample) -or
+            ($extension -in @(".ico", ".png") -and -not $isApprovedHs2Asset)
+        ) {
+            return
+        }
+
+        $target = Join-Path $Destination $relativePath
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target) | Out-Null
+        Copy-Item -LiteralPath $_.FullName -Destination $target -Force
+    }
+}
+
 $zipPath = Join-Path $OutputDir ("PC-Panel-Hub-{0}.zip" -f $Version)
 if (Test-Path -LiteralPath $zipPath) {
     Remove-Item -LiteralPath $zipPath -Force
@@ -27,28 +100,17 @@ try {
     Get-ChildItem -LiteralPath (Join-Path $Root "docs") -File -Filter "*.md" | ForEach-Object {
         Copy-Item -LiteralPath $_.FullName -Destination (Join-Path (Join-Path $staging "docs") $_.Name) -Force
     }
-    Copy-Item -LiteralPath (Join-Path $Root "scripts") -Destination (Join-Path $staging "scripts") -Recurse -Force
+    Copy-PublicToolTree `
+        -Source (Join-Path $Root "scripts") `
+        -Destination (Join-Path $staging "scripts")
 
     $toolDest = Join-Path $staging "tools"
     New-Item -ItemType Directory -Force -Path $toolDest | Out-Null
 
-    foreach ($dir in @("turzx_side_screen", "turzx_weather_shim")) {
+    foreach ($dir in @("turzx_side_screen", "turzx_weather_shim", "hs2_crystal_overlay")) {
         $src = Join-Path $Root ("tools\" + $dir)
         $dst = Join-Path $toolDest $dir
-        New-Item -ItemType Directory -Force -Path $dst | Out-Null
-        Get-ChildItem -LiteralPath $src -File | Where-Object {
-            $_.Extension -in @(".ps1", ".cmd", ".py", ".cs", ".json", ".md", ".vbs")
-        } | ForEach-Object {
-            Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $dst $_.Name) -Force
-        }
-        $designSrc = Join-Path $src "design"
-        if (Test-Path -LiteralPath $designSrc) {
-            $designDst = Join-Path $dst "design"
-            New-Item -ItemType Directory -Force -Path $designDst | Out-Null
-            Get-ChildItem -LiteralPath $designSrc -File -Filter "*.svg" | ForEach-Object {
-                Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $designDst $_.Name) -Force
-            }
-        }
+        Copy-PublicToolTree -Source $src -Destination $dst
     }
 
     Compress-Archive -Path (Join-Path $staging "*") -DestinationPath $zipPath -Force

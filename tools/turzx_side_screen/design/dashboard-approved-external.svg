@@ -63,7 +63,7 @@
     <text id="time" class="mono dark" x="12" y="60" font-size="42" font-weight="900">11:46:04</text>
     <text id="date" class="sans muted" x="14" y="93" font-size="14" font-weight="700">2026-07-05 周日</text>
     <!-- 优化2：调整天气的 Y 轴基线，使多行天气与左侧大字号时间的视觉高度完全对称平衡 -->
-    <text id="weather" class="sans dark" x="408" y="44" text-anchor="end" font-size="15" font-weight="800">淮南·田家庵 30°C 多云</text>
+    <text id="weather" class="sans dark" x="408" y="44" text-anchor="end" font-size="15" font-weight="800">示例城市 30°C 多云</text>
     <text id="weather-detail" class="sans muted" x="408" y="68" text-anchor="end" font-size="12" font-weight="700">湿度 73%</text>
     <rect x="24" y="103" width="384" height="20" rx="4" fill="#dcfce7"/>
     <text id="status-strip" class="sans green" x="216" y="117" text-anchor="middle" font-size="12" font-weight="800" clip-path="url(#statusClip)">系统正常 · 前台 Codex (Beta).exe · 更新 0.5s</text>
