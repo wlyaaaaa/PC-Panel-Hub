@@ -195,6 +195,15 @@ C:\path\to\PC-Panel-Hub\tools\hs2_crystal_overlay\Publish-HS2Task.ps1 `
   的 Secondary 尝试标记。下一个正常启动或恢复 epoch 才有一次新的完整功能恢复机会。
 - 该链路只管理 HS2 controller/overlay；不会修改物理主屏或 Sunshine MTT1337 虚拟屏
   的拓扑、分辨率、刷新率、HDR、缩放与捕获目标。
+- 现有 watchdog 只读观察活动显示器身份与唯一主屏归属；HDR-only 变化，以及没有
+  形成实际活动拓扑/主屏身份变化的 DXGI 波动，都不会触发 Wallpaper Engine 恢复。
+  只有恰好三块活动屏、MTT、已绑定的 LIAN LI Secondary 和主屏同时健康，且变化稳定 30 秒后，才会
+  在 15 分钟冷却内最多一次通过当前用户 shell 调用已有的 `wallpaper32.exe -control
+  stop` / `play` 作完整渲染重绑定。它不打开 Wallpaper GUI、不写 Wallpaper 配置，
+  也不从 Highest watchdog 启动常驻的高权限渲染进程。
+- 若已绑定的 LIAN LI 设备出现 Code 10，watchdog 立即失败关闭并给出断电后检查
+  HS2 USB 排针、线缆和辅助供电的提示；不会自动重启 Hub、移除设备或扫描 PnP，
+  也不会形成重试循环。
 
 截图、运行日志、通知正文、设备标识、生成二进制和厂商文件不得提交到公开
 仓库。

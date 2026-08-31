@@ -107,6 +107,217 @@ $hs2Monitor = [pscustomobject]@{
     WorkRight = 6128
     WorkBottom = 0
 }
+$mttMonitor = [pscustomobject]@{
+    DeviceName = "\\.\DISPLAY31"
+    IsPrimary = $false
+    Left = 2560
+    Top = 0
+    Right = 3840
+    Bottom = 720
+    WorkLeft = 2560
+    WorkTop = 0
+    WorkRight = 3840
+    WorkBottom = 720
+}
+$healthyMttDevice = [pscustomobject]@{
+    InstanceId = "DISPLAY\MTT\verified-virtual-display"
+    Present = $true
+    Status = "OK"
+    ProblemCode = 0
+    BackingInstanceId = "ROOT\DISPLAY\0001"
+    BackingPresent = $true
+    BackingStatus = "OK"
+    BackingProblemCode = 0
+    HardwareIdVerified = $true
+}
+
+# Get-PnpDevice's live shape carries Status but not the authoritative presence,
+# problem-code, or HardwareIds values.  The binding decision must materialize
+# those values through its explicit property reader before health is admitted.
+$liveMttMonitorShape = [pscustomobject]@{
+    InstanceId = "DISPLAY\MTT1337\virtual-display"
+    Status = "OK"
+}
+$liveMttBackingShape = [pscustomobject]@{
+    InstanceId = "ROOT\DISPLAY\0001"
+    Status = "OK"
+}
+$liveOtherVirtualBackingShape = [pscustomobject]@{
+    InstanceId = "ROOT\DISPLAY\0002"
+    Status = "OK"
+}
+$liveMttPropertyValues = @{
+    "DISPLAY\MTT1337\virtual-display|DEVPKEY_Device_IsPresent" = $true
+    "DISPLAY\MTT1337\virtual-display|DEVPKEY_Device_ProblemCode" = 0
+    "ROOT\DISPLAY\0001|DEVPKEY_Device_IsPresent" = $true
+    "ROOT\DISPLAY\0001|DEVPKEY_Device_ProblemCode" = 0
+    "ROOT\DISPLAY\0001|DEVPKEY_Device_HardwareIds" = @("Root\MttVDD")
+    "ROOT\DISPLAY\0002|DEVPKEY_Device_IsPresent" = $true
+    "ROOT\DISPLAY\0002|DEVPKEY_Device_ProblemCode" = 0
+    "ROOT\DISPLAY\0002|DEVPKEY_Device_HardwareIds" = @("Root\OrayDisplay")
+}
+$liveMttBinding = Get-WallpaperEngineMttBindingDecision `
+    -MttMonitorNodes @($liveMttMonitorShape) `
+    -BackingNodes @($liveMttBackingShape, $liveOtherVirtualBackingShape) `
+    -PropertyReader {
+        param($InstanceId, $KeyName)
+        $liveMttPropertyValues["{0}|{1}" -f $InstanceId, $KeyName]
+    }
+if (-not $liveMttBinding.Found -or
+    $liveMttBinding.Reason -cne "verified-mtt-binding" -or
+    -not $liveMttBinding.Device.Present -or
+    $liveMttBinding.Device.ProblemCode -ne 0 -or
+    -not $liveMttBinding.Device.BackingPresent -or
+    $liveMttBinding.Device.BackingProblemCode -ne 0 -or
+    -not $liveMttBinding.Device.HardwareIdVerified) {
+    throw "Wallpaper recovery must project the live MTT PnP shape through presence/problem/HardwareIds properties."
+}
+
+# Wallpaper render recovery must observe only the active monitor identity and
+# primary assignment.  HDR is deliberately not part of the fingerprint: a
+# normal HDR toggle must not restart rendering.
+$wallpaperTopologyFingerprint = Get-WallpaperEngineTopologyFingerprint `
+    -Monitors @($primaryMonitor, $hs2Monitor, $mttMonitor)
+$hdrToggledPrimaryMonitor = [pscustomobject]@{
+    DeviceName = $primaryMonitor.DeviceName
+    IsPrimary = $true
+    HdrEnabled = $true
+}
+if ($wallpaperTopologyFingerprint -cne (Get-WallpaperEngineTopologyFingerprint `
+        -Monitors @($hdrToggledPrimaryMonitor, $hs2Monitor, $mttMonitor))) {
+    throw "Wallpaper topology fingerprint must ignore an HDR-only state change."
+}
+$wallpaperHealth = Get-WallpaperEngineDisplayHealthDecision `
+    -Monitors @($primaryMonitor, $hs2Monitor, $mttMonitor) `
+    -MttDevices @($healthyMttDevice) `
+    -Hs2SecondaryActive $true `
+    -Hs2BindingHealthy $true
+if (-not $wallpaperHealth.Eligible -or
+    $wallpaperHealth.Reason -cne "three-display-bindings-healthy") {
+    throw "Wallpaper recovery requires healthy MTT, LIAN LI, and one primary display."
+}
+$wallpaperAmbiguousPrimary = Get-WallpaperEngineDisplayHealthDecision `
+    -Monitors @($primaryMonitor, $primaryMonitor.PSObject.Copy(), $hs2Monitor, $mttMonitor) `
+    -MttDevices @($healthyMttDevice) `
+    -Hs2SecondaryActive $true `
+    -Hs2BindingHealthy $true
+if ($wallpaperAmbiguousPrimary.Eligible -or
+    $wallpaperAmbiguousPrimary.Reason -cne "primary-display-ambiguous") {
+    throw "Wallpaper recovery must fail closed when the primary display is ambiguous."
+}
+$wallpaperExtraMonitor = [pscustomobject]@{
+    DeviceName = "\\.\DISPLAY99"
+    IsPrimary = $false
+}
+$wallpaperAmbiguousTopology = Get-WallpaperEngineDisplayHealthDecision `
+    -Monitors @($primaryMonitor, $hs2Monitor, $mttMonitor, $wallpaperExtraMonitor) `
+    -MttDevices @($healthyMttDevice) `
+    -Hs2SecondaryActive $true `
+    -Hs2BindingHealthy $true
+if ($wallpaperAmbiguousTopology.Eligible -or
+    $wallpaperAmbiguousTopology.Reason -cne "active-display-topology-ambiguous") {
+    throw "Wallpaper recovery must fail closed unless the active topology is exactly the bound three displays."
+}
+$wallpaperUnhealthyMtt = Get-WallpaperEngineDisplayHealthDecision `
+    -Monitors @($primaryMonitor, $hs2Monitor, $mttMonitor) `
+    -MttDevices @([pscustomobject]@{
+            InstanceId = $healthyMttDevice.InstanceId
+            Present = $true
+            Status = "Error"
+            ProblemCode = 10
+            BackingInstanceId = $healthyMttDevice.BackingInstanceId
+            BackingPresent = $true
+            BackingStatus = "OK"
+            BackingProblemCode = 0
+            HardwareIdVerified = $true
+        }) `
+    -Hs2SecondaryActive $true `
+    -Hs2BindingHealthy $true
+if ($wallpaperUnhealthyMtt.Eligible -or
+    $wallpaperUnhealthyMtt.Reason -cne "mtt-display-not-healthy") {
+    throw "Wallpaper recovery must fail closed when the bound MTT display is unhealthy."
+}
+$wallpaperDecisionNow = [DateTime]::Parse("2026-08-31T04:00:00Z").ToUniversalTime()
+$wallpaperBaseline = Get-WallpaperEngineRebindDecision `
+    -BaselineFingerprint "" `
+    -PendingFingerprint "" `
+    -CurrentFingerprint $wallpaperTopologyFingerprint `
+    -PendingSinceUtc ([DateTime]::MinValue) `
+    -LastRebindUtc ([DateTime]::MinValue) `
+    -NowUtc $wallpaperDecisionNow `
+    -Healthy $true `
+    -StabilitySeconds 30 `
+    -CooldownSeconds 900
+if ($wallpaperBaseline.Action -cne "Baseline") {
+    throw "The first healthy wallpaper topology observation must establish a baseline without rebind."
+}
+$wallpaperChanged = Get-WallpaperEngineRebindDecision `
+    -BaselineFingerprint "previous-topology" `
+    -PendingFingerprint "" `
+    -CurrentFingerprint $wallpaperTopologyFingerprint `
+    -PendingSinceUtc ([DateTime]::MinValue) `
+    -LastRebindUtc ([DateTime]::MinValue) `
+    -NowUtc $wallpaperDecisionNow `
+    -Healthy $true `
+    -StabilitySeconds 30 `
+    -CooldownSeconds 900
+if ($wallpaperChanged.Action -cne "Stabilizing" -or
+    $wallpaperChanged.PendingFingerprint -cne $wallpaperTopologyFingerprint) {
+    throw "A changed wallpaper topology must enter a stable debounce window first."
+}
+$wallpaperPremature = Get-WallpaperEngineRebindDecision `
+    -BaselineFingerprint "previous-topology" `
+    -PendingFingerprint $wallpaperTopologyFingerprint `
+    -CurrentFingerprint $wallpaperTopologyFingerprint `
+    -PendingSinceUtc $wallpaperDecisionNow.AddSeconds(-29) `
+    -LastRebindUtc ([DateTime]::MinValue) `
+    -NowUtc $wallpaperDecisionNow `
+    -Healthy $true `
+    -StabilitySeconds 30 `
+    -CooldownSeconds 900
+if ($wallpaperPremature.Action -cne "Stabilizing") {
+    throw "Wallpaper recovery must wait for the full stable debounce window."
+}
+$wallpaperRebind = Get-WallpaperEngineRebindDecision `
+    -BaselineFingerprint "previous-topology" `
+    -PendingFingerprint $wallpaperTopologyFingerprint `
+    -CurrentFingerprint $wallpaperTopologyFingerprint `
+    -PendingSinceUtc $wallpaperDecisionNow.AddSeconds(-30) `
+    -LastRebindUtc ([DateTime]::MinValue) `
+    -NowUtc $wallpaperDecisionNow `
+    -Healthy $true `
+    -StabilitySeconds 30 `
+    -CooldownSeconds 900
+if ($wallpaperRebind.Action -cne "Rebind") {
+    throw "A healthy stable topology change must allow one Wallpaper Engine render rebind."
+}
+$wallpaperCooldown = Get-WallpaperEngineRebindDecision `
+    -BaselineFingerprint "previous-topology" `
+    -PendingFingerprint $wallpaperTopologyFingerprint `
+    -CurrentFingerprint $wallpaperTopologyFingerprint `
+    -PendingSinceUtc $wallpaperDecisionNow.AddSeconds(-60) `
+    -LastRebindUtc $wallpaperDecisionNow.AddSeconds(-60) `
+    -NowUtc $wallpaperDecisionNow `
+    -Healthy $true `
+    -StabilitySeconds 30 `
+    -CooldownSeconds 900
+if ($wallpaperCooldown.Action -cne "Cooldown") {
+    throw "Wallpaper render rebinds must remain behind the long cooldown."
+}
+$wallpaperUnhealthy = Get-WallpaperEngineRebindDecision `
+    -BaselineFingerprint "previous-topology" `
+    -PendingFingerprint $wallpaperTopologyFingerprint `
+    -CurrentFingerprint $wallpaperTopologyFingerprint `
+    -PendingSinceUtc $wallpaperDecisionNow.AddSeconds(-60) `
+    -LastRebindUtc ([DateTime]::MinValue) `
+    -NowUtc $wallpaperDecisionNow `
+    -Healthy $false `
+    -StabilitySeconds 30 `
+    -CooldownSeconds 900
+if ($wallpaperUnhealthy.Action -cne "WaitForHealth") {
+    throw "Wallpaper render recovery must wait rather than act while any display binding is unhealthy."
+}
+
 function New-GuardWindow {
     param(
         [int64]$Hwnd,
@@ -844,6 +1055,24 @@ if (-not $validUsbPlan.Applicable -or
     ($validUsbPlan.Operations -join ",") -cne "RestartDedicatedHub,RemoveExactFailedChild,ScanDevices") {
     throw "HS2 USB recovery must target only the dedicated hub and its exact port-two Code 43 child."
 }
+$code10Display = [pscustomobject]@{
+    InstanceId = $validBinding.DisplayInstanceId
+    ParentInstanceId = $validHub.InstanceId
+    Present = $true
+    Status = "Error"
+    ProblemCode = 10
+}
+$code10Safety = Get-HS2BoundDeviceCode10Decision `
+    -Binding $validBinding `
+    -Snapshot ([pscustomobject]@{
+            Devices = @($validHub, $code10Display, $validLedSibling)
+        })
+if ($code10Safety.Action -cne "FailClosed" -or
+    $code10Safety.Reason -cne "bound-lian-li-code10-fail-closed" -or
+    $code10Safety.DeviceInstanceIds.Count -ne 1 -or
+    $code10Safety.DeviceInstanceIds[0] -cne $validBinding.DisplayInstanceId) {
+    throw "A bound LIAN LI Code 10 must fail closed before any PnP recovery is considered."
+}
 
 # A missing AD23 with no exact Code 43 child is not safe evidence for any PnP
 # mutation.  It can be normal boot enumeration, a firmware wedge, or a hot
@@ -1552,6 +1781,20 @@ $activeRecoveryText = Get-Content -Raw -LiteralPath $activeRecoveryPolicy
 if ($activeRecoveryText -notmatch [regex]::Escape('USB\VID_1A86&PID_AD23&MI_00\*')) {
     throw "HS2 USB recovery snapshots must retain the AD23 MI_00 display interface."
 }
+foreach ($pattern in @(
+        "Get-HS2BoundDeviceCode10Decision",
+        "bound-lian-li-code10-fail-closed",
+        "Get-WallpaperEngineTopologyFingerprint",
+        "Get-WallpaperEngineMttBindingDecision",
+        "DEVPKEY_Device_IsPresent",
+        "DEVPKEY_Device_ProblemCode",
+        "DEVPKEY_Device_HardwareIds",
+        "Get-WallpaperEngineDisplayHealthDecision",
+        "Get-WallpaperEngineRebindDecision")) {
+    if ($activeRecoveryText -notmatch [regex]::Escape($pattern)) {
+        throw "HS2 recovery policy is missing the bounded display-recovery guard: $pattern"
+    }
+}
 $missingBindingPath = Join-Path `
     ([IO.Path]::GetTempPath()) `
     ("absent-hs2-binding-{0}.json" -f [Guid]::NewGuid().ToString("N"))
@@ -1573,7 +1816,6 @@ $watchdogText = Get-Content -Raw -LiteralPath $watchdog
 foreach ($productionPath in @($watchdog, $displayPowerPolicy, $activeRecoveryPolicy)) {
     $productionText = Get-Content -Raw -LiteralPath $productionPath
     foreach ($forbiddenPrimaryOrVddToken in @(
-            "MTT1337",
             "PHLC34B",
             "ensure_only_display",
             "ensure_primary",
@@ -1753,6 +1995,51 @@ function Get-WatchdogFunctionText {
         throw "Watchdog must define exactly one $Name function."
     }
     return $matches[0].Extent.Text
+}
+
+$wallpaperRecoveryText = Get-WatchdogFunctionText -Name "Invoke-WallpaperEngineDisplayRecovery"
+foreach ($pattern in @(
+        "Get-WallpaperEngineTopologyFingerprint",
+        "Get-WallpaperEngineMttBindingDecision",
+        "Get-WallpaperEngineDisplayHealthDecision",
+        "Get-WallpaperEngineRebindDecision",
+        "WallpaperDisplayStabilitySeconds",
+        "WallpaperRenderRebindCooldownSeconds",
+        "Get-PnpDevice",
+        "-PresentOnly",
+        "-InstanceId",
+        "DISPLAY\MTT1337\*",
+        "ROOT\DISPLAY\*")) {
+    if ($wallpaperRecoveryText -notmatch [regex]::Escape($pattern)) {
+        throw "Wallpaper display recovery is missing its bounded health/decision guard: $pattern"
+    }
+}
+if ($wallpaperRecoveryText -match '(?s)Get-PnpDevice\s+`?\s*-PresentOnly\s+`?\s*-ErrorAction') {
+    throw "Wallpaper display recovery must use narrow InstanceId queries instead of a broad PnP enumeration."
+}
+$wallpaperRebindText = Get-WatchdogFunctionText -Name "Invoke-WallpaperEngineRenderRebind"
+$wallpaperResolverText = Get-WatchdogFunctionText -Name "Resolve-WallpaperEngineControlExecutable"
+foreach ($pattern in @(
+        "-control stop",
+        "-control play",
+        "ShellExecute")) {
+    if ($wallpaperRebindText -notmatch [regex]::Escape($pattern)) {
+        throw "Wallpaper render rebind must use the existing nonpersistent control client: $pattern"
+    }
+}
+if ($wallpaperResolverText -notmatch [regex]::Escape("wallpaper32.exe")) {
+    throw "Wallpaper render rebind must resolve the nonpersistent wallpaper32.exe control client."
+}
+foreach ($forbiddenWallpaperPattern in @(
+        "Start-Process",
+        "wallpaper64.exe",
+        "-Verb RunAs",
+        "-config",
+        "-settings",
+        "-editor")) {
+    if ($wallpaperRebindText -match [regex]::Escape($forbiddenWallpaperPattern)) {
+        throw "Wallpaper render rebind must not launch an elevated persistent worker or modify GUI configuration: $forbiddenWallpaperPattern"
+    }
 }
 
 $preservedActiveText = Get-WatchdogFunctionText -Name "Set-HS2PreservedActiveState"

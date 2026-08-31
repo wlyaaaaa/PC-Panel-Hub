@@ -36,6 +36,10 @@ param(
     [ValidateRange(30, 600)][int]$HS2LConnectRecoveryStartupGraceSeconds = 120,
     [ValidateRange(5, 60)][int]$HS2LConnectRecoveryRetrySeconds = 5,
     [ValidateRange(15, 300)][int]$HS2LConnectRecoveryGraceSeconds = 90,
+    [ValidateRange(10, 300)][int]$WallpaperDisplayProbeSeconds = 15,
+    [ValidateRange(15, 600)][int]$WallpaperDisplayStabilitySeconds = 30,
+    [ValidateRange(300, 7200)][int]$WallpaperRenderRebindCooldownSeconds = 900,
+    [ValidateRange(250, 10000)][int]$WallpaperRenderRebindGapMilliseconds = 1500,
     [ValidateRange(0, 255)][int]$ActiveBrightness = 170,
     [ValidateRange(1, 65535)][int]$LConnectServicePort = 11021,
     [switch]$HybridRefresh,
@@ -99,6 +103,13 @@ $script:hs2WindowGuardSafeMonitorDevice = $null
 $script:hs2WindowGuardLastStatus = $null
 $script:hs2WindowGuardLastFailure = $null
 $script:hs2LastResumeHandledUtc = [DateTime]::MinValue
+$script:hs2Code10LastSignature = $null
+$script:wallpaperDisplayLastProbeUtc = [DateTime]::MinValue
+$script:wallpaperDisplayBaselineFingerprint = ""
+$script:wallpaperDisplayPendingFingerprint = ""
+$script:wallpaperDisplayPendingSinceUtc = [DateTime]::MinValue
+$script:wallpaperDisplayLastRebindUtc = [DateTime]::MinValue
+$script:wallpaperDisplayLastStatus = $null
 $script:turzxStackChild = $null
 $script:turzxBrightnessConsecutiveFailures = 0
 $script:turzxSerialRecoveryLastAttemptUtc = [DateTime]::MinValue
@@ -156,6 +167,243 @@ function Write-WatchdogLog {
     Write-BoundedLogLine -Path $logPath -Message $line -MaxBytes $MaxWatchdogLogBytes -BackupCount $LogBackupCount
     Write-Host $line
 }
+
+function Write-HS2Code10FailClosedWarning {
+    param([object]$Readiness)
+
+    $deviceIds = @()
+    if ($null -ne $Readiness -and
+        $null -ne $Readiness.PSObject.Properties["Code10DeviceInstanceIds"]) {
+        $deviceIds = @($Readiness.Code10DeviceInstanceIds | Sort-Object -Unique)
+    }
+    $signature = if ($deviceIds.Count -gt 0) {
+        $deviceIds -join "|"
+    }
+    else {
+        "bound-lian-li-code10"
+    }
+    if ($signature -cne $script:hs2Code10LastSignature) {
+        Write-WatchdogLog (
+            "HS2 LIAN LI Code10 fail-closed devices={0}; no automatic PnP, hub restart, device removal, or scan will run. Action: avoid Device Manager retry loops; power down before inspecting the HS2 USB header, cable, and auxiliary power path." -f `
+                $deviceIds.Count)
+        $script:hs2Code10LastSignature = $signature
+    }
+}
+
+function Resolve-WallpaperEngineControlExecutable {
+    $currentSessionId = [Diagnostics.Process]::GetCurrentProcess().SessionId
+    $controllerCandidates = New-Object "System.Collections.Generic.List[string]"
+    foreach ($engineProcess in @(Get-Process -Name "wallpaper64" -ErrorAction SilentlyContinue)) {
+        if ($engineProcess.SessionId -ne $currentSessionId) {
+            continue
+        }
+        $enginePath = $null
+        try {
+            $enginePath = [string]$engineProcess.Path
+        }
+        catch {
+            continue
+        }
+        if ([string]::IsNullOrWhiteSpace($enginePath)) {
+            continue
+        }
+        $controllerPath = Join-Path (Split-Path -Parent $enginePath) "wallpaper32.exe"
+        if (Test-Path -LiteralPath $controllerPath -PathType Leaf) {
+            [void]$controllerCandidates.Add($controllerPath)
+        }
+    }
+
+    $uniqueControllers = @($controllerCandidates | Sort-Object -Unique)
+    if ($uniqueControllers.Count -ne 1) {
+        return $null
+    }
+    return [string]$uniqueControllers[0]
+}
+
+function Invoke-WallpaperEngineRenderRebind {
+    $controlExecutable = Resolve-WallpaperEngineControlExecutable
+    if ([string]::IsNullOrWhiteSpace($controlExecutable)) {
+        return [pscustomobject]@{
+            Dispatched = $false
+            Status = "control-client-unavailable"
+        }
+    }
+
+    $currentSessionId = [Diagnostics.Process]::GetCurrentProcess().SessionId
+    $userShells = @(
+        Get-Process -Name "explorer" -ErrorAction SilentlyContinue |
+            Where-Object { $_.SessionId -eq $currentSessionId }
+    )
+    if ($userShells.Count -eq 0) {
+        return [pscustomobject]@{
+            Dispatched = $false
+            Status = "user-shell-unavailable"
+        }
+    }
+
+    $shellApplication = $null
+    try {
+        $shellApplicationType = [Type]::GetTypeFromProgID("Shell.Application")
+        if ($null -eq $shellApplicationType) {
+            throw "Shell.Application is unavailable."
+        }
+        $shellApplication = [Activator]::CreateInstance($shellApplicationType)
+        if ($null -eq $shellApplication) {
+            throw "Shell.Application could not be created."
+        }
+
+        # Dispatch through the existing interactive shell, rather than creating
+        # an elevated wallpaper worker from this Highest watchdog process.
+        $workingDirectory = Split-Path -Parent $controlExecutable
+        $shellApplication.ShellExecute(
+            $controlExecutable,
+            "-control stop",
+            $workingDirectory,
+            "open",
+            0)
+        Start-Sleep -Milliseconds $WallpaperRenderRebindGapMilliseconds
+        $shellApplication.ShellExecute(
+            $controlExecutable,
+            "-control play",
+            $workingDirectory,
+            "open",
+            0)
+        return [pscustomobject]@{
+            Dispatched = $true
+            Status = "control-stop-play-dispatched"
+        }
+    }
+    catch {
+        return [pscustomobject]@{
+            Dispatched = $false
+            Status = "control-dispatch-failed"
+            Error = $_.Exception.Message
+        }
+    }
+    finally {
+        if ($null -ne $shellApplication) {
+            try {
+                [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shellApplication)
+            }
+            catch { }
+        }
+    }
+}
+
+function Invoke-WallpaperEngineDisplayRecovery {
+    $nowUtc = [DateTime]::UtcNow
+    if ($script:wallpaperDisplayLastProbeUtc -ne [DateTime]::MinValue -and
+        ($nowUtc - $script:wallpaperDisplayLastProbeUtc).TotalSeconds -lt
+        $WallpaperDisplayProbeSeconds) {
+        return
+    }
+    $script:wallpaperDisplayLastProbeUtc = $nowUtc
+
+    try {
+        $nativeMethods = Initialize-HS2ExclusiveWindowGuardNativeMethods
+        if ($null -eq $nativeMethods) {
+            throw "display monitor snapshot methods are unavailable."
+        }
+        $monitors = @($nativeMethods::CaptureMonitors())
+        $mttMonitorNodes = @(
+            Get-PnpDevice `
+                -PresentOnly `
+                -InstanceId "DISPLAY\MTT1337\*" `
+                -ErrorAction Stop
+        )
+        $mttBackingNodes = @(
+            Get-PnpDevice `
+                -PresentOnly `
+                -InstanceId "ROOT\DISPLAY\*" `
+                -ErrorAction Stop
+        )
+        $mttBinding = Get-WallpaperEngineMttBindingDecision `
+            -MttMonitorNodes $mttMonitorNodes `
+            -BackingNodes $mttBackingNodes `
+            -PropertyReader {
+                param($InstanceId, $KeyName)
+                Get-HS2PnpPropertyValue `
+                    -InstanceId ([string]$InstanceId) `
+                    -KeyName ([string]$KeyName)
+            }
+        $mttDevices = if ($mttBinding.Found) {
+            @($mttBinding.Device)
+        }
+        else {
+            @()
+        }
+        $hs2BindingHealthy = $false
+        if ($script:hs2DisplayStateActive) {
+            $hs2BindingHealthy = Test-HS2CurrentSecondaryBindingHealthy
+        }
+        $health = Get-WallpaperEngineDisplayHealthDecision `
+            -Monitors $monitors `
+            -MttDevices $mttDevices `
+            -Hs2SecondaryActive $script:hs2DisplayStateActive `
+            -Hs2BindingHealthy $hs2BindingHealthy
+        $currentFingerprint = Get-WallpaperEngineTopologyFingerprint `
+            -Monitors $monitors
+    }
+    catch {
+        $status = "probe-failed"
+        if ($status -cne $script:wallpaperDisplayLastStatus) {
+            Write-WatchdogLog (
+                "Wallpaper Engine display recovery action={0}: {1}" -f `
+                    $status,
+                    $_.Exception.Message)
+            $script:wallpaperDisplayLastStatus = $status
+        }
+        return
+    }
+
+    $decision = Get-WallpaperEngineRebindDecision `
+        -BaselineFingerprint $script:wallpaperDisplayBaselineFingerprint `
+        -PendingFingerprint $script:wallpaperDisplayPendingFingerprint `
+        -CurrentFingerprint $currentFingerprint `
+        -PendingSinceUtc $script:wallpaperDisplayPendingSinceUtc `
+        -LastRebindUtc $script:wallpaperDisplayLastRebindUtc `
+        -NowUtc $nowUtc `
+        -Healthy $health.Eligible `
+        -StabilitySeconds $WallpaperDisplayStabilitySeconds `
+        -CooldownSeconds $WallpaperRenderRebindCooldownSeconds
+    $script:wallpaperDisplayPendingFingerprint = [string]$decision.PendingFingerprint
+    $script:wallpaperDisplayPendingSinceUtc = [DateTime]$decision.PendingSinceUtc
+
+    $rebindStatus = $null
+    switch ([string]$decision.Action) {
+        "Baseline" {
+            $script:wallpaperDisplayBaselineFingerprint = $currentFingerprint
+        }
+        "Rebind" {
+            $rebind = Invoke-WallpaperEngineRenderRebind
+            # A failed dispatch still consumes this topology event.  Repeating
+            # stop/play from a High-integrity watcher is riskier than waiting
+            # for a later real display change after the long cooldown.
+            $script:wallpaperDisplayLastRebindUtc = $nowUtc
+            $script:wallpaperDisplayBaselineFingerprint = $currentFingerprint
+            $script:wallpaperDisplayPendingFingerprint = ""
+            $script:wallpaperDisplayPendingSinceUtc = [DateTime]::MinValue
+            $rebindStatus = [string]$rebind.Status
+        }
+    }
+
+    $status = "{0}|health={1}|rebind={2}" -f `
+        $decision.Action,
+        $health.Reason,
+        $rebindStatus
+    if ($status -cne $script:wallpaperDisplayLastStatus) {
+        Write-WatchdogLog (
+            "Wallpaper Engine display recovery action={0} health={1} stableSeconds={2} cooldownSeconds={3} retryAfterSeconds={4} rebind={5}" -f `
+                $decision.Action,
+                $health.Reason,
+                $WallpaperDisplayStabilitySeconds,
+                $WallpaperRenderRebindCooldownSeconds,
+                $decision.RetryAfterSeconds,
+                $rebindStatus)
+        $script:wallpaperDisplayLastStatus = $status
+    }
+}
+
 function Stop-Stack {
     param([string]$Reason)
     Write-WatchdogLog ("stop stack reason={0}" -f $Reason)
@@ -639,6 +887,13 @@ function Invoke-HS2InitialActiveMaintenance {
         }
     }
     if ($controllerReadiness.Action -ne "Ready") {
+        if ([string]$controllerReadiness.Reason -ceq
+            "bound-lian-li-code10-fail-closed") {
+            Write-HS2Code10FailClosedWarning -Readiness $controllerReadiness
+        }
+        else {
+            $script:hs2Code10LastSignature = $null
+        }
         $script:hs2NativeDisplayStateActive = $false
         $script:hs2DisplayStateActive = $false
         $script:hs2ActiveCurrentRetrySeconds = $HS2ActiveRetrySeconds
@@ -652,6 +907,7 @@ function Invoke-HS2InitialActiveMaintenance {
         }
         return
     }
+    $script:hs2Code10LastSignature = $null
     if ($null -ne $script:hs2ControllerReadinessWaitReason) {
         Write-WatchdogLog (
             "HS2 controller endpoint ready endpoint={0}; resuming preserved-mode L-Connect activation" -f `
@@ -1525,6 +1781,11 @@ Write-WatchdogLog (
     "HS2 native recovery=enabled retrySeconds={0} verifySeconds={1}" -f `
         $HS2ActiveRetrySeconds,
         $HS2ActiveVerifySeconds)
+Write-WatchdogLog (
+    "Wallpaper Engine render recovery=topology-or-primary-only probeSeconds={0} stabilitySeconds={1} cooldownSeconds={2}; HDR-only changes are ignored" -f `
+        $WallpaperDisplayProbeSeconds,
+        $WallpaperDisplayStabilitySeconds,
+        $WallpaperRenderRebindCooldownSeconds)
 
 $child = Set-TurzxChildHeartbeatStartupWindow -Child $null
 $consecutiveFailures = 0
@@ -1534,6 +1795,7 @@ try {
     Set-ActiveDisplayState -Reason "watchdog-start"
     Invoke-HS2OverlayHealthCheck
     Invoke-HS2ExclusiveWindowProtection
+    Invoke-WallpaperEngineDisplayRecovery
     $initialAttempt = Invoke-TurzxStackRestartAttempt -Reason "watchdog-start"
     $child = Set-TurzxChildHeartbeatStartupWindow -Child $initialAttempt.Child
     if (-not $initialAttempt.Succeeded) { $consecutiveFailures = 1 }
@@ -1637,6 +1899,7 @@ try {
         Invoke-HS2ActiveMaintenance
         Invoke-HS2OverlayHealthCheck
         Invoke-HS2ExclusiveWindowProtection
+        Invoke-WallpaperEngineDisplayRecovery
 
         if ($null -eq $child) {
             $consecutiveFailures++

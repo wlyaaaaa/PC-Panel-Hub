@@ -77,6 +77,353 @@ function Get-HS2LConnectRecoveryFollowUpDecision {
     return [pscustomobject]@{ Action = "SlowRetry" }
 }
 
+function Get-HS2BoundDeviceCode10Decision {
+    param(
+        [object]$Binding,
+        [object]$Snapshot
+    )
+
+    if ($null -eq $Binding -or $null -eq $Snapshot -or
+        $null -eq $Snapshot.PSObject.Properties["Devices"]) {
+        return [pscustomobject]@{
+            Action = "Continue"
+            Reason = "binding-or-snapshot-unavailable"
+            DeviceInstanceIds = @()
+        }
+    }
+
+    $boundIds = @(
+        [string]$Binding.HubInstanceId,
+        [string]$Binding.DisplayInstanceId,
+        [string]$Binding.DisplayInterfaceInstanceId,
+        [string]$Binding.LedInstanceId
+    ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    if ($boundIds.Count -eq 0) {
+        return [pscustomobject]@{
+            Action = "Continue"
+            Reason = "binding-identities-unavailable"
+            DeviceInstanceIds = @()
+        }
+    }
+
+    $code10Devices = @(
+        @($Snapshot.Devices) | Where-Object {
+            $isPresent = ($null -eq $_.PSObject.Properties["Present"]) -or [bool]$_.Present
+            $isPresent -and
+            $boundIds -contains [string]$_.InstanceId -and
+            [int]$_.ProblemCode -eq 10
+        }
+    )
+    if ($code10Devices.Count -gt 0) {
+        return [pscustomobject]@{
+            Action = "FailClosed"
+            Reason = "bound-lian-li-code10-fail-closed"
+            DeviceInstanceIds = @($code10Devices | ForEach-Object { [string]$_.InstanceId } | Sort-Object -Unique)
+        }
+    }
+
+    return [pscustomobject]@{
+        Action = "Continue"
+        Reason = "no-bound-lian-li-code10"
+        DeviceInstanceIds = @()
+    }
+}
+
+function Get-WallpaperEngineTopologyFingerprint {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Monitors
+    )
+
+    $identityParts = @(
+        $Monitors |
+            Where-Object {
+                -not [string]::IsNullOrWhiteSpace([string]$_.DeviceName)
+            } |
+            ForEach-Object {
+                "{0}|primary={1}" -f `
+                    ([string]$_.DeviceName).ToUpperInvariant(),
+                    ([bool]$_.IsPrimary)
+            } |
+            Sort-Object -Unique
+    )
+    return ($identityParts -join ";")
+}
+
+function Get-WallpaperEngineMttBindingDecision {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$MttMonitorNodes,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$BackingNodes,
+        [Parameter(Mandatory = $true)][scriptblock]$PropertyReader
+    )
+
+    $mttMonitors = @(
+        $MttMonitorNodes | Where-Object {
+            [string]$_.InstanceId -like "DISPLAY\MTT1337\*"
+        }
+    )
+    if ($MttMonitorNodes.Count -ne 1 -or $mttMonitors.Count -ne 1) {
+        return [pscustomobject]@{
+            Found = $false
+            Reason = "mtt-monitor-ambiguous"
+            Device = $null
+        }
+    }
+
+    $verifiedBackings = New-Object "System.Collections.Generic.List[object]"
+    foreach ($backingNode in @($BackingNodes | Where-Object {
+                [string]$_.InstanceId -like "ROOT\DISPLAY\*"
+            })) {
+        $hardwareIds = @(
+            & $PropertyReader `
+                ([string]$backingNode.InstanceId) `
+                "DEVPKEY_Device_HardwareIds" |
+                ForEach-Object { [string]$_ }
+        )
+        if ($hardwareIds.Count -eq 1 -and
+            $hardwareIds[0] -ceq "Root\MttVDD") {
+            [void]$verifiedBackings.Add($backingNode)
+        }
+    }
+    if ($verifiedBackings.Count -ne 1) {
+        return [pscustomobject]@{
+            Found = $false
+            Reason = "mtt-backing-ambiguous"
+            Device = $null
+        }
+    }
+
+    $mttMonitor = $mttMonitors[0]
+    $mttBacking = $verifiedBackings[0]
+    $mttPresent = & $PropertyReader `
+        ([string]$mttMonitor.InstanceId) `
+        "DEVPKEY_Device_IsPresent"
+    $mttProblemCode = & $PropertyReader `
+        ([string]$mttMonitor.InstanceId) `
+        "DEVPKEY_Device_ProblemCode"
+    $backingPresent = & $PropertyReader `
+        ([string]$mttBacking.InstanceId) `
+        "DEVPKEY_Device_IsPresent"
+    $backingProblemCode = & $PropertyReader `
+        ([string]$mttBacking.InstanceId) `
+        "DEVPKEY_Device_ProblemCode"
+    $device = [pscustomobject]@{
+        InstanceId = [string]$mttMonitor.InstanceId
+        Present = [bool]$mttPresent
+        Status = [string]$mttMonitor.Status
+        ProblemCode = if ($null -eq $mttProblemCode) { -1 } else { [int]$mttProblemCode }
+        BackingInstanceId = [string]$mttBacking.InstanceId
+        BackingPresent = [bool]$backingPresent
+        BackingStatus = [string]$mttBacking.Status
+        BackingProblemCode = if ($null -eq $backingProblemCode) { -1 } else { [int]$backingProblemCode }
+        HardwareIdVerified = $true
+    }
+    $healthy = (
+        [bool]$device.Present -and
+        [string]$device.Status -ceq "OK" -and
+        [int]$device.ProblemCode -eq 0 -and
+        [bool]$device.BackingPresent -and
+        [string]$device.BackingStatus -ceq "OK" -and
+        [int]$device.BackingProblemCode -eq 0
+    )
+    return [pscustomobject]@{
+        Found = $true
+        Reason = if ($healthy) { "verified-mtt-binding" } else { "mtt-binding-not-healthy" }
+        Device = $device
+    }
+}
+
+function Get-WallpaperEngineDisplayHealthDecision {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Monitors,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$MttDevices,
+        [Parameter(Mandatory = $true)][bool]$Hs2SecondaryActive,
+        [Parameter(Mandatory = $true)][bool]$Hs2BindingHealthy
+    )
+
+    $activeMonitors = @(
+        $Monitors | Where-Object {
+            -not [string]::IsNullOrWhiteSpace([string]$_.DeviceName)
+        }
+    )
+    $primaryMonitors = @($activeMonitors | Where-Object { [bool]$_.IsPrimary })
+    if ($primaryMonitors.Count -ne 1) {
+        return [pscustomobject]@{
+            Eligible = $false
+            Reason = "primary-display-ambiguous"
+            PrimaryMonitorDevice = $null
+            MttDeviceInstanceId = $null
+        }
+    }
+    if ($activeMonitors.Count -lt 3) {
+        return [pscustomobject]@{
+            Eligible = $false
+            Reason = "active-display-topology-incomplete"
+            PrimaryMonitorDevice = [string]$primaryMonitors[0].DeviceName
+            MttDeviceInstanceId = $null
+        }
+    }
+    if ($activeMonitors.Count -gt 3) {
+        return [pscustomobject]@{
+            Eligible = $false
+            Reason = "active-display-topology-ambiguous"
+            PrimaryMonitorDevice = [string]$primaryMonitors[0].DeviceName
+            MttDeviceInstanceId = $null
+        }
+    }
+
+    $healthyMttDevices = @(
+        $MttDevices | Where-Object {
+            $backingPresent = (
+                $null -ne $_.PSObject.Properties["BackingPresent"] -and
+                [bool]$_.BackingPresent)
+            $backingStatus = if ($null -eq $_.PSObject.Properties["BackingStatus"]) {
+                ""
+            }
+            else {
+                [string]$_.BackingStatus
+            }
+            $backingProblemCode = if (
+                $null -eq $_.PSObject.Properties["BackingProblemCode"]) {
+                -1
+            }
+            else {
+                [int]$_.BackingProblemCode
+            }
+            $hardwareIdVerified = (
+                $null -ne $_.PSObject.Properties["HardwareIdVerified"] -and
+                [bool]$_.HardwareIdVerified)
+            ([bool]$_.Present) -and
+            ([string]$_.Status -ceq "OK") -and
+            ([int]$_.ProblemCode -eq 0) -and
+            $backingPresent -and
+            ($backingStatus -ceq "OK") -and
+            ($backingProblemCode -eq 0) -and
+            $hardwareIdVerified
+        }
+    )
+    if ($healthyMttDevices.Count -ne 1) {
+        return [pscustomobject]@{
+            Eligible = $false
+            Reason = "mtt-display-not-healthy"
+            PrimaryMonitorDevice = [string]$primaryMonitors[0].DeviceName
+            MttDeviceInstanceId = $null
+        }
+    }
+    if (-not $Hs2SecondaryActive -or -not $Hs2BindingHealthy) {
+        return [pscustomobject]@{
+            Eligible = $false
+            Reason = "lian-li-display-binding-not-healthy"
+            PrimaryMonitorDevice = [string]$primaryMonitors[0].DeviceName
+            MttDeviceInstanceId = [string]$healthyMttDevices[0].InstanceId
+        }
+    }
+
+    return [pscustomobject]@{
+        Eligible = $true
+        Reason = "three-display-bindings-healthy"
+        PrimaryMonitorDevice = [string]$primaryMonitors[0].DeviceName
+        MttDeviceInstanceId = [string]$healthyMttDevices[0].InstanceId
+    }
+}
+
+function Get-WallpaperEngineRebindDecision {
+    param(
+        [AllowEmptyString()][string]$BaselineFingerprint,
+        [AllowEmptyString()][string]$PendingFingerprint,
+        [AllowEmptyString()][string]$CurrentFingerprint,
+        [Parameter(Mandatory = $true)][DateTime]$PendingSinceUtc,
+        [Parameter(Mandatory = $true)][DateTime]$LastRebindUtc,
+        [Parameter(Mandatory = $true)][DateTime]$NowUtc,
+        [Parameter(Mandatory = $true)][bool]$Healthy,
+        [ValidateRange(5, 600)][int]$StabilitySeconds = 30,
+        [ValidateRange(60, 7200)][int]$CooldownSeconds = 900
+    )
+
+    if ([string]::IsNullOrWhiteSpace($CurrentFingerprint)) {
+        return [pscustomobject]@{
+            Action = "WaitForTopology"
+            PendingFingerprint = ""
+            PendingSinceUtc = [DateTime]::MinValue
+            RetryAfterSeconds = 0
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($BaselineFingerprint)) {
+        if (-not $Healthy) {
+            return [pscustomobject]@{
+                Action = "WaitForHealth"
+                PendingFingerprint = ""
+                PendingSinceUtc = [DateTime]::MinValue
+                RetryAfterSeconds = 0
+            }
+        }
+        return [pscustomobject]@{
+            Action = "Baseline"
+            PendingFingerprint = ""
+            PendingSinceUtc = [DateTime]::MinValue
+            RetryAfterSeconds = 0
+        }
+    }
+    if ($CurrentFingerprint -ceq $BaselineFingerprint) {
+        return [pscustomobject]@{
+            Action = if ($Healthy) { "Healthy" } else { "WaitForHealth" }
+            PendingFingerprint = ""
+            PendingSinceUtc = [DateTime]::MinValue
+            RetryAfterSeconds = 0
+        }
+    }
+
+    if ($PendingFingerprint -cne $CurrentFingerprint -or
+        $PendingSinceUtc -eq [DateTime]::MinValue) {
+        return [pscustomobject]@{
+            Action = "Stabilizing"
+            PendingFingerprint = $CurrentFingerprint
+            PendingSinceUtc = $NowUtc
+            RetryAfterSeconds = $StabilitySeconds
+        }
+    }
+    if (-not $Healthy) {
+        return [pscustomobject]@{
+            Action = "WaitForHealth"
+            PendingFingerprint = $PendingFingerprint
+            PendingSinceUtc = $PendingSinceUtc
+            RetryAfterSeconds = 0
+        }
+    }
+
+    $stableForSeconds = [Math]::Max(
+        0,
+        ($NowUtc.ToUniversalTime() - $PendingSinceUtc.ToUniversalTime()).TotalSeconds)
+    if ($stableForSeconds -lt $StabilitySeconds) {
+        return [pscustomobject]@{
+            Action = "Stabilizing"
+            PendingFingerprint = $PendingFingerprint
+            PendingSinceUtc = $PendingSinceUtc
+            RetryAfterSeconds = [Math]::Ceiling($StabilitySeconds - $stableForSeconds)
+        }
+    }
+
+    if ($LastRebindUtc -ne [DateTime]::MinValue) {
+        $elapsedSinceRebind = [Math]::Max(
+            0,
+            ($NowUtc.ToUniversalTime() - $LastRebindUtc.ToUniversalTime()).TotalSeconds)
+        if ($elapsedSinceRebind -lt $CooldownSeconds) {
+            return [pscustomobject]@{
+                Action = "Cooldown"
+                PendingFingerprint = $PendingFingerprint
+                PendingSinceUtc = $PendingSinceUtc
+                RetryAfterSeconds = [Math]::Ceiling($CooldownSeconds - $elapsedSinceRebind)
+            }
+        }
+    }
+
+    return [pscustomobject]@{
+        Action = "Rebind"
+        PendingFingerprint = $PendingFingerprint
+        PendingSinceUtc = $PendingSinceUtc
+        RetryAfterSeconds = 0
+    }
+}
+
 function Get-HS2UsbRecoveryPlan {
     param(
         [Parameter(Mandatory = $true)][string]$BoundHubInstanceId,
@@ -632,6 +979,19 @@ function Get-HS2ControllerReadiness {
     else {
         $Snapshot
     }
+    $code10Decision = Get-HS2BoundDeviceCode10Decision `
+        -Binding $binding `
+        -Snapshot $snapshot
+    if ($code10Decision.Action -ceq "FailClosed") {
+        return [pscustomobject]@{
+            Action = "Wait"
+            Reason = [string]$code10Decision.Reason
+            EndpointInstanceId = $null
+            ResolvedHubInstanceId = $null
+            RebindRequired = $false
+            Code10DeviceInstanceIds = @($code10Decision.DeviceInstanceIds)
+        }
+    }
     $hubResolution = Resolve-HS2ControllerHub `
         -Binding $binding `
         -Snapshot $snapshot
@@ -745,6 +1105,19 @@ function Get-HS2LConnectServiceRecoveryEligibility {
     }
     else {
         $Snapshot
+    }
+    $code10Decision = Get-HS2BoundDeviceCode10Decision `
+        -Binding $binding `
+        -Snapshot $snapshot
+    if ($code10Decision.Action -ceq "FailClosed") {
+        return [pscustomobject]@{
+            Eligible = $false
+            Reason = [string]$code10Decision.Reason
+            EndpointInstanceId = $null
+            ResolvedHubInstanceId = $null
+            RebindRequired = $false
+            Code10DeviceInstanceIds = @($code10Decision.DeviceInstanceIds)
+        }
     }
     $hubResolution = Resolve-HS2ControllerHub `
         -Binding $binding `
