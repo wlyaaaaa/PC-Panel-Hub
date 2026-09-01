@@ -110,10 +110,17 @@ internal static class RenderPreview
 
         string idleTitle = (string)fpsTitleMethod.Invoke(null, new object[] { "idle" });
         string idleDetail = (string)fpsDetailMethod.Invoke(null, new object[] { new FpsSnapshot { Status = "idle" }, "idle" });
-        if (idleTitle != "等待游戏帧" || idleDetail != "PresentMon 正在等待游戏启动" || idleDetail.IndexOf("RT" + "SS", StringComparison.OrdinalIgnoreCase) >= 0)
+        if (idleTitle != "等待游戏帧" || idleDetail != "TimeAudit 正在等待游戏启动" || idleDetail.IndexOf("RT" + "SS", StringComparison.OrdinalIgnoreCase) >= 0)
         {
             Console.Error.WriteLine("Unexpected idle FPS copy: " + idleTitle + " / " + idleDetail);
             return 11;
+        }
+
+        string explicitIdleDetail = (string)fpsDetailMethod.Invoke(null, new object[] { new FpsSnapshot { Status = "idle", Detail = "当前未检测到活跃游戏渲染" }, "idle" });
+        if (explicitIdleDetail != "当前未检测到活跃游戏渲染")
+        {
+            Console.Error.WriteLine("FPS detail did not preserve collector health: " + explicitIdleDetail);
+            return 31;
         }
 
         MethodInfo resolvePhysicalDisksMethod = typeof(SideScreenRenderer).GetMethod("ResolvePhysicalDisks", BindingFlags.NonPublic | BindingFlags.Static);

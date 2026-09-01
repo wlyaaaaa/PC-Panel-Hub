@@ -14,7 +14,10 @@ namespace TURZX.SideScreen
     public static class SideScreenStreamApp
     {
         private const string DefaultMetricsUrl = "http://127.0.0.1:18765/snapshot";
-        private const int DefaultHttpTimeoutMs = 450;
+        // The metrics endpoint can take just over 600ms while TimeAudit is
+        // producing a fresh snapshot.  Keep enough headroom for that tail
+        // without allowing a fetch to consume the whole one-second frame.
+        private const int DefaultHttpTimeoutMs = 750;
         private const int DefaultPreviewIntervalSeconds = 45;
         private const int DefaultSendTimeoutMilliseconds = 10000;
         private const int DefaultDifferentialSendTimeoutMilliseconds = 900;
@@ -315,6 +318,11 @@ namespace TURZX.SideScreen
         internal static int DefaultPreviewIntervalSecondsForTest()
         {
             return DefaultPreviewIntervalSeconds;
+        }
+
+        internal static int DefaultHttpTimeoutMillisecondsForTest()
+        {
+            return DefaultHttpTimeoutMs;
         }
 
         internal static ProcessPriorityClass DesiredProcessPriorityForTest()

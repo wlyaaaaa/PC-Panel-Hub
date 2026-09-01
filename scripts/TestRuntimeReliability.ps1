@@ -110,7 +110,9 @@ foreach ($pattern in @(
     'Timeout.InfiniteTimeSpan',
     'FetchSnapshotForTest',
     'RunHardDeadlineProbeForTest',
-    'MaxResponseContentBufferSize = DefaultMaxMetricsPayloadBytes'
+    'MaxResponseContentBufferSize = DefaultMaxMetricsPayloadBytes',
+    'DefaultHttpTimeoutMs = 750',
+    'DefaultHttpTimeoutMillisecondsForTest'
 )) {
     if ($streamSource -notmatch [regex]::Escape($pattern)) {
         throw "Metrics fetch must enforce one total response deadline: $pattern"
@@ -771,6 +773,64 @@ if ($null -eq $heartbeatFunction) {
 }
 . ([scriptblock]::Create($heartbeatFunction.Extent.Text))
 
+$snapshotDecisionFunction = $watchdogAst.Find(
+    {
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq "Get-TurzxSnapshotStaleDecision"
+    },
+    $true)
+if ($null -eq $snapshotDecisionFunction) {
+    throw "Watchdog must define Get-TurzxSnapshotStaleDecision."
+}
+. ([scriptblock]::Create($snapshotDecisionFunction.Extent.Text))
+
+$freshSnapshotDecision = Get-TurzxSnapshotStaleDecision `
+    -SnapshotStatus "fresh" `
+    -ConsecutiveFailures 4 `
+    -Threshold 5
+if ($freshSnapshotDecision.IsStale -or
+    $freshSnapshotDecision.ConsecutiveFailures -ne 0 -or
+    $freshSnapshotDecision.FailureThresholdReached) {
+    throw "A fresh snapshot must clear the consecutive stale counter without recovery."
+}
+$firstStaleSnapshotDecision = Get-TurzxSnapshotStaleDecision `
+    -SnapshotStatus "stale:TimeoutException" `
+    -ConsecutiveFailures 0 `
+    -Threshold 5
+if (-not $firstStaleSnapshotDecision.IsStale -or
+    $firstStaleSnapshotDecision.ConsecutiveFailures -ne 1 -or
+    $firstStaleSnapshotDecision.FailureThresholdReached) {
+    throw "One snapshot timeout must be tolerated without opening recovery."
+}
+$fourthStaleSnapshotDecision = Get-TurzxSnapshotStaleDecision `
+    -SnapshotStatus "stale:TimeoutException" `
+    -ConsecutiveFailures 3 `
+    -Threshold 5
+if ($fourthStaleSnapshotDecision.FailureThresholdReached) {
+    throw "Snapshot recovery must remain closed below its consecutive threshold."
+}
+$fifthStaleSnapshotDecision = Get-TurzxSnapshotStaleDecision `
+    -SnapshotStatus "empty:TimeoutException" `
+    -ConsecutiveFailures 4 `
+    -Threshold 5
+if (-not $fifthStaleSnapshotDecision.FailureThresholdReached -or
+    $fifthStaleSnapshotDecision.ConsecutiveFailures -ne 5) {
+    throw "A sustained empty/timeout snapshot sequence must reach the bounded recovery threshold."
+}
+foreach ($pattern in @(
+    'MaxConsecutiveSnapshotStaleHeartbeats',
+    '$snapshotStaleHeartbeats',
+    'Get-TurzxSnapshotStaleDecision',
+    'FailureThresholdReached',
+    'snapshot stale tolerated',
+    'snapshot stale threshold reached'
+)) {
+    if ($watchdogStart -notmatch [regex]::Escape($pattern)) {
+        throw "Watchdog missing bounded snapshot stale recovery contract: $pattern"
+    }
+}
+
 $heartbeatTestRoot = Join-Path ([IO.Path]::GetTempPath()) ("turzx-heartbeat-slots-{0}" -f [guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Force -Path $heartbeatTestRoot | Out-Null
 $legacyHeartbeat = Join-Path $heartbeatTestRoot "stream-heartbeat.json"
@@ -803,6 +863,13 @@ try {
     }
     if (-not $slotHealth.Healthy -or $slotHealth.Reason -notmatch "stream-heartbeat-b.json") {
         throw "Watchdog did not recover from a locked legacy heartbeat via the alternate slot: $($slotHealth.Reason)"
+    }
+    Set-Content -LiteralPath $slotBHeartbeat -Value '{"frame":41,"status":"ok","snapshot_status":"stale:TimeoutException","error":null,"transport_mode":"verified_full_200","send_attempted":true,"send_ms":40,"elapsed_ms":80,"period_ms":3000}' -Encoding UTF8
+    (Get-Item -LiteralPath $slotBHeartbeat).LastWriteTimeUtc = [DateTime]::UtcNow
+    $staleSnapshotHealth = Get-StreamHeartbeatHealth
+    if (-not $staleSnapshotHealth.Healthy -or
+        $staleSnapshotHealth.SnapshotStatus -ne "stale:TimeoutException") {
+        throw "Watchdog must expose a stale snapshot status for the bounded decision layer."
     }
     # Keep subsequent fixtures deterministic even on filesystems whose write-time
     # resolution makes two immediate writes compare equal.

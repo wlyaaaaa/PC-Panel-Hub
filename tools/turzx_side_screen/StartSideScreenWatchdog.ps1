@@ -23,6 +23,7 @@ param(
     [int]$HeartbeatStartupGraceSeconds = 60,
     [int]$ShutdownStartupGraceSeconds = 180,
     [int]$MaxConsecutiveHeartbeatFailures = 3,
+    [ValidateRange(2, 20)][int]$MaxConsecutiveSnapshotStaleHeartbeats = 5,
     [int]$MaxConsecutiveFailures = 3,
     [ValidateRange(10, 3600)][int]$FailureCircuitBreakerSeconds = 30,
     [ValidateRange(2, 20)][int]$TurzxSerialRecoveryFailureThreshold = 3,
@@ -1539,6 +1540,41 @@ function Invoke-TurzxStackRestartAttempt {
     }
 }
 
+# A single metrics timeout is intentionally tolerated because the stream keeps
+# sending the last complete snapshot.  Only a bounded consecutive run should
+# enter the existing heartbeat recovery path.
+function Get-TurzxSnapshotStaleDecision {
+    param(
+        [AllowEmptyString()][string]$SnapshotStatus,
+        [int]$ConsecutiveFailures = 0,
+        [ValidateRange(2, 20)][int]$Threshold = 5
+    )
+
+    $staleKind = if ($SnapshotStatus -match '^(stale|empty):') {
+        [string]$Matches[1]
+    }
+    else {
+        $null
+    }
+    if ([string]::IsNullOrWhiteSpace($staleKind)) {
+        return [pscustomobject]@{
+            IsStale = $false
+            ConsecutiveFailures = 0
+            FailureThresholdReached = $false
+            Reason = "snapshot-fresh"
+        }
+    }
+
+    $nextFailures = [Math]::Max(0, $ConsecutiveFailures) + 1
+    return [pscustomobject]@{
+        IsStale = $true
+        ConsecutiveFailures = $nextFailures
+        FailureThresholdReached = ($nextFailures -ge $Threshold)
+        Reason = "snapshot-{0}-consecutive={1}/{2}" -f `
+            $staleKind, $nextFailures, $Threshold
+    }
+}
+
 function Get-StreamHeartbeatHealth {
     $candidates = @(
         $heartbeatPaths |
@@ -1566,6 +1602,13 @@ function Get-StreamHeartbeatHealth {
                 continue
             }
             $frameStatus = [string]$heartbeat.status
+            $snapshotStatusProperty = $heartbeat.PSObject.Properties["snapshot_status"]
+            $snapshotStatus = if ($null -eq $snapshotStatusProperty) {
+                $null
+            }
+            else {
+                [string]$snapshotStatusProperty.Value
+            }
             if ($frameStatus -ne "ok") {
                 return [pscustomobject]@{
                     Healthy = $false
@@ -1664,6 +1707,7 @@ function Get-StreamHeartbeatHealth {
             return [pscustomobject]@{
                 Healthy = $true
                 Reason = ("frame={0} source={1}" -f [int64]$heartbeat.frame, $item.Name)
+                SnapshotStatus = $snapshotStatus
             }
         }
         catch {
@@ -1790,6 +1834,7 @@ Write-WatchdogLog (
 $child = Set-TurzxChildHeartbeatStartupWindow -Child $null
 $consecutiveFailures = 0
 $heartbeatFailures = 0
+$snapshotStaleHeartbeats = 0
 try {
     Write-WatchdogLog "Windows display window preservation deferred until HS2 secondary binding is verified"
     Set-ActiveDisplayState -Reason "watchdog-start"
@@ -1822,6 +1867,7 @@ try {
                         Enter-SleepDisplayState
                         $child = Set-TurzxChildHeartbeatStartupWindow -Child $null
                         $heartbeatFailures = 0
+                        $snapshotStaleHeartbeats = 0
                     }
                     elseif ($eventType -eq 7 -or $eventType -eq 18) {
                         $resumeNowUtc = [DateTime]::UtcNow
@@ -1855,6 +1901,7 @@ try {
                             $child = Set-TurzxChildHeartbeatStartupWindow -Child $resumeAttempt.Child
                             if (-not $resumeAttempt.Succeeded) { $consecutiveFailures++ }
                             $heartbeatFailures = 0
+                            $snapshotStaleHeartbeats = 0
                         }
                     }
                 }
@@ -1893,6 +1940,7 @@ try {
             $restartAttempt = Invoke-TurzxStackRestartAttempt -Reason "restart-request"
             $child = Set-TurzxChildHeartbeatStartupWindow -Child $restartAttempt.Child
             if (-not $restartAttempt.Succeeded) { $consecutiveFailures++ }
+            $snapshotStaleHeartbeats = 0
             continue
         }
 
@@ -1913,6 +1961,7 @@ try {
             }
             $child = Set-TurzxChildHeartbeatStartupWindow -Child $missingChildAttempt.Child
             $heartbeatFailures = 0
+            $snapshotStaleHeartbeats = 0
             continue
         }
         if ($child.HasExited) {
@@ -1923,23 +1972,53 @@ try {
                 $child = Set-TurzxChildHeartbeatStartupWindow -Child $childExitAttempt.Child
                 $consecutiveFailures = 0
                 $heartbeatFailures = 0
+                $snapshotStaleHeartbeats = 0
                 continue
             }
             $childExitAttempt = Invoke-TurzxStackRestartAttempt -Reason "child-exit" -DelaySeconds 3
             $child = Set-TurzxChildHeartbeatStartupWindow -Child $childExitAttempt.Child
             $heartbeatFailures = 0
+            $snapshotStaleHeartbeats = 0
         }
         elseif (Test-TurzxChildHeartbeatStartupDeadline) {
             $heartbeatHealth = Get-StreamHeartbeatHealth
             if ($heartbeatHealth.Healthy) {
-                $script:childHeartbeatObserved = $true
-                if ($heartbeatFailures -gt 0) {
-                    Write-WatchdogLog ("heartbeat recovered {0}" -f $heartbeatHealth.Reason)
+                $previousSnapshotStaleHeartbeats = $snapshotStaleHeartbeats
+                $snapshotDecision = Get-TurzxSnapshotStaleDecision `
+                    -SnapshotStatus $heartbeatHealth.SnapshotStatus `
+                    -ConsecutiveFailures $snapshotStaleHeartbeats `
+                    -Threshold $MaxConsecutiveSnapshotStaleHeartbeats
+                $snapshotStaleHeartbeats = $snapshotDecision.ConsecutiveFailures
+                if ($snapshotDecision.IsStale -and
+                    $snapshotDecision.ConsecutiveFailures -eq 1) {
+                    Write-WatchdogLog (
+                        "snapshot stale tolerated reason={0}" -f $snapshotDecision.Reason)
                 }
-                $heartbeatFailures = 0
-                $consecutiveFailures = 0
+                elseif ($snapshotDecision.IsStale -and
+                    $snapshotDecision.ConsecutiveFailures -eq $MaxConsecutiveSnapshotStaleHeartbeats) {
+                    Write-WatchdogLog (
+                        "snapshot stale threshold reached reason={0}" -f $snapshotDecision.Reason)
+                }
+                if ($snapshotDecision.FailureThresholdReached) {
+                    $heartbeatHealth = [pscustomobject]@{
+                        Healthy = $false
+                        Reason = $snapshotDecision.Reason
+                    }
+                }
+                else {
+                    $script:childHeartbeatObserved = $true
+                    if ($heartbeatFailures -gt 0) {
+                        Write-WatchdogLog ("heartbeat recovered {0}" -f $heartbeatHealth.Reason)
+                    }
+                    elseif ($previousSnapshotStaleHeartbeats -gt 0) {
+                        Write-WatchdogLog (
+                            "snapshot recovered after consecutive={0}" -f $previousSnapshotStaleHeartbeats)
+                    }
+                    $heartbeatFailures = 0
+                    $consecutiveFailures = 0
+                }
             }
-            else {
+            if (-not $heartbeatHealth.Healthy) {
                 if (-not $script:childHeartbeatObserved -and $heartbeatHealth.Reason -eq "missing") {
                     $consecutiveFailures++
                     Write-WatchdogLog (
@@ -1948,6 +2027,7 @@ try {
                     $child = Set-TurzxChildHeartbeatStartupWindow -Child $heartbeatAttempt.Child
                     $consecutiveFailures = 0
                     $heartbeatFailures = 0
+                    $snapshotStaleHeartbeats = 0
                     continue
                 }
                 $heartbeatFailures++
@@ -1959,11 +2039,13 @@ try {
                         $child = Set-TurzxChildHeartbeatStartupWindow -Child $heartbeatAttempt.Child
                         $consecutiveFailures = 0
                         $heartbeatFailures = 0
+                        $snapshotStaleHeartbeats = 0
                         continue
                     }
                     $heartbeatAttempt = Invoke-TurzxStackRestartAttempt -Reason "heartbeat-unhealthy" -DelaySeconds 3
                     $child = Set-TurzxChildHeartbeatStartupWindow -Child $heartbeatAttempt.Child
                     $heartbeatFailures = 0
+                    $snapshotStaleHeartbeats = 0
                 }
             }
         }

@@ -557,13 +557,13 @@ def _trust_fps(fps: Any) -> dict[str, Any]:
         detail = "游戏帧捕获正常"
     elif status == "idle":
         score = 100
-        detail = "PresentMon 正常，当前没有游戏帧"
+        detail = str(data.get("detail") or "TimeAudit 正常，当前没有游戏帧")
     elif status == "disabled":
         score = 100
         detail = "FPS 采集未启用"
     elif status == "connecting":
         score = 90
-        detail = "正在连接 PresentMon 数据源"
+        detail = str(data.get("detail") or "正在连接 TimeAudit 帧源")
     elif status == "stale":
         score = 55
         detail = str(data.get("detail") or "帧数据已过期")
@@ -2191,13 +2191,15 @@ async def _read_timeaudit_latest_snapshot_async() -> dict[str, Any]:
         row = await asyncio.wait_for(
             conn.fetchrow(
                 """
-                SELECT timestamp,
-                       current_fps,
-                       average_fps,
-                       one_percent_low_fps,
-                       frametime_ms,
-                       frametime_jitter
-                FROM public.fact_system_hardware
+                SELECT h.timestamp,
+                       h.current_fps,
+                       h.average_fps,
+                       h.one_percent_low_fps,
+                       h.frametime_ms,
+                       h.frametime_jitter,
+                       to_jsonb(h) ->> 'fps_capture_status' AS fps_capture_status,
+                       to_jsonb(h) ->> 'fps_capture_detail' AS fps_capture_detail
+                FROM public.fact_system_hardware AS h
                 ORDER BY timestamp DESC
                 LIMIT 1
                 """
@@ -2226,6 +2228,10 @@ async def _read_timeaudit_latest_snapshot_async() -> dict[str, Any]:
 def read_fps_snapshot() -> dict[str, Any]:
     timeaudit = read_timeaudit_latest_snapshot()
     cache_status = (_empty_to_none(timeaudit.get("_status")) or "error").lower()
+    capture_status = (
+        _empty_to_none(timeaudit.get("fps_capture_status")) or ""
+    ).lower()
+    capture_detail = _empty_to_none(timeaudit.get("fps_capture_detail"))
     source = "disabled" if cache_status == "disabled" else "timeaudit_postgres"
     base = {
         "current": None,
@@ -2234,6 +2240,8 @@ def read_fps_snapshot() -> dict[str, Any]:
         "frame_time_ms": None,
         "status": cache_status,
         "source": source,
+        "capture_status": capture_status or None,
+        "capture_detail": capture_detail,
         "sample_age_seconds": None,
         "detail": _empty_to_none(timeaudit.get("_detail")),
     }
@@ -2266,10 +2274,28 @@ def read_fps_snapshot() -> dict[str, Any]:
         base["detail"] = f"最近帧样本已过期（{sample_age:.1f}s）"
     elif current is not None:
         base["status"] = "active"
-        base["detail"] = "PresentMon 帧采集正常"
-    else:
+        base["detail"] = "TimeAudit 帧采集正常"
+    elif capture_status == "gated_idle":
         base["status"] = "idle"
-        base["detail"] = "PresentMon 正常，等待游戏启动"
+        base["detail"] = "当前未检测到活跃游戏渲染"
+    elif capture_status == "starting":
+        base["status"] = "connecting"
+        base["detail"] = "TimeAudit 帧源正在启动并匹配游戏帧"
+    elif capture_status == "waiting_frames":
+        base["status"] = "error"
+        base["detail"] = "已检测到游戏渲染，但 TimeAudit 尚未收到匹配帧"
+    elif capture_status == "source_unavailable":
+        base["status"] = "error"
+        base["detail"] = "TimeAudit 的 GPU 渲染检测源不可用"
+    elif capture_status == "error":
+        base["status"] = "error"
+        base["detail"] = "TimeAudit 帧采集器异常"
+    elif capture_status == "active":
+        base["status"] = "error"
+        base["detail"] = "TimeAudit 报告帧采集活跃，但最新帧数值为空"
+    else:
+        base["status"] = "error"
+        base["detail"] = "TimeAudit 未提供帧采集健康状态"
     return base
 
 

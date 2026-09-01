@@ -86,6 +86,8 @@ public static class TestStreamCadenceProgram
             out fallbackStatus);
         Equal("missing cache returns empty snapshot sequence", 0L, empty.Sequence.Value);
         StartsWith("missing cache status marks empty data", "empty:TimeoutException", fallbackStatus);
+        Equal("default metrics deadline covers the observed tail without consuming the full frame", 750,
+            SideScreenStreamApp.DefaultHttpTimeoutMillisecondsForTest());
 
         VerifyMetricsFetchTotalDeadline();
         VerifyMetricsFetchDeadlineWithoutTimerCallback();

@@ -189,7 +189,7 @@ namespace TURZX.SideScreen
             string current = FormatWholeOptional(fps == null ? null : fps.Current);
             DrawText(g, current, fonts.Mono64Bold, Dark, x + 24, y + 32);
             DrawText(g, "FPS", fonts.Sans16Bold, Dark, x + 24 + MeasureWidth(g, current, fonts.Mono64Bold) + 10, y + 68);
-            DrawRightText(g, "PresentMon · 活跃", fonts.Sans10Bold, NetGreen, x + 258, y + 18, 150, 14);
+            DrawRightText(g, "TimeAudit · 活跃", fonts.Sans10Bold, NetGreen, x + 258, y + 18, 150, 14);
 
             DrawMiniPanel(g, fonts, x + 184, y + 44, 68, 54, "平均", FormatWholeOptional(fps == null ? null : fps.Average), Dark);
             DrawMiniPanel(g, fonts, x + 258, y + 44, 64, 54, "1%低", FormatWholeOptional(fps == null ? null : fps.Low1Percent), GpuPink);
@@ -905,28 +905,28 @@ namespace TURZX.SideScreen
 
         private static string FpsStatusDetail(FpsSnapshot fps, string status)
         {
+            string suppliedDetail = fps == null ? null : fps.Detail;
             if (status == "connecting")
             {
-                return "PresentMon 正在建立采集连接";
+                return String.IsNullOrWhiteSpace(suppliedDetail) ? "TimeAudit 正在建立采集连接" : suppliedDetail;
             }
             if (status == "stale")
             {
                 if (fps != null && fps.SampleAgeSeconds.HasValue)
                 {
-                    return "PresentMon 最近样本 " + FormatNumber(fps.SampleAgeSeconds, "0.#") + "s 前";
+                    return "TimeAudit 最近样本 " + FormatNumber(fps.SampleAgeSeconds, "0.#") + "s 前";
                 }
-                return "PresentMon 最近样本已失效";
+                return "TimeAudit 最近样本已失效";
             }
             if (status == "error")
             {
-                string detail = fps == null ? null : fps.Detail;
-                return String.IsNullOrWhiteSpace(detail) ? "PresentMon 无法读取帧数据" : "PresentMon · " + detail;
+                return String.IsNullOrWhiteSpace(suppliedDetail) ? "TimeAudit 无法读取帧数据" : suppliedDetail;
             }
             if (status == "disabled")
             {
-                return "配置 TIMEAUDIT_DSN 后启用 PresentMon 数据";
+                return "配置 TIMEAUDIT_DSN 后启用 TimeAudit 帧数据";
             }
-            return "PresentMon 正在等待游戏启动";
+            return String.IsNullOrWhiteSpace(suppliedDetail) ? "TimeAudit 正在等待游戏启动" : suppliedDetail;
         }
 
         private static string FormatTemperature(double? value)

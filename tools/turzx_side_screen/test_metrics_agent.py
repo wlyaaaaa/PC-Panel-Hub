@@ -1773,7 +1773,28 @@ class MetricsAgentTests(unittest.TestCase):
         self.assertLess(fps["sample_age_seconds"], 1.0)
         self.assertEqual("timeaudit_postgres", fps["source"])
 
-    def test_fps_snapshot_fresh_zero_row_is_normal_idle(self):
+    def test_fps_snapshot_fresh_zero_row_is_idle_only_when_gate_is_idle(self):
+        timestamp = metrics_agent.dt.datetime.now(metrics_agent.dt.timezone.utc)
+        with patch.object(
+            metrics_agent,
+            "read_timeaudit_latest_snapshot",
+            return_value={
+                "_status": "ok",
+                "timestamp": timestamp,
+                "current_fps": 0.0,
+                "average_fps": 0.0,
+                "one_percent_low_fps": 0.0,
+                "frametime_ms": 0.0,
+                "fps_capture_status": "gated_idle",
+            },
+        ):
+            fps = metrics_agent.read_fps_snapshot()
+
+        self.assertEqual("idle", fps["status"])
+        self.assertEqual("timeaudit_postgres", fps["source"])
+        self.assertIsNone(fps["current"])
+
+    def test_fps_snapshot_fresh_zero_without_capture_health_is_error(self):
         timestamp = metrics_agent.dt.datetime.now(metrics_agent.dt.timezone.utc)
         with patch.object(
             metrics_agent,
@@ -1789,9 +1810,47 @@ class MetricsAgentTests(unittest.TestCase):
         ):
             fps = metrics_agent.read_fps_snapshot()
 
-        self.assertEqual("idle", fps["status"])
-        self.assertEqual("timeaudit_postgres", fps["source"])
-        self.assertIsNone(fps["current"])
+        self.assertEqual("error", fps["status"])
+        self.assertIn("健康状态", fps["detail"])
+
+    def test_fps_snapshot_rendering_without_frames_is_error(self):
+        timestamp = metrics_agent.dt.datetime.now(metrics_agent.dt.timezone.utc)
+        with patch.object(
+            metrics_agent,
+            "read_timeaudit_latest_snapshot",
+            return_value={
+                "_status": "ok",
+                "timestamp": timestamp,
+                "current_fps": 0.0,
+                "average_fps": 0.0,
+                "one_percent_low_fps": 0.0,
+                "frametime_ms": 0.0,
+                "fps_capture_status": "waiting_frames",
+            },
+        ):
+            fps = metrics_agent.read_fps_snapshot()
+
+        self.assertEqual("error", fps["status"])
+        self.assertIn("游戏渲染", fps["detail"])
+
+    def test_fps_snapshot_capture_starting_is_connecting(self):
+        timestamp = metrics_agent.dt.datetime.now(metrics_agent.dt.timezone.utc)
+        with patch.object(
+            metrics_agent,
+            "read_timeaudit_latest_snapshot",
+            return_value={
+                "_status": "ok",
+                "timestamp": timestamp,
+                "current_fps": 0.0,
+                "average_fps": 0.0,
+                "one_percent_low_fps": 0.0,
+                "frametime_ms": 0.0,
+                "fps_capture_status": "starting",
+            },
+        ):
+            fps = metrics_agent.read_fps_snapshot()
+
+        self.assertEqual("connecting", fps["status"])
 
     def test_fps_snapshot_old_row_is_stale_not_live(self):
         timestamp = metrics_agent.dt.datetime.now(metrics_agent.dt.timezone.utc) - metrics_agent.dt.timedelta(seconds=30)
