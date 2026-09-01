@@ -73,13 +73,17 @@ foreach ($pattern in @(
         "Set-HS2PreservedActiveState",
         "Set-HS2VerifiedSecondaryState",
         "Invoke-HS2InitialActiveMaintenance",
-        "Set-HS2NativeActiveState",
+        "Get-HS2CurrentSecondaryDesktopPathDecision",
+        "Wait-HS2SecondaryDesktopPathActive",
         "HS2SecondaryPromotionGraceSeconds = 30",
         "Get-HS2SecondaryPromotionDecision",
         "mode=one-attempt-per-startup-or-resume-epoch")) {
     if ($watchdogText -notmatch [regex]::Escape($pattern)) {
         throw "HS2 preserved-mode watchdog contract missing: $pattern"
     }
+}
+if ($watchdogText -match [regex]::Escape('-EnableSecondaryScreen:$false')) {
+    throw "Production startup must never demote the user-required HS2 Windows secondary mode."
 }
 
 $hiddenLaunchers = @(

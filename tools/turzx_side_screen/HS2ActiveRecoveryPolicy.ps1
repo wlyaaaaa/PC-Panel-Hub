@@ -32,6 +32,59 @@ function Get-HS2ActiveRecoveryDecision {
     return [pscustomobject]@{ Action = "Healthy"; Reason = "verified" }
 }
 
+function Get-HS2SecondaryDesktopTopologyDecision {
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [object[]]$Monitors
+    )
+
+    $activeMonitors = @(
+        $Monitors | Where-Object {
+            -not [string]::IsNullOrWhiteSpace([string]$_.DeviceName) -and
+            ([int]$_.Right - [int]$_.Left) -gt 0 -and
+            ([int]$_.Bottom - [int]$_.Top) -gt 0
+        }
+    )
+    if ($activeMonitors.Count -ne 3) {
+        return [pscustomobject]@{
+            Active = $false
+            Reason = "active-desktop-count-$($activeMonitors.Count)"
+            TargetMonitorDevice = $null
+        }
+    }
+
+    $primaryMonitors = @($activeMonitors | Where-Object { [bool]$_.IsPrimary })
+    if ($primaryMonitors.Count -ne 1) {
+        return [pscustomobject]@{
+            Active = $false
+            Reason = "primary-desktop-ambiguous"
+            TargetMonitorDevice = $null
+        }
+    }
+
+    $hs2Monitors = @(
+        $activeMonitors | Where-Object {
+            ([int]$_.Right - [int]$_.Left) -eq 2288 -and
+            ([int]$_.Bottom - [int]$_.Top) -eq 1048 -and
+            -not [bool]$_.IsPrimary
+        }
+    )
+    if ($hs2Monitors.Count -ne 1) {
+        return [pscustomobject]@{
+            Active = $false
+            Reason = "hs2-desktop-path-unavailable"
+            TargetMonitorDevice = $null
+        }
+    }
+
+    return [pscustomobject]@{
+        Active = $true
+        Reason = "three-desktop-paths-with-hs2-active"
+        TargetMonitorDevice = [string]$hs2Monitors[0].DeviceName
+    }
+}
+
 function Get-HS2RecoveryEscalationDecision {
     param(
         [Parameter(Mandatory = $true)][DateTime]$WatchdogStartedUtc,

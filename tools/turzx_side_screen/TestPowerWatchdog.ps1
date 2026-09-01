@@ -196,6 +196,27 @@ if (-not $wallpaperHealth.Eligible -or
     $wallpaperHealth.Reason -cne "three-display-bindings-healthy") {
     throw "Wallpaper recovery requires healthy MTT, LIAN LI, and one primary display."
 }
+$hs2DesktopPath = Get-HS2SecondaryDesktopTopologyDecision `
+    -Monitors @($primaryMonitor, $hs2Monitor, $mttMonitor)
+if (-not $hs2DesktopPath.Active -or
+    $hs2DesktopPath.Reason -cne "three-desktop-paths-with-hs2-active" -or
+    $hs2DesktopPath.TargetMonitorDevice -cne $hs2Monitor.DeviceName) {
+    throw "HS2 secondary health requires the real three-monitor desktop with one 2288x1048 target."
+}
+$hs2DesktopMissing = Get-HS2SecondaryDesktopTopologyDecision `
+    -Monitors @($primaryMonitor)
+if ($hs2DesktopMissing.Active -or
+    $hs2DesktopMissing.Reason -cne "active-desktop-count-1") {
+    throw "A PnP-only HS2/MTT state must not be accepted as an active Windows desktop topology."
+}
+$wrongGeometryMonitor = $hs2Monitor.PSObject.Copy()
+$wrongGeometryMonitor.Right = $wrongGeometryMonitor.Left + 1920
+$hs2DesktopWrongGeometry = Get-HS2SecondaryDesktopTopologyDecision `
+    -Monitors @($primaryMonitor, $wrongGeometryMonitor, $mttMonitor)
+if ($hs2DesktopWrongGeometry.Active -or
+    $hs2DesktopWrongGeometry.Reason -cne "hs2-desktop-path-unavailable") {
+    throw "The three-monitor count alone must not impersonate the 2288x1048 HS2 desktop path."
+}
 $wallpaperAmbiguousPrimary = Get-WallpaperEngineDisplayHealthDecision `
     -Monitors @($primaryMonitor, $primaryMonitor.PSObject.Copy(), $hs2Monitor, $mttMonitor) `
     -MttDevices @($healthyMttDevice) `
@@ -1859,7 +1880,8 @@ foreach ($pattern in @(
     "Invoke-HS2InitialActiveMaintenance",
     "Test-HS2CurrentSecondaryBindingHealthy",
     "Invoke-HS2SecondaryActiveMaintenance",
-    "Set-HS2NativeActiveState",
+    "Get-HS2CurrentSecondaryDesktopPathDecision",
+    "Wait-HS2SecondaryDesktopPathActive",
     "Invoke-HS2SecondaryPromotion",
     "Get-HS2SecondaryPromotionDecision",
     "Get-HS2ResumeEventDecision",
@@ -1875,7 +1897,7 @@ foreach ($pattern in @(
     "hs2-usb-topology-binding.json",
     "HS2 overlay watchdog=secondary-verified-only",
     "mode=one-attempt-per-startup-or-resume-epoch",
-    "fallback=verified-native",
+    "preserving the requested secondary mode",
     "HS2OverlayRetrySeconds = 30",
     "SetTurzxBrightness.ps1",
     "ActiveBrightness = 170",
@@ -2071,6 +2093,7 @@ foreach ($pattern in @(
         "17104897",
         "Wait-HS2UsbDisplayHealthy",
         "Save-HS2UsbTopologyBinding",
+        "Wait-HS2SecondaryDesktopPathActive",
         "Enable-DesktopWindowPreservation",
         "hs2DisplayStateActive = `$true")) {
     if ($verifiedSecondaryText -notmatch [regex]::Escape($pattern)) {
@@ -2081,24 +2104,6 @@ if ($verifiedSecondaryText -match '(?i)-EnableSecondaryScreen') {
     throw "Initial secondary verification must not demote or re-promote an already-secondary controller."
 }
 
-$nativeActiveText = Get-WatchdogFunctionText -Name "Set-HS2NativeActiveState"
-foreach ($pattern in @(
-        "Invoke-HS2PowerState",
-        "Set-HS2NativeStateFromResult",
-        "PreservePromotionBackoff",
-        "-EnableSecondaryScreen:`$false")) {
-    if ($nativeActiveText -notmatch [regex]::Escape($pattern)) {
-        throw "Native HS2 fallback is missing its explicit native-mode contract: $pattern"
-    }
-}
-foreach ($forbiddenPattern in @(
-        "Wait-HS2UsbDisplayHealthy",
-        "Save-HS2UsbTopologyBinding")) {
-    if ($nativeActiveText -match [regex]::Escape($forbiddenPattern)) {
-        throw "Native HS2 fallback must not claim secondary topology health: $forbiddenPattern"
-    }
-}
-
 $promotionText = Get-WatchdogFunctionText -Name "Invoke-HS2SecondaryPromotion"
 foreach ($pattern in @(
         "Get-HS2SecondaryPromotionDecision",
@@ -2107,8 +2112,7 @@ foreach ($pattern in @(
         "-EnableSecondaryScreen",
         "17104897",
         "Set-HS2VerifiedSecondaryState",
-        "Set-HS2NativeActiveState",
-        "PreservePromotionBackoff")) {
+        "preserving the requested secondary mode")) {
     if ($promotionText -notmatch [regex]::Escape($pattern)) {
         throw "HS2 secondary promotion is missing its two-phase safety gate: $pattern"
     }
@@ -2121,11 +2125,15 @@ if (([regex]::Matches(
 if ($promotionText -notmatch '(?s)-NativeActive\s+\$script:hs2NativeDisplayStateActive') {
     throw "HS2 secondary promotion must be gated by a verified native 17104896 state."
 }
+if ($watchdogText -match [regex]::Escape('-EnableSecondaryScreen:$false')) {
+    throw "The production watchdog must never demote the HS2 Windows secondary mode to the native L3 theme."
+}
 
 $maintenanceText = Get-WatchdogFunctionText -Name "Invoke-HS2ActiveMaintenance"
 $initialMaintenanceText = Get-WatchdogFunctionText -Name "Invoke-HS2InitialActiveMaintenance"
 $secondaryMaintenanceText = Get-WatchdogFunctionText -Name "Invoke-HS2SecondaryActiveMaintenance"
 $secondaryBindingHealthText = Get-WatchdogFunctionText -Name "Test-HS2CurrentSecondaryBindingHealthy"
+$desktopPathDecisionText = Get-WatchdogFunctionText -Name "Get-HS2CurrentSecondaryDesktopPathDecision"
 foreach ($pattern in @(
         "Get-HS2ActiveRecoveryDecision",
         "HS2ActiveVerifySeconds",
@@ -2144,6 +2152,14 @@ if ($secondaryMaintenanceText -match '\$script:hs2SecondaryLastAttemptUtc\s*=\s*
 }
 if ($secondaryBindingHealthText -match '(?i)-EnableSecondaryScreen|SetSecondaryScreen') {
     throw "Secondary binding health must remain a read-only controller/AD23/binding probe."
+}
+foreach ($pattern in @(
+        "Initialize-HS2ExclusiveWindowGuardNativeMethods",
+        "CaptureMonitors",
+        "Get-HS2SecondaryDesktopTopologyDecision")) {
+    if ($desktopPathDecisionText -notmatch [regex]::Escape($pattern)) {
+        throw "HS2 desktop-path verification is missing its active Windows topology probe: $pattern"
+    }
 }
 if ($maintenanceText -match '(?s)\$script:hs2DisplayStateActive\)\s*\{\s*return\s*\}') {
     throw "A verified secondary display must receive a low-frequency health/read-back check instead of returning forever."
@@ -2172,7 +2188,7 @@ if ($maintenanceText -notmatch '(?s)Invoke-HS2InitialActiveMaintenance') {
 }
 $nativeMaintenanceText = $initialMaintenanceText
 if ($nativeMaintenanceText -notmatch '(?s)hs2SecondaryLastAttemptUtc.*?PreservePromotionBackoff:\$preservePromotionAttempt') {
-    throw "A delayed native fallback must preserve the one-attempt secondary marker for the full watchdog epoch."
+    throw "A delayed native-controller path must preserve the one-attempt secondary marker for the full watchdog epoch."
 }
 if ($nativeMaintenanceText -notmatch '(?s)catch\s*\{.*?Invoke-HS2NativeLConnectServiceRecovery') {
     throw "Only a native controller-readback failure may consider the bounded L-Connect service recovery."
@@ -2418,13 +2434,6 @@ Assert-OrderAfter `
 
 Assert-OrderAfter `
     -Text $watchdogText `
-    -Anchor 'function Set-HS2NativeActiveState' `
-    -First '-EnableSecondaryScreen:$false' `
-    -Second 'Set-HS2NativeStateFromResult' `
-    -Message "HS2 native fallback must explicitly request native mode before applying the verified native state."
-
-Assert-OrderAfter `
-    -Text $watchdogText `
     -Anchor 'function Set-HS2NativeStateFromResult' `
     -First 'ControllerType -ne 17104896' `
     -Second '$script:hs2NativeDisplayStateActive = $true' `
@@ -2447,16 +2456,13 @@ Assert-OrderAfter `
 Assert-OrderAfter `
     -Text $watchdogText `
     -Anchor 'function Set-HS2VerifiedSecondaryState' `
-    -First 'Save-HS2UsbTopologyBinding' `
+    -First 'Wait-HS2SecondaryDesktopPathActive' `
     -Second '$script:hs2DisplayStateActive = $true' `
-    -Message "HS2 must be marked secondary-active only after its healthy AD23 binding is persisted."
+    -Message "HS2 must be marked secondary-active only after its Windows desktop path is stable."
 
-Assert-OrderAfter `
-    -Text $watchdogText `
-    -Anchor 'function Invoke-HS2SecondaryPromotion' `
-    -First 'HS2 secondary promotion failed' `
-    -Second 'Set-HS2NativeActiveState' `
-    -Message "A failed secondary promotion must restore the native display in the same watchdog epoch."
+if ($promotionText -notmatch '(?s)HS2 secondary promotion failed.*?preserving the requested secondary mode') {
+    throw "A failed secondary promotion must preserve the requested Windows-secondary mode without a native fallback."
+}
 
 if ($watchdogText -notmatch '\$script:hs2LastResumeHandledUtc\s*=\s*\[DateTime\]::MinValue') {
     throw "HS2 resume merge state must start empty for a fresh watchdog epoch."

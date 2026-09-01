@@ -26,10 +26,11 @@ HS2 的完整 Windows 副屏与浮层功能仍然保留，但不再把一次异�
    `17104897` Windows Secondary。
 3. 若两个控制器均未枚举，不发送 `SetSecondaryScreen`，等待设备自然恢复。
 
-第二阶段失败时，watchdog 会立即回到原生亮屏、停止可能遗留的旧浮层，并在本次
-watchdog 进程内保持原生模式，不会每隔几十秒反复触发 GPU/Windows 显示拓扑切换。
-下一次正常启动或睡眠恢复才拥有一次新的 Secondary 尝试。这是恢复兜底，不是削减
-HS2 的 Windows 副屏、Wallpaper Engine 或浮层功能。
+第二阶段失败时，watchdog 会停止可能遗留的旧浮层并等待 Windows 显示拓扑恢复，
+绝不主动发送 `SetSecondaryScreen(false)` 降回 L3 原生主题。若控制器仍是原生模式，
+就保持其自然现状；若 AD23 已出现但尚未进入 Windows 桌面，则保持用户要求的
+Secondary 模式。本次 watchdog 进程不会每隔几十秒反复触发 GPU/Windows 显示拓扑
+切换；下一次正常启动或睡眠恢复才拥有一次新的 Secondary 尝试。
 
 在调用 L-Connect 前，看门狗还会从已保存的专用 Hub 绑定重新核对控制器端点。
 只有唯一健康的 `A068` 或 `AD23` 才进入显示恢复；端点缺失或仅出现专用 Hub
@@ -187,9 +188,11 @@ C:\path\to\PC-Panel-Hub\tools\hs2_crystal_overlay\Publish-HS2Task.ps1 `
 - 强制重启后先保留实际已恢复的 HS2 模式：若 `17104897` 已存在则原位验证，绝不
   先切走；只有实际为 `17104896` 时才经过 30 秒稳定窗口并仅一次请求 Windows
   Secondary。服务/控制器返回不算完整恢复，必须同时读回 `17104897`，并连续两次
-  确认绑定的 AD23 Windows 显示设备真实存在、状态正常，才会启动浮层和窗口保护。
-  显示链缺失时会回收幸存的旧浮层，并立即回到原生亮屏；本 epoch 不会再次切换
-  Secondary，也不会自动重启 Hub、删除设备或扫描 PnP。唯一的服务级例外是启动稳定
+  确认绑定的 AD23 Windows 显示设备真实存在、状态正常，并连续两次确认 Windows
+  桌面恰有三块活动屏且包含唯一的 2288×1048 非主屏，才会启动浮层和窗口保护。
+  显示链缺失时会回收幸存的旧浮层并保持用户要求的 Secondary 模式；本 epoch 不会
+  再次切换 Secondary，也不会发送原生模式命令、自动重启 Hub、删除设备或扫描 PnP。
+  唯一的服务级例外是启动稳定
   120 秒后：此前绑定的 8091 Hub 下 A068 原生端点或 AD23 端点已真实存在且正常、但
   L-Connect API 为空时，可一次重启 L-Connect 并读回控制器；该动作不会清除本 epoch
   的 Secondary 尝试标记。下一个正常启动或恢复 epoch 才有一次新的完整功能恢复机会。

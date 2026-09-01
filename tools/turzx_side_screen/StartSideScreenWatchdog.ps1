@@ -94,6 +94,7 @@ $script:hs2LConnectRecoveryAttempted = $false
 $script:hs2LConnectRecoveryStartedUtc = [DateTime]::MinValue
 $script:hs2LConnectRecoveryGraceLogged = $false
 $script:hs2ControllerReadinessWaitReason = $null
+$script:hs2DesktopPathWaitReason = $null
 $script:hs2ActiveLastAttemptUtc = [DateTime]::MinValue
 $script:hs2ActiveLastVerifiedUtc = [DateTime]::MinValue
 $script:hs2ActiveConsecutiveFailures = 0
@@ -683,24 +684,54 @@ function Set-HS2NativeStateFromResult {
     return $Result
 }
 
-function Set-HS2NativeActiveState {
+function Get-HS2CurrentSecondaryDesktopPathDecision {
+    $nativeMethods = Initialize-HS2ExclusiveWindowGuardNativeMethods
+    if ($null -eq $nativeMethods) {
+        return [pscustomobject]@{
+            Active = $false
+            Reason = "desktop-monitor-snapshot-unavailable"
+            TargetMonitorDevice = $null
+        }
+    }
+
+    try {
+        return Get-HS2SecondaryDesktopTopologyDecision `
+            -Monitors @($nativeMethods::CaptureMonitors())
+    }
+    catch {
+        return [pscustomobject]@{
+            Active = $false
+            Reason = "desktop-monitor-snapshot-failed"
+            TargetMonitorDevice = $null
+        }
+    }
+}
+
+function Wait-HS2SecondaryDesktopPathActive {
     param(
-        [Parameter(Mandatory = $true)][string]$Reason,
-        [switch]$ResetStabilityWindow,
-        [switch]$PreservePromotionBackoff
+        [ValidateRange(2, 30)][int]$TimeoutSeconds = 10,
+        [ValidateRange(1, 5)][int]$PollSeconds = 2,
+        [ValidateRange(2, 3)][int]$RequiredConsecutiveSamples = 2
     )
 
-    # Native mode is an explicit fallback only.  Startup discovery must never
-    # interpret an omitted switch as permission to demote a healthy AD23.
-    $result = Invoke-HS2PowerState `
-        -State Active `
-        -EnableSecondaryScreen:$false `
-        -ServicePort $LConnectServicePort
-    return Set-HS2NativeStateFromResult `
-        -Result $result `
-        -Reason $Reason `
-        -ResetStabilityWindow:$ResetStabilityWindow `
-        -PreservePromotionBackoff:$PreservePromotionBackoff
+    $deadlineUtc = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $consecutiveSamples = 0
+    $lastDecision = $null
+    do {
+        $lastDecision = Get-HS2CurrentSecondaryDesktopPathDecision
+        if ([bool]$lastDecision.Active) {
+            $consecutiveSamples++
+            if ($consecutiveSamples -ge $RequiredConsecutiveSamples) {
+                return $lastDecision
+            }
+        }
+        else {
+            $consecutiveSamples = 0
+        }
+        Start-Sleep -Seconds $PollSeconds
+    } while ([DateTime]::UtcNow -lt $deadlineUtc)
+
+    return $lastDecision
 }
 
 function Set-HS2VerifiedSecondaryState {
@@ -719,6 +750,10 @@ function Set-HS2VerifiedSecondaryState {
     }
     if (-not (Save-HS2UsbTopologyBinding -Path $hs2UsbTopologyBindingPath)) {
         throw "HS2 secondary topology binding was not uniquely verified."
+    }
+    $desktopPath = Wait-HS2SecondaryDesktopPathActive
+    if (-not [bool]$desktopPath.Active) {
+        throw "HS2 secondary USB binding is healthy, but its Windows desktop path is inactive: $($desktopPath.Reason)."
     }
 
     $nowUtc = [DateTime]::UtcNow
@@ -788,7 +823,7 @@ function Test-HS2CurrentSecondaryBindingHealthy {
         return $false
     }
 
-    return (
+    $usbBindingHealthy = (
         [int]$expected.SchemaVersion -eq 2 -and
         [int]$current.SchemaVersion -eq 2 -and
         [string]$current.HubInstanceId -ieq [string]$expected.HubInstanceId -and
@@ -796,6 +831,11 @@ function Test-HS2CurrentSecondaryBindingHealthy {
         [string]$current.DisplayInterfaceInstanceId -ieq
             [string]$expected.DisplayInterfaceInstanceId -and
         [string]$current.LedInstanceId -ieq [string]$expected.LedInstanceId)
+    if (-not $usbBindingHealthy) {
+        return $false
+    }
+
+    return [bool](Get-HS2CurrentSecondaryDesktopPathDecision).Active
 }
 
 function Invoke-HS2SecondaryActiveMaintenance {
@@ -914,6 +954,25 @@ function Invoke-HS2InitialActiveMaintenance {
             "HS2 controller endpoint ready endpoint={0}; resuming preserved-mode L-Connect activation" -f `
                 $controllerReadiness.EndpointInstanceId)
         $script:hs2ControllerReadinessWaitReason = $null
+    }
+
+    if ([string]$controllerReadiness.EndpointInstanceId -match
+        '(?i)VID_1A86&PID_AD23') {
+        $desktopPath = Get-HS2CurrentSecondaryDesktopPathDecision
+        if (-not [bool]$desktopPath.Active) {
+            $script:hs2NativeDisplayStateActive = $false
+            $script:hs2DisplayStateActive = $false
+            $script:hs2ActiveCurrentRetrySeconds = $HS2ActiveSlowRetrySeconds
+            if ([string]$script:hs2DesktopPathWaitReason -cne
+                [string]$desktopPath.Reason) {
+                Write-WatchdogLog (
+                    "HS2 secondary controller is present but Windows desktop path is inactive reason={0}; overlay stopped and no L-Connect mode command will run" -f `
+                        $desktopPath.Reason)
+                $script:hs2DesktopPathWaitReason = [string]$desktopPath.Reason
+            }
+            return
+        }
+        $script:hs2DesktopPathWaitReason = $null
     }
 
     try {
@@ -1078,23 +1137,10 @@ function Invoke-HS2SecondaryPromotion {
         $script:hs2OverlayRebindRequired = $true
         $script:hs2SecondaryPromotionFailures++
         Write-WatchdogLog (
-            "HS2 secondary promotion failed reason={0} count={1}; restoring native display: {2}" -f `
+            "HS2 secondary promotion failed reason={0} count={1}; preserving the requested secondary mode and waiting for Windows desktop topology recovery: {2}" -f `
                 $Reason,
                 $script:hs2SecondaryPromotionFailures,
                 $_.Exception.Message)
-        try {
-            Set-HS2NativeActiveState `
-                -Reason ("secondary-fallback/{0}" -f $Reason) `
-                -ResetStabilityWindow `
-                -PreservePromotionBackoff | Out-Null
-            Write-WatchdogLog (
-                "HS2 secondary promotion fallback=verified-native; secondary is held until the next startup or resume epoch")
-        }
-        catch {
-            Write-WatchdogLog (
-                "HS2 native fallback failed after secondary promotion: {0}" -f `
-                    $_.Exception.Message)
-        }
     }
 }
 
