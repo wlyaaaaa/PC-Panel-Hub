@@ -42,8 +42,8 @@ HS2 的设计、数据来源、配置方法和明确限制见 [docs/hs2-crystal-
 - 建议 Python 3.11 或更高版本。
 - 渲染器和串流程序需要 .NET Framework 编译器 `csc.exe`。
 - 硬件指标建议使用 NVIDIA NVML 和 LibreHardwareMonitor。
-- FPS 来自可选的 TimeAudit 帧链：优先读取 RTSS 官方共享内存，RTSS 无有效前台帧时再回退 PresentMon；副屏仍只通过 `TIMEAUDIT_DSN` 或本机 `TIMEAUDIT_DB_PASSWORD` 读取 PostgreSQL，不直接依赖 RTSS，也不保存数据库密码。遗留的本机 `127.0.0.1:55432` DSN 会在内存中迁移到避开 Windows 动态端口池的 `45432`，不会回写秘密。
-- 新鲜但全为零的 FPS 样本只有在 TimeAudit 明确报告渲染门空闲时才显示“等待游戏帧”；采集状态缺失、GPU 检测源不可用或已检测到渲染却收不到帧时会明确显示异常，不能再把数据库仍在写误当成 PresentMon 正常。
+- FPS 来自可选的 TimeAudit 帧链：优先读取 RTSS 官方共享内存，顺序为精确前台、RTSS 最近前台、用户启用的 Wallpaper 桌面 renderer 和唯一新鲜帧源；RTSS 映射不可用时才回退 PresentMon。副屏仍只通过 `TIMEAUDIT_DSN` 或本机 `TIMEAUDIT_DB_PASSWORD` 读取 PostgreSQL，不直接依赖 RTSS，也不保存数据库密码。遗留的本机 `127.0.0.1:55432` DSN 会在内存中迁移到避开 Windows 动态端口池的 `45432`，不会回写秘密。
+- RTSS 映射可用但没有新鲜帧源时显示正常等待，不把 Wallpaper 的 GPU 负载误报成采集异常；状态缺失、数据过期或 RTSS/PresentMon 均不可用时才显示异常。
 - DPC 显示值来自 Windows `Processor Information(_Total)\% DPC Time`，不是合成的调度延迟指标。
 - 物理磁盘会按其盘符合并；名称为 `RECOVER` 的卷、虚拟盘、RAM 盘，以及小于 `32,000,000,000` 字节的 USB/可移动介质会被排除。
 - 天气适配器不内置城市或坐标。默认读取被 Git 忽略的本机 `config.json`；也可用 `TURZX_WEATHER_CONFIG` 指向外部私有文件，或同时注入 `TURZX_WEATHER_LATITUDE` 与 `TURZX_WEATHER_LONGITUDE`。公开源码包只保留无实际值的 `config.example.json`。
