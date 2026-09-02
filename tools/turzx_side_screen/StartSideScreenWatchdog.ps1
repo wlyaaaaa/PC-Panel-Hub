@@ -1467,8 +1467,12 @@ function Start-HS2StartupWindowGuard {
         '-DurationSeconds', '180',
         '-PollMilliseconds', '250'
     )
+    $windowsPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    if (-not (Test-Path -LiteralPath $windowsPowerShell -PathType Leaf)) {
+        throw "Windows PowerShell runtime missing: $windowsPowerShell"
+    }
     $script:startupWindowGuardProcess = Start-Process `
-        -FilePath (Join-Path $PSHOME 'powershell.exe') `
+        -FilePath $windowsPowerShell `
         -ArgumentList $arguments `
         -WindowStyle Hidden `
         -PassThru

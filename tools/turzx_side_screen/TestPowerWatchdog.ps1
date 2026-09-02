@@ -2313,6 +2313,9 @@ $startupGuardCall = $watchdogText.IndexOf('Start-HS2StartupWindowGuard', [String
 if ($startupGuardCall -lt 0 -or $activeDisplayStartup -le $startupGuardCall) {
     throw "The independent HS2 startup window guard must start before controller recovery blocks."
 }
+if ($watchdogText -notmatch [regex]::Escape("System32\WindowsPowerShell\v1.0\powershell.exe")) {
+    throw "The independent startup window guard must use the explicit Windows PowerShell runtime."
+}
 $windowPolicyText = Get-Content -LiteralPath $windowPreservationPolicy -Raw
 if ($windowPolicyText -notmatch '"HS2\.CrystalOverlay"') {
     throw "The independent pre-overlay guard must always exclude the overlay process by identity."
