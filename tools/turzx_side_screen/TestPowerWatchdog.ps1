@@ -421,6 +421,17 @@ if ($guardPlan.Actions.Count -ne 1 -or
     throw "HS2 exclusive-window guard must move only ordinary apps into the primary work area."
 }
 
+$preOverlayGuardPlan = Get-HS2ExclusiveWindowGuardPlan `
+    -Monitors @($primaryMonitor, $hs2Monitor) `
+    -Windows @($guardWindows[1])
+if ($preOverlayGuardPlan.TargetMonitorDevice -cne $hs2Monitor.DeviceName -or
+    $preOverlayGuardPlan.SafeMonitorDevice -cne $primaryMonitor.DeviceName -or
+    $preOverlayGuardPlan.Actions.Count -ne 1 -or
+    $preOverlayGuardPlan.Actions[0].Action -cne "Move" -or
+    $preOverlayGuardPlan.Actions[0].ProcessId -ne 901) {
+    throw "HS2 window protection must move ordinary windows before the overlay process starts."
+}
+
 $misplacedOverlay = New-GuardWindow `
     -Hwnd 6 `
     -ProcessId 900 `
@@ -2215,8 +2226,7 @@ if ($activeEpochText -notmatch '\$script:hs2SecondaryLastAttemptUtc\s*=\s*\[Date
 }
 
 foreach ($functionName in @(
-        "Invoke-HS2OverlayHealthCheck",
-        "Invoke-HS2ExclusiveWindowProtection")) {
+        "Invoke-HS2OverlayHealthCheck")) {
     $functionAst = @(
         $watchdogAst.FindAll(
             {
@@ -2252,6 +2262,13 @@ $exclusiveProtectionAst = @(
         },
         $true)
 )[0]
+if ($exclusiveProtectionAst.Extent.Text -match '-not\s+\$script:hs2DisplayStateActive' -or
+    $exclusiveProtectionAst.Extent.Text -match '\$null\s+-eq\s+\$overlayProcess\)\s*\{\s*return') {
+    throw "HS2 ordinary-window protection must not wait for controller or overlay activation."
+}
+if ($exclusiveProtectionAst.Extent.Text -notmatch '(?s)\$overlayProcessIds\s*=.*?@\(\).*?\$guardArguments.*?Invoke-HS2ExclusiveWindowGuard') {
+    throw "HS2 ordinary-window protection must run with an empty overlay allowlist before overlay startup."
+}
 if ($exclusiveProtectionAst.Extent.Text -notmatch '(?s)OverlayPlacementStatus.*?drifted.*?hs2OverlayRebindRequired\s*=\s*\$true') {
     throw "A live overlay remapped away from HS2 must schedule a full display rebind."
 }

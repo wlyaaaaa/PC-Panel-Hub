@@ -1299,23 +1299,27 @@ function Invoke-HS2OverlayHealthCheck {
 }
 
 function Invoke-HS2ExclusiveWindowProtection {
-    if ($NoWindowPreservationPolicy -or
-        -not $script:hs2DisplayStateActive) {
+    if ($NoWindowPreservationPolicy) {
         return
     }
 
     $overlayProcess = Get-HS2OverlayProcess
-    if ($null -eq $overlayProcess) {
-        return
+    $overlayProcessIds = if ($null -eq $overlayProcess) {
+        @()
+    }
+    else {
+        @([int]$overlayProcess.Id)
     }
 
     try {
-        $result = Invoke-HS2ExclusiveWindowGuard `
-            -OverlayProcessIds @([int]$overlayProcess.Id) `
-            -PreferredTargetMonitorDevice `
-                $script:hs2WindowGuardTargetMonitorDevice `
-            -PreferredSafeMonitorDevice `
-                $script:hs2WindowGuardSafeMonitorDevice
+        $guardArguments = @{
+            PreferredTargetMonitorDevice = $script:hs2WindowGuardTargetMonitorDevice
+            PreferredSafeMonitorDevice = $script:hs2WindowGuardSafeMonitorDevice
+        }
+        if ($overlayProcessIds.Count -gt 0) {
+            $guardArguments.OverlayProcessIds = $overlayProcessIds
+        }
+        $result = Invoke-HS2ExclusiveWindowGuard @guardArguments
         if (-not [string]::IsNullOrWhiteSpace(
                 [string]$result.TargetMonitorDevice)) {
             $script:hs2WindowGuardTargetMonitorDevice =

@@ -490,13 +490,13 @@ function Get-HS2ExclusiveWindowGuardPlan {
     param(
         [Parameter(Mandatory = $true)][object[]]$Monitors,
         [Parameter(Mandatory = $true)][object[]]$Windows,
-        [Parameter(Mandatory = $true)][int[]]$OverlayProcessIds,
+        [AllowNull()][object]$OverlayProcessIds,
         [string]$PreferredTargetMonitorDevice,
         [string]$PreferredSafeMonitorDevice
     )
 
     $overlayIds = New-Object "System.Collections.Generic.HashSet[int]"
-    foreach ($processId in $OverlayProcessIds) {
+    foreach ($processId in @($OverlayProcessIds)) {
         [void]$overlayIds.Add([int]$processId)
     }
 
@@ -743,7 +743,7 @@ function Get-HS2ExclusiveWindowGuardPlan {
 
 function Invoke-HS2ExclusiveWindowGuard {
     param(
-        [Parameter(Mandatory = $true)][int[]]$OverlayProcessIds,
+        [AllowNull()][object]$OverlayProcessIds,
         [string]$PreferredTargetMonitorDevice,
         [string]$PreferredSafeMonitorDevice,
         [switch]$DryRun
@@ -754,8 +754,9 @@ function Invoke-HS2ExclusiveWindowGuard {
         throw "HS2 exclusive-window guard native methods are unavailable."
     }
 
+    $overlayIdArray = [int[]]@($OverlayProcessIds)
     $monitors = @($nativeMethods::CaptureMonitors())
-    $windows = @($nativeMethods::CaptureWindows($OverlayProcessIds))
+    $windows = @($nativeMethods::CaptureWindows($overlayIdArray))
     $processNames = @{}
     foreach ($process in @(Get-Process -ErrorAction SilentlyContinue)) {
         $processNames[[int]$process.Id] = [string]$process.ProcessName
@@ -766,12 +767,16 @@ function Invoke-HS2ExclusiveWindowGuard {
         }
     }
 
-    $plan = Get-HS2ExclusiveWindowGuardPlan `
-        -Monitors $monitors `
-        -Windows $windows `
-        -OverlayProcessIds $OverlayProcessIds `
-        -PreferredTargetMonitorDevice $PreferredTargetMonitorDevice `
-        -PreferredSafeMonitorDevice $PreferredSafeMonitorDevice
+    $planArguments = @{
+        Monitors = $monitors
+        Windows = $windows
+        PreferredTargetMonitorDevice = $PreferredTargetMonitorDevice
+        PreferredSafeMonitorDevice = $PreferredSafeMonitorDevice
+    }
+    if ($overlayIdArray.Count -gt 0) {
+        $planArguments.OverlayProcessIds = $overlayIdArray
+    }
+    $plan = Get-HS2ExclusiveWindowGuardPlan @planArguments
     $applied = New-Object "System.Collections.Generic.List[object]"
     $failures = New-Object "System.Collections.Generic.List[object]"
     if (-not $DryRun) {
