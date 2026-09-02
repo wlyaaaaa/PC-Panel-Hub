@@ -1931,7 +1931,8 @@ $consecutiveFailures = 0
 $heartbeatFailures = 0
 $snapshotStaleHeartbeats = 0
 try {
-    Write-WatchdogLog "Windows display window preservation deferred until HS2 secondary binding is verified"
+    Write-WatchdogLog "HS2 ordinary-window protection starts before controller and overlay verification"
+    Invoke-HS2ExclusiveWindowProtection
     Set-ActiveDisplayState -Reason "watchdog-start"
     Invoke-HS2OverlayHealthCheck
     Invoke-HS2ExclusiveWindowProtection

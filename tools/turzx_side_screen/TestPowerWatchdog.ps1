@@ -2272,6 +2272,16 @@ if ($exclusiveProtectionAst.Extent.Text -notmatch '(?s)\$overlayProcessIds\s*=.*
 if ($exclusiveProtectionAst.Extent.Text -notmatch '(?s)OverlayPlacementStatus.*?drifted.*?hs2OverlayRebindRequired\s*=\s*\$true') {
     throw "A live overlay remapped away from HS2 must schedule a full display rebind."
 }
+$earlyWindowGuard = $watchdogText.IndexOf(
+    'Invoke-HS2ExclusiveWindowProtection',
+    $watchdogText.IndexOf('HS2 ordinary-window protection starts before controller and overlay verification', [StringComparison]::Ordinal),
+    [StringComparison]::Ordinal)
+$activeDisplayStartup = $watchdogText.IndexOf(
+    'Set-ActiveDisplayState -Reason "watchdog-start"',
+    [StringComparison]::Ordinal)
+if ($earlyWindowGuard -lt 0 -or $activeDisplayStartup -le $earlyWindowGuard) {
+    throw "HS2 ordinary-window protection must run before the blocking startup/controller path."
+}
 foreach ($pattern in @(
         "Start-WatchdogParentLivenessGuard",
         "WatchdogParentLiveness",
