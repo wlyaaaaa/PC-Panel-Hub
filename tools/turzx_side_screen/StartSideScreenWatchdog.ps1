@@ -1404,6 +1404,50 @@ function Invoke-HS2ExclusiveWindowProtection {
     }
 }
 
+function Start-WatchdogParentLivenessGuard {
+    $self = Get-CimInstance Win32_Process -Filter "ProcessId=$PID" -ErrorAction Stop
+    $parentId = [int]$self.ParentProcessId
+    if ($parentId -le 0) { throw "Unable to resolve TURZX watchdog parent process." }
+    $parent = Get-Process -Id $parentId -ErrorAction Stop
+    $parentStartTicks = [long]$parent.StartTime.ToUniversalTime().Ticks
+    if (-not ("TURZX.SideScreen.WatchdogParentLiveness" -as [type])) {
+        Add-Type -TypeDefinition @"
+using System;
+using System.Diagnostics;
+using System.Threading;
+namespace TURZX.SideScreen {
+    public static class WatchdogParentLiveness {
+        private static Timer timer;
+        public static void Start(int parentProcessId, long parentStartTimeUtcTicks) {
+            Stop();
+            timer = new Timer(_ => {
+                try {
+                    using (var parent = Process.GetProcessById(parentProcessId)) {
+                        if (parent.StartTime.ToUniversalTime().Ticks == parentStartTimeUtcTicks) return;
+                    }
+                }
+                catch { }
+                try { Process.GetCurrentProcess().Kill(); }
+                catch { Environment.FailFast("TURZX watchdog parent launcher exited."); }
+            }, null, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1));
+        }
+        public static void Stop() {
+            var current = Interlocked.Exchange(ref timer, null);
+            if (current != null) current.Dispose();
+        }
+    }
+}
+"@
+    }
+    [TURZX.SideScreen.WatchdogParentLiveness]::Start($parentId, $parentStartTicks)
+}
+
+function Stop-WatchdogParentLivenessGuard {
+    if ("TURZX.SideScreen.WatchdogParentLiveness" -as [type]) {
+        [TURZX.SideScreen.WatchdogParentLiveness]::Stop()
+    }
+}
+
 function Enter-SleepDisplayState {
     $script:hs2DisplayStateDesiredActive = $false
     $script:hs2DisplayStateActive = $false
@@ -1826,6 +1870,7 @@ if (-not $watchdogMutexCreated) {
     exit 0
 }
 
+Start-WatchdogParentLivenessGuard
 Set-Content -LiteralPath $watchdogPidPath -Value $PID -Encoding ASCII
 try {
     $watchdogProcess = Get-Process -Id $PID -ErrorAction Stop
@@ -2102,6 +2147,7 @@ try {
     }
 }
 finally {
+    Stop-WatchdogParentLivenessGuard
     foreach ($eventSourceId in @($powerSourceId, $shutdownSourceId)) {
         Get-EventSubscriber -SourceIdentifier $eventSourceId -ErrorAction SilentlyContinue |
             Unregister-Event -ErrorAction SilentlyContinue

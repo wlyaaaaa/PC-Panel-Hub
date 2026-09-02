@@ -2272,6 +2272,16 @@ if ($exclusiveProtectionAst.Extent.Text -notmatch '(?s)\$overlayProcessIds\s*=.*
 if ($exclusiveProtectionAst.Extent.Text -notmatch '(?s)OverlayPlacementStatus.*?drifted.*?hs2OverlayRebindRequired\s*=\s*\$true') {
     throw "A live overlay remapped away from HS2 must schedule a full display rebind."
 }
+foreach ($pattern in @(
+        "Start-WatchdogParentLivenessGuard",
+        "WatchdogParentLiveness",
+        "TimeSpan.FromSeconds(1)",
+        "Process.GetCurrentProcess().Kill()",
+        "Stop-WatchdogParentLivenessGuard")) {
+    if ($watchdogText -notmatch [regex]::Escape($pattern)) {
+        throw "TURZX watchdog parent-liveness hardening missing: $pattern"
+    }
+}
 
 foreach ($pattern in @(
     'Enter-ShutdownDisplayState'
