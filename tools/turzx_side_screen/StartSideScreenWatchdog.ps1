@@ -1304,12 +1304,11 @@ function Invoke-HS2ExclusiveWindowProtection {
     }
 
     $overlayProcess = Get-HS2OverlayProcess
-    $overlayProcessIds = if ($null -eq $overlayProcess) {
-        @()
-    }
-    else {
-        @([int]$overlayProcess.Id)
-    }
+    [int[]]$overlayProcessIds = @(
+        if ($null -ne $overlayProcess) {
+            [int]$overlayProcess.Id
+        }
+    )
 
     try {
         $guardArguments = @{

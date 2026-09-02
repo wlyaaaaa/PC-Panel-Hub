@@ -2266,7 +2266,7 @@ if ($exclusiveProtectionAst.Extent.Text -match '-not\s+\$script:hs2DisplayStateA
     $exclusiveProtectionAst.Extent.Text -match '\$null\s+-eq\s+\$overlayProcess\)\s*\{\s*return') {
     throw "HS2 ordinary-window protection must not wait for controller or overlay activation."
 }
-if ($exclusiveProtectionAst.Extent.Text -notmatch '(?s)\$overlayProcessIds\s*=.*?@\(\).*?\$guardArguments.*?Invoke-HS2ExclusiveWindowGuard') {
+if ($exclusiveProtectionAst.Extent.Text -notmatch '(?s)\[int\[\]\]\$overlayProcessIds\s*=\s*@\(.*?\$guardArguments.*?Invoke-HS2ExclusiveWindowGuard') {
     throw "HS2 ordinary-window protection must run with an empty overlay allowlist before overlay startup."
 }
 if ($exclusiveProtectionAst.Extent.Text -notmatch '(?s)OverlayPlacementStatus.*?drifted.*?hs2OverlayRebindRequired\s*=\s*\$true') {
