@@ -2299,6 +2299,7 @@ foreach ($pattern in @(
         "ParentStartTimeUtcTicks",
         "DurationSeconds = 180",
         "PollMilliseconds = 250",
+        "Join-Path `$PSScriptRoot 'out\hs2-startup-window-guard.json'",
         "startup-window-complete")) {
     if ($startupWindowGuardText -notmatch [regex]::Escape($pattern)) {
         throw "HS2 startup window guard missing: $pattern"
@@ -2315,6 +2316,10 @@ if ($startupGuardCall -lt 0 -or $activeDisplayStartup -le $startupGuardCall) {
 }
 if ($watchdogText -notmatch [regex]::Escape("System32\WindowsPowerShell\v1.0\powershell.exe")) {
     throw "The independent startup window guard must use the explicit Windows PowerShell runtime."
+}
+if ($watchdogText -notmatch [regex]::Escape("hs2-startup-window-guard.stderr.log") -or
+    $watchdogText -notmatch "startup window guard exited early") {
+    throw "The startup window guard must expose an early-child failure without a console window."
 }
 $windowPolicyText = Get-Content -LiteralPath $windowPreservationPolicy -Raw
 if ($windowPolicyText -notmatch '"HS2\.CrystalOverlay"') {

@@ -4,11 +4,14 @@ param(
     [Parameter(Mandatory = $true)][int64]$ParentStartTimeUtcTicks,
     [ValidateRange(10, 600)][int]$DurationSeconds = 180,
     [ValidateRange(100, 2000)][int]$PollMilliseconds = 250,
-    [string]$ResultPath = (Join-Path $PSScriptRoot 'out\hs2-startup-window-guard.json')
+    [string]$ResultPath
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+if ([string]::IsNullOrWhiteSpace($ResultPath)) {
+    $ResultPath = Join-Path $PSScriptRoot 'out\hs2-startup-window-guard.json'
+}
 . (Join-Path $PSScriptRoot 'WindowsDisplayWindowPolicy.ps1')
 
 function Test-ParentAlive {

@@ -77,6 +77,7 @@ $activeRecoveryPolicy = Join-Path $scriptDir "HS2ActiveRecoveryPolicy.ps1"
 $windowPreservationPolicy = Join-Path $scriptDir "WindowsDisplayWindowPolicy.ps1"
 $overlayWatchdogPolicy = Join-Path $scriptDir "HS2OverlayWatchdogPolicy.ps1"
 $startupWindowGuardScript = Join-Path $scriptDir "Invoke-HS2StartupWindowGuard.ps1"
+$startupWindowGuardErrorPath = Join-Path $outDir "hs2-startup-window-guard.stderr.log"
 $powerSourceId = "TURZXSideScreenPower"
 $shutdownSourceId = "TURZXSideScreenShutdown"
 $watchdogStartedUtc = [DateTime]::UtcNow
@@ -1475,7 +1476,15 @@ function Start-HS2StartupWindowGuard {
         -FilePath $windowsPowerShell `
         -ArgumentList $arguments `
         -WindowStyle Hidden `
+        -RedirectStandardError $startupWindowGuardErrorPath `
         -PassThru
+    Start-Sleep -Milliseconds 250
+    $script:startupWindowGuardProcess.Refresh()
+    if ($script:startupWindowGuardProcess.HasExited) {
+        Write-WatchdogLog (
+            "HS2 startup window guard exited early code={0}" -f `
+                $script:startupWindowGuardProcess.ExitCode)
+    }
 }
 
 function Stop-HS2StartupWindowGuard {
