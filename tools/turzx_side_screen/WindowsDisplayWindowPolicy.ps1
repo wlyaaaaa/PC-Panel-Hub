@@ -479,6 +479,7 @@ function Test-HS2ExclusiveWindowGuardExclusion {
 
     $processName = [string]$Window.ProcessName
     return $processName -in @(
+        "HS2.CrystalOverlay",
         "wallpaper32",
         "wallpaper64",
         "wallpaperservice32",

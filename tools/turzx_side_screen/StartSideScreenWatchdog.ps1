@@ -76,6 +76,7 @@ $displayPowerPolicy = Join-Path $scriptDir "SideScreenDisplayPowerPolicy.ps1"
 $activeRecoveryPolicy = Join-Path $scriptDir "HS2ActiveRecoveryPolicy.ps1"
 $windowPreservationPolicy = Join-Path $scriptDir "WindowsDisplayWindowPolicy.ps1"
 $overlayWatchdogPolicy = Join-Path $scriptDir "HS2OverlayWatchdogPolicy.ps1"
+$startupWindowGuardScript = Join-Path $scriptDir "Invoke-HS2StartupWindowGuard.ps1"
 $powerSourceId = "TURZXSideScreenPower"
 $shutdownSourceId = "TURZXSideScreenShutdown"
 $watchdogStartedUtc = [DateTime]::UtcNow
@@ -115,6 +116,7 @@ $script:wallpaperDisplayLastStatus = $null
 $script:turzxStackChild = $null
 $script:turzxBrightnessConsecutiveFailures = 0
 $script:turzxSerialRecoveryLastAttemptUtc = [DateTime]::MinValue
+$script:startupWindowGuardProcess = $null
 
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 . $shutdownPolicy
@@ -1447,6 +1449,40 @@ function Stop-WatchdogParentLivenessGuard {
     }
 }
 
+function Start-HS2StartupWindowGuard {
+    if ($null -ne $script:startupWindowGuardProcess -and
+        -not $script:startupWindowGuardProcess.HasExited) {
+        return
+    }
+    if (-not (Test-Path -LiteralPath $startupWindowGuardScript -PathType Leaf)) {
+        throw "HS2 startup window guard script missing: $startupWindowGuardScript"
+    }
+    $parent = Get-Process -Id $PID -ErrorAction Stop
+    $arguments = @(
+        '-NoProfile',
+        '-ExecutionPolicy', 'Bypass',
+        '-File', $startupWindowGuardScript,
+        '-ParentProcessId', [string]$PID,
+        '-ParentStartTimeUtcTicks', [string]$parent.StartTime.ToUniversalTime().Ticks,
+        '-DurationSeconds', '180',
+        '-PollMilliseconds', '250'
+    )
+    $script:startupWindowGuardProcess = Start-Process `
+        -FilePath (Join-Path $PSHOME 'powershell.exe') `
+        -ArgumentList $arguments `
+        -WindowStyle Hidden `
+        -PassThru
+}
+
+function Stop-HS2StartupWindowGuard {
+    if ($null -eq $script:startupWindowGuardProcess) { return }
+    if (-not $script:startupWindowGuardProcess.HasExited) {
+        Stop-Process -Id $script:startupWindowGuardProcess.Id -Force -ErrorAction SilentlyContinue
+    }
+    $script:startupWindowGuardProcess.Dispose()
+    $script:startupWindowGuardProcess = $null
+}
+
 function Enter-SleepDisplayState {
     $script:hs2DisplayStateDesiredActive = $false
     $script:hs2DisplayStateActive = $false
@@ -1931,6 +1967,7 @@ $heartbeatFailures = 0
 $snapshotStaleHeartbeats = 0
 try {
     Write-WatchdogLog "HS2 ordinary-window protection starts before controller and overlay verification"
+    Start-HS2StartupWindowGuard
     Invoke-HS2ExclusiveWindowProtection
     Set-ActiveDisplayState -Reason "watchdog-start"
     Invoke-HS2OverlayHealthCheck
@@ -2147,6 +2184,7 @@ try {
     }
 }
 finally {
+    Stop-HS2StartupWindowGuard
     Stop-WatchdogParentLivenessGuard
     foreach ($eventSourceId in @($powerSourceId, $shutdownSourceId)) {
         Get-EventSubscriber -SourceIdentifier $eventSourceId -ErrorAction SilentlyContinue |

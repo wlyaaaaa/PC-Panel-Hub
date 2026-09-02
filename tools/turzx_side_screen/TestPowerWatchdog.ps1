@@ -15,6 +15,7 @@ $blank = Join-Path $side "SendBlankFrame.ps1"
 $displayPowerPolicy = Join-Path $side "SideScreenDisplayPowerPolicy.ps1"
 $activeRecoveryPolicy = Join-Path $side "HS2ActiveRecoveryPolicy.ps1"
 $windowPreservationPolicy = Join-Path $side "WindowsDisplayWindowPolicy.ps1"
+$startupWindowGuard = Join-Path $side "Invoke-HS2StartupWindowGuard.ps1"
 $overlayWatchdogPolicy = Join-Path $side "HS2OverlayWatchdogPolicy.ps1"
 $brightness = Join-Path $side "SetTurzxBrightness.ps1"
 $powerProgram = Join-Path $side "TURZX.SideScreen.Power.cs"
@@ -27,7 +28,7 @@ $overlayManifest = Join-Path $Root "tools\hs2_crystal_overlay\src\HS2.CrystalOve
 $overlayController = Join-Path $Root "tools\hs2_crystal_overlay\src\HS2.CrystalOverlay\OverlayController.cs"
 $crystalCardWindow = Join-Path $Root "tools\hs2_crystal_overlay\src\HS2.CrystalOverlay\CrystalCardWindow.cs"
 
-foreach ($path in @($watchdog, $shutdownPolicy, $displayPowerPolicy, $activeRecoveryPolicy, $windowPreservationPolicy, $overlayWatchdogPolicy, $brightness, $powerProgram, $watchdogLauncher, $stop, $blank, $overlayManifest, $overlayController, $crystalCardWindow)) {
+foreach ($path in @($watchdog, $shutdownPolicy, $displayPowerPolicy, $activeRecoveryPolicy, $windowPreservationPolicy, $startupWindowGuard, $overlayWatchdogPolicy, $brightness, $powerProgram, $watchdogLauncher, $stop, $blank, $overlayManifest, $overlayController, $crystalCardWindow)) {
     if (!(Test-Path -LiteralPath $path)) {
         throw "Missing power management script: $path"
     }
@@ -2291,6 +2292,30 @@ foreach ($pattern in @(
     if ($watchdogText -notmatch [regex]::Escape($pattern)) {
         throw "TURZX watchdog parent-liveness hardening missing: $pattern"
     }
+}
+$startupWindowGuardText = Get-Content -LiteralPath $startupWindowGuard -Raw
+foreach ($pattern in @(
+        "Invoke-HS2ExclusiveWindowGuard",
+        "ParentStartTimeUtcTicks",
+        "DurationSeconds = 180",
+        "PollMilliseconds = 250",
+        "startup-window-complete")) {
+    if ($startupWindowGuardText -notmatch [regex]::Escape($pattern)) {
+        throw "HS2 startup window guard missing: $pattern"
+    }
+}
+foreach ($forbidden in @('SetSecondaryScreen','Invoke-HS2Native','LConnectServicePort','Restart-Computer')) {
+    if ($startupWindowGuardText -match [regex]::Escape($forbidden)) {
+        throw "HS2 startup window guard must remain window-only: $forbidden"
+    }
+}
+$startupGuardCall = $watchdogText.IndexOf('Start-HS2StartupWindowGuard', [StringComparison]::Ordinal)
+if ($startupGuardCall -lt 0 -or $activeDisplayStartup -le $startupGuardCall) {
+    throw "The independent HS2 startup window guard must start before controller recovery blocks."
+}
+$windowPolicyText = Get-Content -LiteralPath $windowPreservationPolicy -Raw
+if ($windowPolicyText -notmatch '"HS2\.CrystalOverlay"') {
+    throw "The independent pre-overlay guard must always exclude the overlay process by identity."
 }
 
 foreach ($pattern in @(

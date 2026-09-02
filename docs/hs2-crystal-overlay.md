@@ -161,7 +161,8 @@ C:\path\to\PC-Panel-Hub\tools\hs2_crystal_overlay\Publish-HS2Task.ps1 `
   误入 HS2 的普通应用无激活地搬回主屏；若主屏真实断开到只剩 HS2，则先将
   普通应用最小化。HS2 浮层、Wallpaper Engine 和桌面外壳窗口不会被移动。
   这条普通窗口保护不等待浮层进程或完整控制器验收：唯一 2288×1048 副屏一出现
-  就按几何与唯一主屏归属开始搬移，完整浮层仍服从后续 Secondary 双样本门。
+  就由独立的 250 ms 启动保护循环按几何与唯一主屏归属开始搬移；该循环只覆盖
+  登录后最初 180 秒并随父 watchdog 退出，完整浮层仍服从后续 Secondary 双样本门。
   鼠标边界仍保持 Windows 原生行为。
 - 背景降级由 Windows/Wallpaper Engine 负责，本程序不修改壁纸设置。
 
