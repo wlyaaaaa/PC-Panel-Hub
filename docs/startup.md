@@ -152,6 +152,25 @@ startup remains fail-closed and will not create a second COM writer until the ol
 one is gone. A failed restart attempt is returned to the long-lived watchdog as a
 contained receipt; it cannot unwind the owner loop and strand the task in Ready.
 
+The existing hidden task launcher also waits for the watchdog itself. If the
+watchdog exits with a nonzero code (including a native process crash), that same
+launcher waits 30 seconds and starts its replacement. Normal exit stops the
+launcher, and ending the task stops recovery. This does not create another task
+or another concurrent watchdog. Do not rely on `RestartOnFailure` alone: a local
+no-hardware test observed nonzero action results being recorded as completed
+without the configured task restart. The launcher's replacement still goes
+through the watchdog's existing old-stream stop and exclusive-port checks.
+
+If Windows Application events identify `RTSSHooks64.dll` as the watchdog crash
+module, exclude `powershell.exe` from RTSS hooking using its per-application
+profile (`[Hooking]`, `EnableHooking=0`). Preserve game and wallpaper profiles.
+After RTSS has reloaded the profile, restart the existing task through
+`scripts\start.ps1` and verify its recovery behavior. Read the per-application
+detection setting back through RTSS; DLL residency alone does not prove whether
+application hooking is enabled. A profile change does not remove a DLL already
+injected into an existing process. Machine-specific RTSS profile installation
+and recovery belong to PCConfig.
+
 For a frozen panel or an unexpectedly stopped task, run the bounded repair entry:
 
 ```powershell

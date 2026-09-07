@@ -47,5 +47,13 @@ shell.CurrentDirectory = here
 command = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File """ & here & "\StartSideScreenWatchdog.ps1"" -Root """ & root & """ -Port " & port & " -IntervalMs " & intervalMs
 If hybridRefresh Then command = command & " -HybridRefresh -PollSeconds 1"
 If altHelper Then command = command & " -AltHelper"
-exitCode = shell.Run(command, 0, True)
-WScript.Quit exitCode
+' Keep recovery in the existing task launcher: Task Scheduler may record a
+' nonzero process exit as a completed action without applying RestartOnFailure.
+' Run waits for the sole watchdog to exit before another one can be created.
+' A normal exit (including shutdown or a duplicate owner) remains final.
+Do
+    exitCode = shell.Run(command, 0, True)
+    If exitCode = 0 Then Exit Do
+    WScript.Sleep 30000
+Loop
+WScript.Quit 0

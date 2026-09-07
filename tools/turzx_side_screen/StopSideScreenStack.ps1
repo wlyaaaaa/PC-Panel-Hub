@@ -77,6 +77,23 @@ function Wait-TurzxStreamProcessesExit {
     }
 }
 
+function Stop-TurzxWatchdogLaunchers {
+    param(
+        [Parameter(Mandatory = $true)][object[]]$Snapshot,
+        [Parameter(Mandatory = $true)][string]$LauncherPath
+    )
+
+    $launcherArgument = '(?i)(?:^|[\s"])' + [regex]::Escape($LauncherPath) + '(?:[\s"]|$)'
+    foreach ($candidate in $Snapshot) {
+        if ([string]$candidate.Name -notin @('wscript.exe', 'cscript.exe') -or
+            [string]$candidate.CommandLine -notmatch $launcherArgument) {
+            continue
+        }
+        Write-StopLog ("stopping watchdog launcher PID={0}" -f $candidate.ProcessId)
+        Stop-Process -Id $candidate.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Stop-RecordedWatchdogProcess {
     param(
         [Parameter(Mandatory = $true)][string]$PidPath,
@@ -166,6 +183,11 @@ if ($IncludeWatchdog) {
             $p.CommandLine -like "*StartSideScreenWatchdog.ps1*" -and
             $p.CommandLine -like $sidePattern
     }
+
+    # An explicit stop also owns the same task's hidden launcher, including
+    # its crash cooldown. Otherwise it would undo this stop after 30 seconds.
+    Stop-TurzxWatchdogLaunchers -Snapshot $processSnapshot `
+        -LauncherPath (Join-Path $side 'StartSideScreenWatchdog-Hidden.vbs')
 }
 
 Stop-MatchingProcess -Reason "metrics-agent" -Predicate {
