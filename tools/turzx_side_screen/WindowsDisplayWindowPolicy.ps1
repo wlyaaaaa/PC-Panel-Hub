@@ -176,6 +176,11 @@ namespace TURZX.SideScreen
         public bool IsVisible { get; set; }
         public bool IsMinimized { get; set; }
         public bool IsCloaked { get; set; }
+        public bool HasExtendedFrameBounds { get; set; }
+        public int ExtendedFrameLeft { get; set; }
+        public int ExtendedFrameTop { get; set; }
+        public int ExtendedFrameRight { get; set; }
+        public int ExtendedFrameBottom { get; set; }
         public int PlacementLeft { get; set; }
         public int PlacementTop { get; set; }
         public int PlacementRight { get; set; }
@@ -187,6 +192,7 @@ namespace TURZX.SideScreen
         private const int MonitorInfoPrimary = 1;
         private const int DisplayDeviceAttachedToDesktop = 1;
         private const uint MonitorDefaultToNearest = 2;
+        private const int DwmWindowAttributeExtendedFrameBounds = 9;
         private const int DwmWindowAttributeCloaked = 14;
         private const int ShowMinimized = 6;
         private const int WindowPlacementAsync = 4;
@@ -333,6 +339,24 @@ namespace TURZX.SideScreen
             out int value,
             int valueSize);
 
+        [DllImport("dwmapi.dll", EntryPoint = "DwmGetWindowAttribute")]
+        private static extern int DwmGetWindowAttributeRect(
+            IntPtr window,
+            int attribute,
+            out Rect value,
+            int valueSize);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern IntPtr SetThreadDpiAwarenessContext(
+            IntPtr dpiContext);
+
+        public static void UsePerMonitorV2DpiAwareness()
+        {
+            // Monitor and DWM frame coordinates must share one physical-pixel
+            // space.  This is thread-scoped, so it does not alter another UI.
+            SetThreadDpiAwarenessContext(new IntPtr(-4));
+        }
+
         public static WindowGuardMonitorSnapshot[] CaptureMonitors()
         {
             List<WindowGuardMonitorSnapshot> monitors =
@@ -439,6 +463,15 @@ namespace TURZX.SideScreen
                 }
 
                 bool minimized = IsIconic(window);
+                Rect extendedFrame = placement.NormalPosition;
+                bool hasExtendedFrame = !minimized &&
+                    DwmGetWindowAttributeRect(
+                        window,
+                        DwmWindowAttributeExtendedFrameBounds,
+                        out extendedFrame,
+                        Marshal.SizeOf(typeof(Rect))) == 0 &&
+                    extendedFrame.Right > extendedFrame.Left &&
+                    extendedFrame.Bottom > extendedFrame.Top;
                 Rect monitorRectangle = placement.NormalPosition;
                 IntPtr monitor = minimized
                     ? MonitorFromRect(
@@ -468,6 +501,11 @@ namespace TURZX.SideScreen
                     IsVisible = visible,
                     IsMinimized = minimized,
                     IsCloaked = isCloaked,
+                    HasExtendedFrameBounds = hasExtendedFrame,
+                    ExtendedFrameLeft = extendedFrame.Left,
+                    ExtendedFrameTop = extendedFrame.Top,
+                    ExtendedFrameRight = extendedFrame.Right,
+                    ExtendedFrameBottom = extendedFrame.Bottom,
                     PlacementLeft = placement.NormalPosition.Left,
                     PlacementTop = placement.NormalPosition.Top,
                     PlacementRight = placement.NormalPosition.Right,
@@ -816,6 +854,86 @@ function Test-WindowGuardMonitorHardwareId {
             [StringComparison]::OrdinalIgnoreCase)
 }
 
+function Get-WindowGuardVisibleBounds {
+    param(
+        [Parameter(Mandatory = $true)]$Window
+    )
+
+    $hasExtendedFrameProperty =
+        $Window.PSObject.Properties['HasExtendedFrameBounds']
+    $hasExtendedFrame =
+        -not [bool]$Window.IsMinimized -and
+        $null -ne $hasExtendedFrameProperty -and
+        [bool]$hasExtendedFrameProperty.Value
+    if ($hasExtendedFrame) {
+        return [pscustomobject]@{
+            Left = [int]$Window.ExtendedFrameLeft
+            Top = [int]$Window.ExtendedFrameTop
+            Right = [int]$Window.ExtendedFrameRight
+            Bottom = [int]$Window.ExtendedFrameBottom
+            Source = 'extended-frame'
+        }
+    }
+
+    return [pscustomobject]@{
+        Left = [int]$Window.PlacementLeft
+        Top = [int]$Window.PlacementTop
+        Right = [int]$Window.PlacementRight
+        Bottom = [int]$Window.PlacementBottom
+        Source = 'placement'
+    }
+}
+
+function Test-WindowGuardBoundsIntersectMonitor {
+    param(
+        [Parameter(Mandatory = $true)]$Bounds,
+        [Parameter(Mandatory = $true)]$Monitor
+    )
+
+    return [int]$Bounds.Left -lt [int]$Monitor.Right -and
+        [int]$Bounds.Right -gt [int]$Monitor.Left -and
+        [int]$Bounds.Top -lt [int]$Monitor.Bottom -and
+        [int]$Bounds.Bottom -gt [int]$Monitor.Top
+}
+
+function Get-WindowGuardMainContainmentPlacement {
+    param(
+        [Parameter(Mandatory = $true)]$Window,
+        [Parameter(Mandatory = $true)]$VisibleBounds,
+        [Parameter(Mandatory = $true)]$MainMonitor
+    )
+
+    $frameWidth = [int]$VisibleBounds.Right - [int]$VisibleBounds.Left
+    $frameHeight = [int]$VisibleBounds.Bottom - [int]$VisibleBounds.Top
+    $mainWidth = [int]$MainMonitor.WorkRight - [int]$MainMonitor.WorkLeft
+    $mainHeight = [int]$MainMonitor.WorkBottom - [int]$MainMonitor.WorkTop
+    $deltaX = 0
+    $deltaY = 0
+    if ($frameWidth -le $mainWidth) {
+        if ([int]$VisibleBounds.Left -lt [int]$MainMonitor.WorkLeft) {
+            $deltaX = [int]$MainMonitor.WorkLeft - [int]$VisibleBounds.Left
+        }
+        elseif ([int]$VisibleBounds.Right -gt [int]$MainMonitor.WorkRight) {
+            $deltaX = [int]$MainMonitor.WorkRight - [int]$VisibleBounds.Right
+        }
+    }
+    if ($frameHeight -le $mainHeight) {
+        if ([int]$VisibleBounds.Top -lt [int]$MainMonitor.WorkTop) {
+            $deltaY = [int]$MainMonitor.WorkTop - [int]$VisibleBounds.Top
+        }
+        elseif ([int]$VisibleBounds.Bottom -gt [int]$MainMonitor.WorkBottom) {
+            $deltaY = [int]$MainMonitor.WorkBottom - [int]$VisibleBounds.Bottom
+        }
+    }
+
+    return [pscustomobject]@{
+        Left = [int]$Window.PlacementLeft + $deltaX
+        Top = [int]$Window.PlacementTop + $deltaY
+        Right = [int]$Window.PlacementRight + $deltaX
+        Bottom = [int]$Window.PlacementBottom + $deltaY
+    }
+}
+
 function Get-VddWindowReturnPlan {
     param(
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Monitors,
@@ -911,8 +1029,7 @@ function Get-VddWindowReturnPlan {
             [int]$window.PlacementRight - [int]$window.PlacementLeft
         $placementHeight =
             [int]$window.PlacementBottom - [int]$window.PlacementTop
-        if ([string]$window.MonitorDevice -cne [string]$vddMonitor.DeviceName -or
-            -not [bool]$window.IsVisible -or
+        if (-not [bool]$window.IsVisible -or
             [bool]$window.IsCloaked -or
             $placementWidth -le 32 -or
             $placementHeight -le 32 -or
@@ -922,29 +1039,53 @@ function Get-VddWindowReturnPlan {
             continue
         }
 
-        $width = [Math]::Min($mainWidth, [Math]::Max(1, $placementWidth))
-        $height = [Math]::Min($mainHeight, [Math]::Max(1, $placementHeight))
-        $offsetX = [Math]::Max(
-            0,
-            [Math]::Min(
-                $mainWidth - $width,
-                [int]$window.PlacementLeft - [int]$vddMonitor.WorkLeft))
-        $offsetY = [Math]::Max(
-            0,
-            [Math]::Min(
-                $mainHeight - $height,
-                [int]$window.PlacementTop - [int]$vddMonitor.WorkTop))
-        $left = [int]$mainMonitor.WorkLeft + $offsetX
-        $top = [int]$mainMonitor.WorkTop + $offsetY
+        $visibleBounds = Get-WindowGuardVisibleBounds -Window $window
+        $isVddOwned = [string]$window.MonitorDevice -ceq [string]$vddMonitor.DeviceName
+        $intersectsVdd = Test-WindowGuardBoundsIntersectMonitor `
+            -Bounds $visibleBounds `
+            -Monitor $vddMonitor
+        if (-not $isVddOwned -and -not $intersectsVdd) {
+            continue
+        }
+
+        if ($isVddOwned) {
+            $width = [Math]::Min($mainWidth, [Math]::Max(1, $placementWidth))
+            $height = [Math]::Min($mainHeight, [Math]::Max(1, $placementHeight))
+            $offsetX = [Math]::Max(
+                0,
+                [Math]::Min(
+                    $mainWidth - $width,
+                    [int]$window.PlacementLeft - [int]$vddMonitor.WorkLeft))
+            $offsetY = [Math]::Max(
+                0,
+                [Math]::Min(
+                    $mainHeight - $height,
+                    [int]$window.PlacementTop - [int]$vddMonitor.WorkTop))
+            $placement = [pscustomobject]@{
+                Left = [int]$mainMonitor.WorkLeft + $offsetX
+                Top = [int]$mainMonitor.WorkTop + $offsetY
+                Right = [int]$mainMonitor.WorkLeft + $offsetX + $width
+                Bottom = [int]$mainMonitor.WorkTop + $offsetY + $height
+            }
+        }
+        else {
+            # MonitorFromWindow picks the majority monitor.  A window can still
+            # visibly spill into VDD, so translate its saved placement just far
+            # enough to contain the DWM-rendered frame on the physical main.
+            $placement = Get-WindowGuardMainContainmentPlacement `
+                -Window $window `
+                -VisibleBounds $visibleBounds `
+                -MainMonitor $mainMonitor
+        }
         [void]$actions.Add([pscustomobject]@{
                 Action = 'Move'
                 Hwnd = [int64]$window.Hwnd
                 ProcessId = [int]$window.ProcessId
                 ProcessName = [string]$window.ProcessName
-                Left = $left
-                Top = $top
-                Right = $left + $width
-                Bottom = $top + $height
+                Left = [int]$placement.Left
+                Top = [int]$placement.Top
+                Right = [int]$placement.Right
+                Bottom = [int]$placement.Bottom
             })
     }
 
@@ -969,6 +1110,7 @@ function Invoke-HS2ExclusiveWindowGuard {
         throw "HS2 exclusive-window guard native methods are unavailable."
     }
 
+    $nativeMethods::UsePerMonitorV2DpiAwareness()
     $overlayIdArray = [int[]]@($OverlayProcessIds)
     $monitors = @($nativeMethods::CaptureMonitors())
     $windows = @($nativeMethods::CaptureWindows($overlayIdArray))
@@ -1041,6 +1183,7 @@ function Invoke-VddWindowReturnGuard {
         throw 'VDD window-return native methods are unavailable.'
     }
 
+    $nativeMethods::UsePerMonitorV2DpiAwareness()
     $overlayIdArray = [int[]]@($OverlayProcessIds)
     $monitors = @($nativeMethods::CaptureMonitors())
     $identities = @($nativeMethods::CaptureMonitorIdentities())

@@ -75,6 +75,7 @@ foreach ($methodName in @(
         "CaptureMonitors",
         "CaptureMonitorIdentities",
         "CaptureWindows",
+        "UsePerMonitorV2DpiAwareness",
         "MoveWindowPlacement",
         "MinimizeWindow")) {
     if ($null -eq $windowGuardNativeType.GetMethod(
@@ -522,6 +523,55 @@ if ($vddReturnPlan.Status -cne 'active' -or
     $vddReturnPlan.Actions[0].Top -lt $primaryMonitor.WorkTop -or
     $vddReturnPlan.Actions[0].Bottom -gt $primaryMonitor.WorkBottom) {
     throw 'VDD return guard must use hardware identity and only move ordinary VDD windows into the physical-main work area.'
+}
+$straddlingMainWindow = New-GuardWindow `
+    -Hwnd 9 `
+    -ProcessId 906 `
+    -ProcessName 'FlyingBird-Lite' `
+    -ClassName 'FLUTTER_RUNNER_WIN32_WINDOW' `
+    -MonitorDevice $primaryMonitor.DeviceName
+$straddlingMainWindow.PlacementLeft = 2200
+$straddlingMainWindow.PlacementTop = 100
+$straddlingMainWindow.PlacementRight = 3000
+$straddlingMainWindow.PlacementBottom = 600
+$straddlingMainWindow | Add-Member -NotePropertyName HasExtendedFrameBounds -NotePropertyValue $true
+$straddlingMainWindow | Add-Member -NotePropertyName ExtendedFrameLeft -NotePropertyValue 2200
+$straddlingMainWindow | Add-Member -NotePropertyName ExtendedFrameTop -NotePropertyValue 100
+$straddlingMainWindow | Add-Member -NotePropertyName ExtendedFrameRight -NotePropertyValue 3000
+$straddlingMainWindow | Add-Member -NotePropertyName ExtendedFrameBottom -NotePropertyValue 600
+$straddlingPlan = Get-VddWindowReturnPlan `
+    -Monitors @($primaryMonitor, $mttMonitor) `
+    -Windows @($straddlingMainWindow) `
+    -MonitorIdentities @($windowGuardMonitorIdentities[0], $windowGuardMonitorIdentities[2])
+if ($straddlingPlan.Actions.Count -ne 1 -or
+    $straddlingPlan.Actions[0].ProcessId -ne 906 -or
+    $straddlingPlan.Actions[0].Left -ne 1760 -or
+    $straddlingPlan.Actions[0].Right -ne 2560 -or
+    $straddlingPlan.Actions[0].Top -ne 100 -or
+    $straddlingPlan.Actions[0].Bottom -ne 600) {
+    throw 'VDD return guard must move a physical-main window whose DWM frame visibly crosses into VDD.'
+}
+$transparentBorderMainWindow = New-GuardWindow `
+    -Hwnd 10 `
+    -ProcessId 907 `
+    -ProcessName 'chrome' `
+    -ClassName 'Chrome_WidgetWin_1' `
+    -MonitorDevice $primaryMonitor.DeviceName
+$transparentBorderMainWindow.PlacementLeft = 0
+$transparentBorderMainWindow.PlacementTop = 0
+$transparentBorderMainWindow.PlacementRight = 2571
+$transparentBorderMainWindow.PlacementBottom = 1400
+$transparentBorderMainWindow | Add-Member -NotePropertyName HasExtendedFrameBounds -NotePropertyValue $true
+$transparentBorderMainWindow | Add-Member -NotePropertyName ExtendedFrameLeft -NotePropertyValue 0
+$transparentBorderMainWindow | Add-Member -NotePropertyName ExtendedFrameTop -NotePropertyValue 0
+$transparentBorderMainWindow | Add-Member -NotePropertyName ExtendedFrameRight -NotePropertyValue 2560
+$transparentBorderMainWindow | Add-Member -NotePropertyName ExtendedFrameBottom -NotePropertyValue 1400
+$transparentBorderPlan = Get-VddWindowReturnPlan `
+    -Monitors @($primaryMonitor, $mttMonitor) `
+    -Windows @($transparentBorderMainWindow) `
+    -MonitorIdentities @($windowGuardMonitorIdentities[0], $windowGuardMonitorIdentities[2])
+if ($transparentBorderPlan.Actions.Count -ne 0) {
+    throw 'VDD return guard must not react to an outer resize border when the DWM visible frame stays on the physical main.'
 }
 $taskbarOffsetMainMonitor = $primaryMonitor.PSObject.Copy()
 $taskbarOffsetMainMonitor.WorkTop = 48
@@ -2466,6 +2516,15 @@ if ($watchdogText -notmatch [regex]::Escape("hs2-startup-window-guard.stderr.log
     throw "The startup window guard must expose an early-child failure without a console window."
 }
 $windowPolicyText = Get-Content -LiteralPath $windowPreservationPolicy -Raw
+$windowPolicyTokens = $null
+$windowPolicyParseErrors = $null
+$windowPolicyAst = [System.Management.Automation.Language.Parser]::ParseFile(
+    $windowPreservationPolicy,
+    [ref]$windowPolicyTokens,
+    [ref]$windowPolicyParseErrors)
+if (@($windowPolicyParseErrors).Count -gt 0) {
+    throw 'Windows display window policy must remain syntactically valid.'
+}
 if ($windowPolicyText -notmatch '"HS2\.CrystalOverlay"') {
     throw "The independent pre-overlay guard must always exclude the overlay process by identity."
 }
@@ -2474,11 +2533,27 @@ foreach ($pattern in @(
         'DisplayDeviceAttachedToDesktop',
         'Get-VddWindowReturnPlan',
         'Invoke-VddWindowReturnGuard',
+        'UsePerMonitorV2DpiAwareness',
+        'DwmWindowAttributeExtendedFrameBounds',
+        'Test-WindowGuardBoundsIntersectMonitor',
         "'PHLC34B'",
         "'MTT1337'",
         'main-vdd-device-collision')) {
     if ($windowPolicyText -notmatch [regex]::Escape($pattern)) {
         throw "VDD return policy missing stable monitor-identity protection: $pattern"
+    }
+}
+foreach ($guardName in @('Invoke-HS2ExclusiveWindowGuard', 'Invoke-VddWindowReturnGuard')) {
+    $guardAst = @($windowPolicyAst.FindAll(
+        {
+            param($node)
+            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq $guardName
+        },
+        $true))
+    if ($guardAst.Count -ne 1 -or
+        $guardAst[0].Extent.Text -notmatch 'UsePerMonitorV2DpiAwareness') {
+        throw "$guardName must capture monitor and window geometry in per-monitor physical pixels."
     }
 }
 $moveWindowPlacementMatch = [regex]::Match(
