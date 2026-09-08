@@ -73,6 +73,7 @@ if ($null -eq $windowPolicyBroadcastMethod) {
 $windowGuardNativeType = Initialize-HS2ExclusiveWindowGuardNativeMethods
 foreach ($methodName in @(
         "CaptureMonitors",
+        "CaptureMonitorIdentities",
         "CaptureWindows",
         "MoveWindowPlacement",
         "MinimizeWindow")) {
@@ -479,6 +480,124 @@ if ($targetOnlyPlan.Status -cne "target-only" -or
     $targetOnlyPlan.Actions.Count -ne 1 -or
     $targetOnlyPlan.Actions[0].Action -cne "Minimize") {
     throw "HS2 exclusive-window guard must minimize ordinary apps when HS2 is the only display."
+}
+
+$windowGuardMonitorIdentities = @(
+    [pscustomobject]@{
+        DeviceName = $primaryMonitor.DeviceName
+        MonitorDeviceId = 'MONITOR\PHLC34B\physical-main'
+    }
+    [pscustomobject]@{
+        DeviceName = $hs2Monitor.DeviceName
+        MonitorDeviceId = 'MONITOR\TUR0000\water-screen'
+    }
+    [pscustomobject]@{
+        DeviceName = $mttMonitor.DeviceName
+        MonitorDeviceId = 'MONITOR\MTT1337\virtual-display'
+    }
+)
+$vddOrdinaryWindow = New-GuardWindow `
+    -Hwnd 8 `
+    -ProcessId 905 `
+    -ProcessName 'notepad' `
+    -ClassName 'Notepad' `
+    -MonitorDevice $mttMonitor.DeviceName
+$vddOrdinaryWindow.PlacementLeft = 2800
+$vddOrdinaryWindow.PlacementTop = 120
+$vddOrdinaryWindow.PlacementRight = 3400
+$vddOrdinaryWindow.PlacementBottom = 620
+$vddReturnPlan = Get-VddWindowReturnPlan `
+    -Monitors @($primaryMonitor, $hs2Monitor, $mttMonitor) `
+    -Windows @($guardWindows[0], $guardWindows[1], $vddOrdinaryWindow) `
+    -MonitorIdentities $windowGuardMonitorIdentities `
+    -OverlayProcessIds @(900)
+if ($vddReturnPlan.Status -cne 'active' -or
+    $vddReturnPlan.MainMonitorDevice -cne $primaryMonitor.DeviceName -or
+    $vddReturnPlan.VddMonitorDevice -cne $mttMonitor.DeviceName -or
+    $vddReturnPlan.Actions.Count -ne 1 -or
+    $vddReturnPlan.Actions[0].Action -cne 'Move' -or
+    $vddReturnPlan.Actions[0].ProcessId -ne 905 -or
+    $vddReturnPlan.Actions[0].Left -lt $primaryMonitor.WorkLeft -or
+    $vddReturnPlan.Actions[0].Right -gt $primaryMonitor.WorkRight -or
+    $vddReturnPlan.Actions[0].Top -lt $primaryMonitor.WorkTop -or
+    $vddReturnPlan.Actions[0].Bottom -gt $primaryMonitor.WorkBottom) {
+    throw 'VDD return guard must use hardware identity and only move ordinary VDD windows into the physical-main work area.'
+}
+$taskbarOffsetMainMonitor = $primaryMonitor.PSObject.Copy()
+$taskbarOffsetMainMonitor.WorkTop = 48
+$taskbarOffsetMainMonitor.WorkBottom = 1440
+$taskbarOffsetPlan = Get-VddWindowReturnPlan `
+    -Monitors @($taskbarOffsetMainMonitor, $mttMonitor) `
+    -Windows @($vddOrdinaryWindow) `
+    -MonitorIdentities @($windowGuardMonitorIdentities[0], $windowGuardMonitorIdentities[2])
+if ($taskbarOffsetPlan.Actions.Count -ne 1 -or
+    $taskbarOffsetPlan.Actions[0].Left -ne 240 -or
+    $taskbarOffsetPlan.Actions[0].Top -ne 168 -or
+    $taskbarOffsetPlan.Actions[0].Right -ne 840 -or
+    $taskbarOffsetPlan.Actions[0].Bottom -ne 668) {
+    throw 'VDD return guard must preserve relative placement inside the physical-main working area, including taskbar offsets.'
+}
+$vddOnlyPlan = Get-VddWindowReturnPlan `
+    -Monitors @($mttMonitor) `
+    -Windows @($vddOrdinaryWindow) `
+    -MonitorIdentities @($windowGuardMonitorIdentities[2])
+if ($vddOnlyPlan.Status -cne 'physical-main-unavailable' -or
+    $vddOnlyPlan.Actions.Count -ne 0) {
+    throw 'VDD-only operation must preserve ordinary windows until the physical main returns.'
+}
+$emptyVddReturnPlan = Get-VddWindowReturnPlan `
+    -Monitors @() `
+    -Windows @() `
+    -MonitorIdentities @()
+if ($emptyVddReturnPlan.Status -cne 'physical-main-unavailable' -or
+    $emptyVddReturnPlan.Actions.Count -ne 0) {
+    throw 'An empty display snapshot must fail closed without a VDD window action.'
+}
+$staleVddIdentityPlan = Get-VddWindowReturnPlan `
+    -Monitors @($primaryMonitor, $mttMonitor) `
+    -Windows @($vddOrdinaryWindow) `
+    -MonitorIdentities @(
+        $windowGuardMonitorIdentities[0]
+        [pscustomobject]@{
+            DeviceName = '\\.\DISPLAY77'
+            MonitorDeviceId = 'MONITOR\MTT1337\disconnected'
+        }
+    )
+if ($staleVddIdentityPlan.Status -cne 'vdd-unavailable' -or
+    $staleVddIdentityPlan.Actions.Count -ne 0) {
+    throw 'A disconnected VDD identity must not be matched to an unrelated active display.'
+}
+$vddDeviceCollisionPlan = Get-VddWindowReturnPlan `
+    -Monitors @($primaryMonitor) `
+    -Windows @($vddOrdinaryWindow) `
+    -MonitorIdentities @(
+        [pscustomobject]@{
+            DeviceName = $primaryMonitor.DeviceName
+            MonitorDeviceId = 'MONITOR\PHLC34B\physical-main'
+        }
+        [pscustomobject]@{
+            DeviceName = $primaryMonitor.DeviceName
+            MonitorDeviceId = 'MONITOR\MTT1337\invalid-collision'
+        }
+    )
+if ($vddDeviceCollisionPlan.Status -cne 'main-vdd-device-collision' -or
+    $vddDeviceCollisionPlan.Actions.Count -ne 0) {
+    throw 'VDD return guard must fail closed when the physical main and VDD map to one display device.'
+}
+$duplicateMainMonitor = $primaryMonitor.PSObject.Copy()
+$duplicateMainMonitor.DeviceName = '\\.\DISPLAY99'
+$ambiguousVddReturnPlan = Get-VddWindowReturnPlan `
+    -Monitors @($primaryMonitor, $duplicateMainMonitor, $mttMonitor) `
+    -Windows @($vddOrdinaryWindow) `
+    -MonitorIdentities @(
+        $windowGuardMonitorIdentities +
+            [pscustomobject]@{
+                DeviceName = $duplicateMainMonitor.DeviceName
+                MonitorDeviceId = 'MONITOR\PHLC34B\duplicate'
+            })
+if ($ambiguousVddReturnPlan.Status -cne 'physical-main-ambiguous' -or
+    $ambiguousVddReturnPlan.Actions.Count -ne 0) {
+    throw 'VDD return guard must fail closed when the physical-main identity is ambiguous.'
 }
 
 $decisionNow = [DateTime]::Parse("2026-08-02T06:00:00Z").ToUniversalTime()
@@ -1883,6 +2002,9 @@ foreach ($pattern in @(
     "hs2OverlayRebindRequired",
     "Invoke-HS2ExclusiveWindowProtection",
     "Invoke-HS2ExclusiveWindowGuard",
+    "Invoke-VddWindowReturnProtection",
+    "Invoke-VddWindowReturnGuard",
+    "VDD window-return guard corrected",
     "HS2 exclusive-window guard corrected",
     'hs2DisplayStateActive = $false',
     'hs2DisplayStateDesiredActive = $false',
@@ -2273,6 +2395,28 @@ if ($exclusiveProtectionAst.Extent.Text -notmatch '(?s)\[int\[\]\]\$overlayProce
 if ($exclusiveProtectionAst.Extent.Text -notmatch '(?s)OverlayPlacementStatus.*?drifted.*?hs2OverlayRebindRequired\s*=\s*\$true') {
     throw "A live overlay remapped away from HS2 must schedule a full display rebind."
 }
+$vddReturnProtectionAst = @(
+    $watchdogAst.FindAll(
+        {
+            param($node)
+            $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq "Invoke-VddWindowReturnProtection"
+        },
+        $true)
+)
+if ($vddReturnProtectionAst.Count -ne 1 -or
+    $vddReturnProtectionAst[0].Extent.Text -notmatch '(?s)Get-HS2OverlayProcess.*?Invoke-VddWindowReturnGuard') {
+    throw "VDD window-return protection must preserve the HS2 overlay while invoking the identity-based guard."
+}
+if ($vddReturnProtectionAst[0].Extent.Text -match '-not\s+\$script:hs2DisplayStateActive') {
+    throw "VDD window-return protection must not wait for HS2 controller verification."
+}
+$vddWindowReturnCallCount = [regex]::Matches(
+    $watchdogText,
+    '(?m)^\s*Invoke-VddWindowReturnProtection\s*$').Count
+if ($vddWindowReturnCallCount -lt 3) {
+    throw "VDD window-return protection must run during startup and each watchdog loop."
+}
 $earlyWindowGuard = $watchdogText.IndexOf(
     'Invoke-HS2ExclusiveWindowProtection',
     $watchdogText.IndexOf('HS2 ordinary-window protection starts before controller and overlay verification', [StringComparison]::Ordinal),
@@ -2324,6 +2468,38 @@ if ($watchdogText -notmatch [regex]::Escape("hs2-startup-window-guard.stderr.log
 $windowPolicyText = Get-Content -LiteralPath $windowPreservationPolicy -Raw
 if ($windowPolicyText -notmatch '"HS2\.CrystalOverlay"') {
     throw "The independent pre-overlay guard must always exclude the overlay process by identity."
+}
+foreach ($pattern in @(
+        'CaptureMonitorIdentities',
+        'DisplayDeviceAttachedToDesktop',
+        'Get-VddWindowReturnPlan',
+        'Invoke-VddWindowReturnGuard',
+        "'PHLC34B'",
+        "'MTT1337'",
+        'main-vdd-device-collision')) {
+    if ($windowPolicyText -notmatch [regex]::Escape($pattern)) {
+        throw "VDD return policy missing stable monitor-identity protection: $pattern"
+    }
+}
+$moveWindowPlacementMatch = [regex]::Match(
+    $windowPolicyText,
+    '(?s)public static bool MoveWindowPlacement\s*\(.*?\n\s*}\s*\n\s*public static bool MinimizeWindow')
+if (-not $moveWindowPlacementMatch.Success) {
+    throw 'Window placement method is missing from the VDD return policy.'
+}
+$moveWindowPlacementText = $moveWindowPlacementMatch.Value
+if ($moveWindowPlacementText -match 'placement\.(ShowCommand|MinimumPosition|MaximumPosition)\s*=') {
+    throw 'Window relocation must preserve minimized and maximized placement semantics.'
+}
+foreach ($pattern in @(
+        'placement.Flags |= WindowPlacementAsync',
+        'placement.NormalPosition.Left = left',
+        'placement.NormalPosition.Top = top',
+        'placement.NormalPosition.Right = right',
+        'placement.NormalPosition.Bottom = bottom')) {
+    if ($moveWindowPlacementText -notmatch [regex]::Escape($pattern)) {
+        throw "Window relocation must preserve state while updating the normal placement: $pattern"
+    }
 }
 
 foreach ($pattern in @(

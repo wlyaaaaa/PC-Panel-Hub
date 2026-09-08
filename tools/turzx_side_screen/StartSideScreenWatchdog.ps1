@@ -106,6 +106,8 @@ $script:hs2WindowGuardTargetMonitorDevice = $null
 $script:hs2WindowGuardSafeMonitorDevice = $null
 $script:hs2WindowGuardLastStatus = $null
 $script:hs2WindowGuardLastFailure = $null
+$script:vddWindowGuardLastStatus = $null
+$script:vddWindowGuardLastFailure = $null
 $script:hs2LastResumeHandledUtc = [DateTime]::MinValue
 $script:hs2Code10LastSignature = $null
 $script:wallpaperDisplayLastProbeUtc = [DateTime]::MinValue
@@ -1406,6 +1408,69 @@ function Invoke-HS2ExclusiveWindowProtection {
     }
 }
 
+function Invoke-VddWindowReturnProtection {
+    if ($NoWindowPreservationPolicy) {
+        return
+    }
+
+    $overlayProcess = Get-HS2OverlayProcess
+    [int[]]$overlayProcessIds = @(
+        if ($null -ne $overlayProcess) {
+            [int]$overlayProcess.Id
+        }
+    )
+
+    try {
+        $guardArguments = @{}
+        if ($overlayProcessIds.Count -gt 0) {
+            $guardArguments.OverlayProcessIds = $overlayProcessIds
+        }
+        $result = Invoke-VddWindowReturnGuard @guardArguments
+        $status = '{0}|main={1}|vdd={2}' -f `
+            [string]$result.Status,
+            [string]$result.MainMonitorDevice,
+            [string]$result.VddMonitorDevice
+        if ($status -cne $script:vddWindowGuardLastStatus) {
+            Write-WatchdogLog ('VDD window-return guard {0}' -f $status)
+            $script:vddWindowGuardLastStatus = $status
+        }
+
+        $applied = @($result.AppliedActions)
+        if ($applied.Count -gt 0) {
+            Write-WatchdogLog (
+                'VDD window-return guard corrected moved={0}' -f $applied.Count)
+        }
+
+        $failures = @($result.FailedActions)
+        $failureSignature = if ($failures.Count -eq 0) {
+            $null
+        }
+        else {
+            @(
+                $failures |
+                    ForEach-Object {
+                        '{0}:{1}:{2}' -f $_.Action, $_.ProcessId, $_.Hwnd
+                    }
+            ) -join ','
+        }
+        if ($failureSignature -cne $script:vddWindowGuardLastFailure) {
+            if ($null -ne $failureSignature) {
+                Write-WatchdogLog (
+                    'VDD window-return guard correction failed actions={0}' -f `
+                        $failureSignature)
+            }
+            $script:vddWindowGuardLastFailure = $failureSignature
+        }
+    }
+    catch {
+        $failure = $_.Exception.Message
+        if ($failure -cne $script:vddWindowGuardLastFailure) {
+            Write-WatchdogLog ('VDD window-return guard failed: {0}' -f $failure)
+            $script:vddWindowGuardLastFailure = $failure
+        }
+    }
+}
+
 function Start-WatchdogParentLivenessGuard {
     $self = Get-CimInstance Win32_Process -Filter "ProcessId=$PID" -ErrorAction Stop
     $parentId = [int]$self.ParentProcessId
@@ -1982,9 +2047,11 @@ try {
     Write-WatchdogLog "HS2 ordinary-window protection starts before controller and overlay verification"
     Start-HS2StartupWindowGuard
     Invoke-HS2ExclusiveWindowProtection
+    Invoke-VddWindowReturnProtection
     Set-ActiveDisplayState -Reason "watchdog-start"
     Invoke-HS2OverlayHealthCheck
     Invoke-HS2ExclusiveWindowProtection
+    Invoke-VddWindowReturnProtection
     Invoke-WallpaperEngineDisplayRecovery
     $initialAttempt = Invoke-TurzxStackRestartAttempt -Reason "watchdog-start"
     $child = Set-TurzxChildHeartbeatStartupWindow -Child $initialAttempt.Child
@@ -2092,6 +2159,7 @@ try {
         Invoke-HS2ActiveMaintenance
         Invoke-HS2OverlayHealthCheck
         Invoke-HS2ExclusiveWindowProtection
+        Invoke-VddWindowReturnProtection
         Invoke-WallpaperEngineDisplayRecovery
 
         if ($null -eq $child) {

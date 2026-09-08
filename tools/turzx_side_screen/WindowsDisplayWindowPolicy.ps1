@@ -159,6 +159,12 @@ namespace TURZX.SideScreen
         public int WorkBottom { get; set; }
     }
 
+    public sealed class WindowGuardMonitorIdentitySnapshot
+    {
+        public string DeviceName { get; set; }
+        public string MonitorDeviceId { get; set; }
+    }
+
     public sealed class WindowGuardWindowSnapshot
     {
         public long Hwnd { get; set; }
@@ -179,6 +185,7 @@ namespace TURZX.SideScreen
     public static class ExclusiveWindowGuardNativeMethods
     {
         private const int MonitorInfoPrimary = 1;
+        private const int DisplayDeviceAttachedToDesktop = 1;
         private const uint MonitorDefaultToNearest = 2;
         private const int DwmWindowAttributeCloaked = 14;
         private const int ShowMinimized = 6;
@@ -222,6 +229,21 @@ namespace TURZX.SideScreen
             public Rect NormalPosition;
         }
 
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct DisplayDevice
+        {
+            public int Size;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
+            public string DeviceName;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)]
+            public string DeviceString;
+            public int StateFlags;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)]
+            public string DeviceId;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)]
+            public string DeviceKey;
+        }
+
         private delegate bool MonitorEnumerationCallback(
             IntPtr monitor,
             IntPtr deviceContext,
@@ -238,6 +260,13 @@ namespace TURZX.SideScreen
             IntPtr clipRectangle,
             MonitorEnumerationCallback callback,
             IntPtr data);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern bool EnumDisplayDevices(
+            string device,
+            uint deviceNumber,
+            ref DisplayDevice displayDevice,
+            uint flags);
 
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
         private static extern bool GetMonitorInfo(
@@ -340,6 +369,38 @@ namespace TURZX.SideScreen
             EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, callback, IntPtr.Zero);
             GC.KeepAlive(callback);
             return monitors.ToArray();
+        }
+
+        public static WindowGuardMonitorIdentitySnapshot[] CaptureMonitorIdentities()
+        {
+            List<WindowGuardMonitorIdentitySnapshot> identities =
+                new List<WindowGuardMonitorIdentitySnapshot>();
+            for (uint adapterIndex = 0; adapterIndex < 64; adapterIndex++)
+            {
+                DisplayDevice adapter = new DisplayDevice();
+                adapter.Size = Marshal.SizeOf(typeof(DisplayDevice));
+                if (!EnumDisplayDevices(null, adapterIndex, ref adapter, 0)) break;
+                if (String.IsNullOrWhiteSpace(adapter.DeviceName) ||
+                    (adapter.StateFlags & DisplayDeviceAttachedToDesktop) == 0) continue;
+                for (uint monitorIndex = 0; monitorIndex < 16; monitorIndex++)
+                {
+                    DisplayDevice monitor = new DisplayDevice();
+                    monitor.Size = Marshal.SizeOf(typeof(DisplayDevice));
+                    if (!EnumDisplayDevices(
+                        adapter.DeviceName,
+                        monitorIndex,
+                        ref monitor,
+                        0)) break;
+                    if (String.IsNullOrWhiteSpace(monitor.DeviceId) ||
+                        (monitor.StateFlags & DisplayDeviceAttachedToDesktop) == 0) continue;
+                    identities.Add(new WindowGuardMonitorIdentitySnapshot
+                    {
+                        DeviceName = adapter.DeviceName,
+                        MonitorDeviceId = monitor.DeviceId
+                    });
+                }
+            }
+            return identities.ToArray();
         }
 
         public static WindowGuardWindowSnapshot[] CaptureWindows(
@@ -742,6 +803,159 @@ function Get-HS2ExclusiveWindowGuardPlan {
     }
 }
 
+function Test-WindowGuardMonitorHardwareId {
+    param(
+        [Parameter(Mandatory = $true)]$Identity,
+        [Parameter(Mandatory = $true)][string]$HardwareId
+    )
+
+    $deviceId = [string]$Identity.MonitorDeviceId
+    return -not [string]::IsNullOrWhiteSpace($deviceId) -and
+        $deviceId.StartsWith(
+            ("MONITOR\{0}\" -f $HardwareId.Trim()),
+            [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Get-VddWindowReturnPlan {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Monitors,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Windows,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$MonitorIdentities,
+        [AllowNull()][object]$OverlayProcessIds,
+        [string]$MainMonitorHardwareId = 'PHLC34B',
+        [string]$VddMonitorHardwareId = 'MTT1337'
+    )
+
+    $overlayIds = New-Object "System.Collections.Generic.HashSet[int]"
+    foreach ($processId in @($OverlayProcessIds)) {
+        [void]$overlayIds.Add([int]$processId)
+    }
+
+    $mainDeviceNames = @(
+        $MonitorIdentities |
+            Where-Object {
+                Test-WindowGuardMonitorHardwareId `
+                    -Identity $_ `
+                    -HardwareId $MainMonitorHardwareId
+            } |
+            ForEach-Object { [string]$_.DeviceName } |
+            Sort-Object -Unique
+    )
+    $mainMonitors = @(
+        $Monitors | Where-Object {
+            $mainDeviceNames -contains [string]$_.DeviceName
+        }
+    )
+    if ($mainMonitors.Count -ne 1) {
+        return [pscustomobject]@{
+            Status = if ($mainMonitors.Count -eq 0) {
+                'physical-main-unavailable'
+            }
+            else {
+                'physical-main-ambiguous'
+            }
+            MainMonitorDevice = $null
+            VddMonitorDevice = $null
+            Actions = @()
+        }
+    }
+
+    $vddDeviceNames = @(
+        $MonitorIdentities |
+            Where-Object {
+                Test-WindowGuardMonitorHardwareId `
+                    -Identity $_ `
+                    -HardwareId $VddMonitorHardwareId
+            } |
+            ForEach-Object { [string]$_.DeviceName } |
+            Sort-Object -Unique
+    )
+    $vddMonitors = @(
+        $Monitors | Where-Object {
+            $vddDeviceNames -contains [string]$_.DeviceName
+        }
+    )
+    if ($vddMonitors.Count -ne 1) {
+        return [pscustomobject]@{
+            Status = if ($vddMonitors.Count -eq 0) {
+                'vdd-unavailable'
+            }
+            else {
+                'vdd-ambiguous'
+            }
+            MainMonitorDevice = [string]$mainMonitors[0].DeviceName
+            VddMonitorDevice = $null
+            Actions = @()
+        }
+    }
+
+    $mainMonitor = $mainMonitors[0]
+    $vddMonitor = $vddMonitors[0]
+    if ([string]$mainMonitor.DeviceName -ceq [string]$vddMonitor.DeviceName) {
+        return [pscustomobject]@{
+            Status = 'main-vdd-device-collision'
+            MainMonitorDevice = [string]$mainMonitor.DeviceName
+            VddMonitorDevice = [string]$vddMonitor.DeviceName
+            Actions = @()
+        }
+    }
+    $mainWidth = [Math]::Max(
+        1,
+        [int]$mainMonitor.WorkRight - [int]$mainMonitor.WorkLeft)
+    $mainHeight = [Math]::Max(
+        1,
+        [int]$mainMonitor.WorkBottom - [int]$mainMonitor.WorkTop)
+    $actions = New-Object "System.Collections.Generic.List[object]"
+    foreach ($window in @($Windows | Sort-Object Hwnd)) {
+        $placementWidth =
+            [int]$window.PlacementRight - [int]$window.PlacementLeft
+        $placementHeight =
+            [int]$window.PlacementBottom - [int]$window.PlacementTop
+        if ([string]$window.MonitorDevice -cne [string]$vddMonitor.DeviceName -or
+            -not [bool]$window.IsVisible -or
+            [bool]$window.IsCloaked -or
+            $placementWidth -le 32 -or
+            $placementHeight -le 32 -or
+            (Test-HS2ExclusiveWindowGuardExclusion `
+                -Window $window `
+                -OverlayProcessIds $overlayIds)) {
+            continue
+        }
+
+        $width = [Math]::Min($mainWidth, [Math]::Max(1, $placementWidth))
+        $height = [Math]::Min($mainHeight, [Math]::Max(1, $placementHeight))
+        $offsetX = [Math]::Max(
+            0,
+            [Math]::Min(
+                $mainWidth - $width,
+                [int]$window.PlacementLeft - [int]$vddMonitor.WorkLeft))
+        $offsetY = [Math]::Max(
+            0,
+            [Math]::Min(
+                $mainHeight - $height,
+                [int]$window.PlacementTop - [int]$vddMonitor.WorkTop))
+        $left = [int]$mainMonitor.WorkLeft + $offsetX
+        $top = [int]$mainMonitor.WorkTop + $offsetY
+        [void]$actions.Add([pscustomobject]@{
+                Action = 'Move'
+                Hwnd = [int64]$window.Hwnd
+                ProcessId = [int]$window.ProcessId
+                ProcessName = [string]$window.ProcessName
+                Left = $left
+                Top = $top
+                Right = $left + $width
+                Bottom = $top + $height
+            })
+    }
+
+    return [pscustomobject]@{
+        Status = 'active'
+        MainMonitorDevice = [string]$mainMonitor.DeviceName
+        VddMonitorDevice = [string]$vddMonitor.DeviceName
+        Actions = $actions.ToArray()
+    }
+}
+
 function Invoke-HS2ExclusiveWindowGuard {
     param(
         [AllowNull()][object]$OverlayProcessIds,
@@ -809,6 +1023,69 @@ function Invoke-HS2ExclusiveWindowGuard {
         OverlayPlacementStatus = [string]$plan.OverlayPlacementStatus
         OverlayVisibleWindowCount = [int]$plan.OverlayVisibleWindowCount
         MisplacedOverlayWindows = @($plan.MisplacedOverlayWindows)
+        PlannedActions = @($plan.Actions)
+        AppliedActions = $applied.ToArray()
+        FailedActions = $failures.ToArray()
+        DryRun = [bool]$DryRun
+    }
+}
+
+function Invoke-VddWindowReturnGuard {
+    param(
+        [AllowNull()][object]$OverlayProcessIds,
+        [switch]$DryRun
+    )
+
+    $nativeMethods = Initialize-HS2ExclusiveWindowGuardNativeMethods
+    if ($null -eq $nativeMethods) {
+        throw 'VDD window-return native methods are unavailable.'
+    }
+
+    $overlayIdArray = [int[]]@($OverlayProcessIds)
+    $monitors = @($nativeMethods::CaptureMonitors())
+    $identities = @($nativeMethods::CaptureMonitorIdentities())
+    $windows = @($nativeMethods::CaptureWindows($overlayIdArray))
+    $processNames = @{}
+    foreach ($process in @(Get-Process -ErrorAction SilentlyContinue)) {
+        $processNames[[int]$process.Id] = [string]$process.ProcessName
+    }
+    foreach ($window in $windows) {
+        if ($processNames.ContainsKey([int]$window.ProcessId)) {
+            $window.ProcessName = $processNames[[int]$window.ProcessId]
+        }
+    }
+
+    $planArguments = @{
+        Monitors = $monitors
+        Windows = $windows
+        MonitorIdentities = $identities
+    }
+    if ($overlayIdArray.Count -gt 0) {
+        $planArguments.OverlayProcessIds = $overlayIdArray
+    }
+    $plan = Get-VddWindowReturnPlan @planArguments
+    $applied = New-Object 'System.Collections.Generic.List[object]'
+    $failures = New-Object 'System.Collections.Generic.List[object]'
+    if (-not $DryRun) {
+        foreach ($action in @($plan.Actions)) {
+            if ($nativeMethods::MoveWindowPlacement(
+                    [int64]$action.Hwnd,
+                    [int]$action.Left,
+                    [int]$action.Top,
+                    [int]$action.Right,
+                    [int]$action.Bottom)) {
+                [void]$applied.Add($action)
+            }
+            else {
+                [void]$failures.Add($action)
+            }
+        }
+    }
+
+    return [pscustomobject]@{
+        Status = [string]$plan.Status
+        MainMonitorDevice = [string]$plan.MainMonitorDevice
+        VddMonitorDevice = [string]$plan.VddMonitorDevice
         PlannedActions = @($plan.Actions)
         AppliedActions = $applied.ToArray()
         FailedActions = $failures.ToArray()
