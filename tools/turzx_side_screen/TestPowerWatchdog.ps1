@@ -551,6 +551,33 @@ if ($straddlingPlan.Actions.Count -ne 1 -or
     $straddlingPlan.Actions[0].Bottom -ne 600) {
     throw 'VDD return guard must move a physical-main window whose DWM frame visibly crosses into VDD.'
 }
+$oversizedStraddlingMainWindow = New-GuardWindow `
+    -Hwnd 11 `
+    -ProcessId 908 `
+    -ProcessName 'large-main-app' `
+    -ClassName 'LargeMainApp' `
+    -MonitorDevice $primaryMonitor.DeviceName
+$oversizedStraddlingMainWindow.PlacementLeft = 100
+$oversizedStraddlingMainWindow.PlacementTop = 100
+$oversizedStraddlingMainWindow.PlacementRight = 3100
+$oversizedStraddlingMainWindow.PlacementBottom = 1700
+$oversizedStraddlingMainWindow | Add-Member -NotePropertyName HasExtendedFrameBounds -NotePropertyValue $true
+$oversizedStraddlingMainWindow | Add-Member -NotePropertyName ExtendedFrameLeft -NotePropertyValue 100
+$oversizedStraddlingMainWindow | Add-Member -NotePropertyName ExtendedFrameTop -NotePropertyValue 100
+$oversizedStraddlingMainWindow | Add-Member -NotePropertyName ExtendedFrameRight -NotePropertyValue 3100
+$oversizedStraddlingMainWindow | Add-Member -NotePropertyName ExtendedFrameBottom -NotePropertyValue 1700
+$oversizedStraddlingPlan = Get-VddWindowReturnPlan `
+    -Monitors @($primaryMonitor, $mttMonitor) `
+    -Windows @($oversizedStraddlingMainWindow) `
+    -MonitorIdentities @($windowGuardMonitorIdentities[0], $windowGuardMonitorIdentities[2])
+if ($oversizedStraddlingPlan.Actions.Count -ne 1 -or
+    $oversizedStraddlingPlan.Actions[0].ProcessId -ne 908 -or
+    $oversizedStraddlingPlan.Actions[0].Left -ne 0 -or
+    $oversizedStraddlingPlan.Actions[0].Top -ne 0 -or
+    $oversizedStraddlingPlan.Actions[0].Right -ne 2560 -or
+    $oversizedStraddlingPlan.Actions[0].Bottom -ne 1400) {
+    throw 'VDD return guard must shrink an oversized physical-main window that visibly crosses into VDD.'
+}
 $transparentBorderMainWindow = New-GuardWindow `
     -Hwnd 10 `
     -ProcessId 907 `

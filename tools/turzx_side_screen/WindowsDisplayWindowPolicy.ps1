@@ -907,30 +907,28 @@ function Get-WindowGuardMainContainmentPlacement {
     $frameHeight = [int]$VisibleBounds.Bottom - [int]$VisibleBounds.Top
     $mainWidth = [int]$MainMonitor.WorkRight - [int]$MainMonitor.WorkLeft
     $mainHeight = [int]$MainMonitor.WorkBottom - [int]$MainMonitor.WorkTop
-    $deltaX = 0
-    $deltaY = 0
-    if ($frameWidth -le $mainWidth) {
-        if ([int]$VisibleBounds.Left -lt [int]$MainMonitor.WorkLeft) {
-            $deltaX = [int]$MainMonitor.WorkLeft - [int]$VisibleBounds.Left
-        }
-        elseif ([int]$VisibleBounds.Right -gt [int]$MainMonitor.WorkRight) {
-            $deltaX = [int]$MainMonitor.WorkRight - [int]$VisibleBounds.Right
-        }
-    }
-    if ($frameHeight -le $mainHeight) {
-        if ([int]$VisibleBounds.Top -lt [int]$MainMonitor.WorkTop) {
-            $deltaY = [int]$MainMonitor.WorkTop - [int]$VisibleBounds.Top
-        }
-        elseif ([int]$VisibleBounds.Bottom -gt [int]$MainMonitor.WorkBottom) {
-            $deltaY = [int]$MainMonitor.WorkBottom - [int]$VisibleBounds.Bottom
-        }
-    }
+    $targetFrameWidth = [Math]::Min($frameWidth, $mainWidth)
+    $targetFrameHeight = [Math]::Min($frameHeight, $mainHeight)
+    $targetFrameLeft = [Math]::Max(
+        [int]$MainMonitor.WorkLeft,
+        [Math]::Min(
+            [int]$MainMonitor.WorkRight - $targetFrameWidth,
+            [int]$VisibleBounds.Left))
+    $targetFrameTop = [Math]::Max(
+        [int]$MainMonitor.WorkTop,
+        [Math]::Min(
+            [int]$MainMonitor.WorkBottom - $targetFrameHeight,
+            [int]$VisibleBounds.Top))
+    $leftInset = [int]$VisibleBounds.Left - [int]$Window.PlacementLeft
+    $topInset = [int]$VisibleBounds.Top - [int]$Window.PlacementTop
+    $rightInset = [int]$Window.PlacementRight - [int]$VisibleBounds.Right
+    $bottomInset = [int]$Window.PlacementBottom - [int]$VisibleBounds.Bottom
 
     return [pscustomobject]@{
-        Left = [int]$Window.PlacementLeft + $deltaX
-        Top = [int]$Window.PlacementTop + $deltaY
-        Right = [int]$Window.PlacementRight + $deltaX
-        Bottom = [int]$Window.PlacementBottom + $deltaY
+        Left = $targetFrameLeft - $leftInset
+        Top = $targetFrameTop - $topInset
+        Right = $targetFrameLeft + $targetFrameWidth + $rightInset
+        Bottom = $targetFrameTop + $targetFrameHeight + $bottomInset
     }
 }
 
