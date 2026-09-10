@@ -312,32 +312,42 @@ function Invoke-WallpaperEngineDisplayRecovery {
             throw "display monitor snapshot methods are unavailable."
         }
         $monitors = @($nativeMethods::CaptureMonitors())
-        $mttMonitorNodes = @(
-            Get-PnpDevice `
-                -PresentOnly `
-                -InstanceId "DISPLAY\MTT1337\*" `
-                -ErrorAction Stop
+        $monitorIdentities = @($nativeMethods::CaptureMonitorIdentities())
+        $activeDeviceNames = @(
+            $monitors | ForEach-Object { [string]$_.DeviceName } | Sort-Object -Unique
         )
-        $mttBackingNodes = @(
-            Get-PnpDevice `
-                -PresentOnly `
-                -InstanceId "ROOT\DISPLAY\*" `
-                -ErrorAction Stop
-        )
-        $mttBinding = Get-WallpaperEngineMttBindingDecision `
-            -MttMonitorNodes $mttMonitorNodes `
-            -BackingNodes $mttBackingNodes `
-            -PropertyReader {
-                param($InstanceId, $KeyName)
-                Get-HS2PnpPropertyValue `
-                    -InstanceId ([string]$InstanceId) `
-                    -KeyName ([string]$KeyName)
+        $mttParticipates = @(
+            $monitorIdentities | Where-Object {
+                $activeDeviceNames -contains [string]$_.DeviceName -and
+                [string]$_.MonitorDeviceId -like 'MONITOR\MTT1337\*'
             }
-        $mttDevices = if ($mttBinding.Found) {
-            @($mttBinding.Device)
-        }
-        else {
-            @()
+        ).Count -gt 0
+        $mttDevices = @()
+        if ($mttParticipates) {
+            $mttMonitorNodes = @(
+                Get-PnpDevice `
+                    -PresentOnly `
+                    -InstanceId "DISPLAY\MTT1337\*" `
+                    -ErrorAction Stop
+            )
+            $mttBackingNodes = @(
+                Get-PnpDevice `
+                    -PresentOnly `
+                    -InstanceId "ROOT\DISPLAY\*" `
+                    -ErrorAction Stop
+            )
+            $mttBinding = Get-WallpaperEngineMttBindingDecision `
+                -MttMonitorNodes $mttMonitorNodes `
+                -BackingNodes $mttBackingNodes `
+                -PropertyReader {
+                    param($InstanceId, $KeyName)
+                    Get-HS2PnpPropertyValue `
+                        -InstanceId ([string]$InstanceId) `
+                        -KeyName ([string]$KeyName)
+                }
+            if ($mttBinding.Found) {
+                $mttDevices = @($mttBinding.Device)
+            }
         }
         $hs2BindingHealthy = $false
         if ($script:hs2DisplayStateActive) {
@@ -345,6 +355,7 @@ function Invoke-WallpaperEngineDisplayRecovery {
         }
         $health = Get-WallpaperEngineDisplayHealthDecision `
             -Monitors $monitors `
+            -MonitorIdentities $monitorIdentities `
             -MttDevices $mttDevices `
             -Hs2SecondaryActive $script:hs2DisplayStateActive `
             -Hs2BindingHealthy $hs2BindingHealthy
@@ -701,7 +712,8 @@ function Get-HS2CurrentSecondaryDesktopPathDecision {
 
     try {
         return Get-HS2SecondaryDesktopTopologyDecision `
-            -Monitors @($nativeMethods::CaptureMonitors())
+            -Monitors @($nativeMethods::CaptureMonitors()) `
+            -MonitorIdentities @($nativeMethods::CaptureMonitorIdentities())
     }
     catch {
         return [pscustomobject]@{
@@ -821,7 +833,7 @@ function Set-HS2PreservedActiveState {
     }
 }
 
-function Test-HS2CurrentSecondaryBindingHealthy {
+function Test-HS2CurrentSecondaryUsbBindingHealthy {
     $expected = Read-HS2UsbTopologyBinding -Path $hs2UsbTopologyBindingPath
     $current = Get-HS2HealthyUsbTopologyBinding
     if ($null -eq $expected -or $null -eq $current) {
@@ -837,6 +849,14 @@ function Test-HS2CurrentSecondaryBindingHealthy {
             [string]$expected.DisplayInterfaceInstanceId -and
         [string]$current.LedInstanceId -ieq [string]$expected.LedInstanceId)
     if (-not $usbBindingHealthy) {
+        return $false
+    }
+
+    return $true
+}
+
+function Test-HS2CurrentSecondaryBindingHealthy {
+    if (-not (Test-HS2CurrentSecondaryUsbBindingHealthy)) {
         return $false
     }
 
@@ -874,9 +894,15 @@ function Invoke-HS2SecondaryActiveMaintenance {
             Write-WatchdogLog "HS2 secondary health returned native controller; holding native mode for this epoch"
             return
         }
-        if ([int64]$result.ControllerType -ne 17104897 -or
-            -not (Test-HS2CurrentSecondaryBindingHealthy)) {
-            throw "HS2 secondary controller or its exact AD23/LED binding is no longer healthy."
+        if ([int64]$result.ControllerType -ne 17104897) {
+            throw "HS2 secondary controller is no longer in Windows-secondary mode."
+        }
+        if (-not (Test-HS2CurrentSecondaryUsbBindingHealthy)) {
+            throw "HS2 exact AD23/MI00/LED USB binding is no longer healthy."
+        }
+        $desktopPath = Get-HS2CurrentSecondaryDesktopPathDecision
+        if (-not [bool]$desktopPath.Active) {
+            throw "HS2 Windows desktop path is inactive: $($desktopPath.Reason)."
         }
 
         $script:hs2ActiveLastVerifiedUtc = [DateTime]::UtcNow

@@ -36,17 +36,28 @@ function Get-HS2SecondaryDesktopTopologyDecision {
     param(
         [Parameter(Mandatory = $true)]
         [AllowEmptyCollection()]
-        [object[]]$Monitors
+        [object[]]$Monitors,
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [object[]]$MonitorIdentities
     )
 
     $activeMonitors = @(
         $Monitors | Where-Object {
+            $null -ne $_.PSObject.Properties['Right'] -and
+            $null -ne $_.PSObject.Properties['Left'] -and
+            $null -ne $_.PSObject.Properties['Bottom'] -and
+            $null -ne $_.PSObject.Properties['Top'] -and
             -not [string]::IsNullOrWhiteSpace([string]$_.DeviceName) -and
             ([int]$_.Right - [int]$_.Left) -gt 0 -and
             ([int]$_.Bottom - [int]$_.Top) -gt 0
         }
     )
-    if ($activeMonitors.Count -ne 3) {
+    # HS2 remains a valid Windows secondary display when the physical main is
+    # off or a remote session exposes only its own primary display.  Require a
+    # usable primary plus the uniquely shaped non-primary HS2 target, rather
+    # than a fixed total number of displays.
+    if ($activeMonitors.Count -lt 2) {
         return [pscustomobject]@{
             Active = $false
             Reason = "active-desktop-count-$($activeMonitors.Count)"
@@ -78,10 +89,25 @@ function Get-HS2SecondaryDesktopTopologyDecision {
         }
     }
 
+    $targetMonitorDevice = [string]$hs2Monitors[0].DeviceName
+    $targetIdentities = @(
+        $MonitorIdentities | Where-Object {
+            [string]$_.DeviceName -ceq $targetMonitorDevice -and
+            [string]$_.MonitorDeviceId -like 'MONITOR\TUR0000\*'
+        }
+    )
+    if ($targetIdentities.Count -ne 1) {
+        return [pscustomobject]@{
+            Active = $false
+            Reason = "hs2-monitor-identity-unavailable"
+            TargetMonitorDevice = $null
+        }
+    }
+
     return [pscustomobject]@{
         Active = $true
-        Reason = "three-desktop-paths-with-hs2-active"
-        TargetMonitorDevice = [string]$hs2Monitors[0].DeviceName
+        Reason = "desktop-path-with-hs2-active"
+        TargetMonitorDevice = $targetMonitorDevice
     }
 }
 
@@ -288,6 +314,7 @@ function Get-WallpaperEngineMttBindingDecision {
 function Get-WallpaperEngineDisplayHealthDecision {
     param(
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Monitors,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$MonitorIdentities,
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$MttDevices,
         [Parameter(Mandatory = $true)][bool]$Hs2SecondaryActive,
         [Parameter(Mandatory = $true)][bool]$Hs2BindingHealthy
@@ -307,25 +334,38 @@ function Get-WallpaperEngineDisplayHealthDecision {
             MttDeviceInstanceId = $null
         }
     }
-    if ($activeMonitors.Count -lt 3) {
+    $desktopPath = Get-HS2SecondaryDesktopTopologyDecision `
+        -Monitors $activeMonitors `
+        -MonitorIdentities $MonitorIdentities
+    if (-not [bool]$desktopPath.Active) {
         return [pscustomobject]@{
             Eligible = $false
-            Reason = "active-display-topology-incomplete"
-            PrimaryMonitorDevice = [string]$primaryMonitors[0].DeviceName
-            MttDeviceInstanceId = $null
-        }
-    }
-    if ($activeMonitors.Count -gt 3) {
-        return [pscustomobject]@{
-            Eligible = $false
-            Reason = "active-display-topology-ambiguous"
+            Reason = [string]$desktopPath.Reason
             PrimaryMonitorDevice = [string]$primaryMonitors[0].DeviceName
             MttDeviceInstanceId = $null
         }
     }
 
+    $activeDeviceNames = @(
+        $activeMonitors | ForEach-Object { [string]$_.DeviceName } | Sort-Object -Unique
+    )
+    $activeMttIdentities = @(
+        $MonitorIdentities | Where-Object {
+            $activeDeviceNames -contains [string]$_.DeviceName -and
+            [string]$_.MonitorDeviceId -like 'MONITOR\MTT1337\*'
+        }
+    )
+    if ($activeMttIdentities.Count -gt 1) {
+        return [pscustomobject]@{
+            Eligible = $false
+            Reason = "mtt-monitor-ambiguous"
+            PrimaryMonitorDevice = [string]$primaryMonitors[0].DeviceName
+            MttDeviceInstanceId = $null
+        }
+    }
     $healthyMttDevices = @(
-        $MttDevices | Where-Object {
+        if ($activeMttIdentities.Count -eq 1) {
+            $MttDevices | Where-Object {
             $backingPresent = (
                 $null -ne $_.PSObject.Properties["BackingPresent"] -and
                 [bool]$_.BackingPresent)
@@ -352,9 +392,10 @@ function Get-WallpaperEngineDisplayHealthDecision {
             ($backingStatus -ceq "OK") -and
             ($backingProblemCode -eq 0) -and
             $hardwareIdVerified
+            }
         }
     )
-    if ($healthyMttDevices.Count -ne 1) {
+    if ($activeMttIdentities.Count -eq 1 -and $healthyMttDevices.Count -ne 1) {
         return [pscustomobject]@{
             Eligible = $false
             Reason = "mtt-display-not-healthy"
@@ -367,15 +408,21 @@ function Get-WallpaperEngineDisplayHealthDecision {
             Eligible = $false
             Reason = "lian-li-display-binding-not-healthy"
             PrimaryMonitorDevice = [string]$primaryMonitors[0].DeviceName
-            MttDeviceInstanceId = [string]$healthyMttDevices[0].InstanceId
+            MttDeviceInstanceId = if ($healthyMttDevices.Count -eq 1) {
+                [string]$healthyMttDevices[0].InstanceId
+            }
+            else { $null }
         }
     }
 
     return [pscustomobject]@{
         Eligible = $true
-        Reason = "three-display-bindings-healthy"
+        Reason = "display-path-bindings-healthy"
         PrimaryMonitorDevice = [string]$primaryMonitors[0].DeviceName
-        MttDeviceInstanceId = [string]$healthyMttDevices[0].InstanceId
+        MttDeviceInstanceId = if ($healthyMttDevices.Count -eq 1) {
+            [string]$healthyMttDevices[0].InstanceId
+        }
+        else { $null }
     }
 }
 

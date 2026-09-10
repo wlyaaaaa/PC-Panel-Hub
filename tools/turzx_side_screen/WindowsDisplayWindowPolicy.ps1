@@ -175,6 +175,7 @@ namespace TURZX.SideScreen
         public string MonitorDevice { get; set; }
         public bool IsVisible { get; set; }
         public bool IsMinimized { get; set; }
+        public bool IsMaximized { get; set; }
         public bool IsCloaked { get; set; }
         public bool HasExtendedFrameBounds { get; set; }
         public int ExtendedFrameLeft { get; set; }
@@ -500,6 +501,7 @@ namespace TURZX.SideScreen
                     MonitorDevice = monitorInfo.DeviceName,
                     IsVisible = visible,
                     IsMinimized = minimized,
+                    IsMaximized = placement.ShowCommand == 3,
                     IsCloaked = isCloaked,
                     HasExtendedFrameBounds = hasExtendedFrame,
                     ExtendedFrameLeft = extendedFrame.Left,
@@ -759,14 +761,23 @@ function Get-HS2ExclusiveWindowGuardPlan {
             [int]$window.PlacementRight - [int]$window.PlacementLeft
         $placementHeight =
             [int]$window.PlacementBottom - [int]$window.PlacementTop
-        if ([string]$window.MonitorDevice -cne $targetDevice -or
-            -not [bool]$window.IsVisible -or
+        if (-not [bool]$window.IsVisible -or
             [bool]$window.IsCloaked -or
             $placementWidth -le 32 -or
             $placementHeight -le 32 -or
             (Test-HS2ExclusiveWindowGuardExclusion `
                 -Window $window `
                 -OverlayProcessIds $overlayIds)) {
+            continue
+        }
+
+        $targetOwned = [string]$window.MonitorDevice -ceq $targetDevice
+        $visibleBounds = Get-WindowGuardVisibleBounds -Window $window
+        $maximized = $window.PSObject.Properties['IsMaximized']
+        if (-not $targetOwned -and
+            ([bool]$window.IsMinimized -or
+            ($null -ne $maximized -and [bool]$maximized.Value) -or
+            -not (Test-WindowGuardBoundsIntersectMonitor -Bounds $visibleBounds -Monitor $targetMonitor))) {
             continue
         }
 
@@ -779,6 +790,22 @@ function Get-HS2ExclusiveWindowGuardPlan {
                     ProcessName = [string]$window.ProcessName
                 })
             }
+            continue
+        }
+
+        if (-not $targetOwned) {
+            $placement = Get-WindowGuardMainContainmentPlacement `
+                -Window $window -VisibleBounds $visibleBounds -MainMonitor $safeMonitor
+            [void]$actions.Add([pscustomobject]@{
+                Action = "Move"
+                Hwnd = [int64]$window.Hwnd
+                ProcessId = [int]$window.ProcessId
+                ProcessName = [string]$window.ProcessName
+                Left = $placement.Left
+                Top = $placement.Top
+                Right = $placement.Right
+                Bottom = $placement.Bottom
+            })
             continue
         }
 

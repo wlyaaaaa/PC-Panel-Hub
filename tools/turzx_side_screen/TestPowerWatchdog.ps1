@@ -122,6 +122,20 @@ $mttMonitor = [pscustomobject]@{
     WorkRight = 3840
     WorkBottom = 720
 }
+$monitorIdentities = @(
+    [pscustomobject]@{
+        DeviceName = $primaryMonitor.DeviceName
+        MonitorDeviceId = 'MONITOR\PHLC34B\physical-main'
+    }
+    [pscustomobject]@{
+        DeviceName = $hs2Monitor.DeviceName
+        MonitorDeviceId = 'MONITOR\TUR0000\water-screen'
+    }
+    [pscustomobject]@{
+        DeviceName = $mttMonitor.DeviceName
+        MonitorDeviceId = 'MONITOR\MTT1337\virtual-display'
+    }
+)
 $healthyMttDevice = [pscustomobject]@{
     InstanceId = "DISPLAY\MTT\verified-virtual-display"
     Present = $true
@@ -192,22 +206,58 @@ if ($wallpaperTopologyFingerprint -cne (Get-WallpaperEngineTopologyFingerprint `
 }
 $wallpaperHealth = Get-WallpaperEngineDisplayHealthDecision `
     -Monitors @($primaryMonitor, $hs2Monitor, $mttMonitor) `
+    -MonitorIdentities $monitorIdentities `
     -MttDevices @($healthyMttDevice) `
     -Hs2SecondaryActive $true `
     -Hs2BindingHealthy $true
 if (-not $wallpaperHealth.Eligible -or
-    $wallpaperHealth.Reason -cne "three-display-bindings-healthy") {
-    throw "Wallpaper recovery requires healthy MTT, LIAN LI, and one primary display."
+    $wallpaperHealth.Reason -cne "display-path-bindings-healthy") {
+    throw "Wallpaper recovery requires one primary display and the verified HS2 Windows target."
+}
+$wallpaperTwoDisplay = Get-WallpaperEngineDisplayHealthDecision `
+    -Monitors @($primaryMonitor, $hs2Monitor) `
+    -MonitorIdentities $monitorIdentities `
+    -MttDevices @() `
+    -Hs2SecondaryActive $true `
+    -Hs2BindingHealthy $true
+if (-not $wallpaperTwoDisplay.Eligible -or
+    $wallpaperTwoDisplay.Reason -cne "display-path-bindings-healthy" -or
+    $null -ne $wallpaperTwoDisplay.MttDeviceInstanceId) {
+    throw "Wallpaper recovery must admit a verified HS2 target when MTT is not an active desktop."
+}
+$mttPrimaryMonitor = $mttMonitor.PSObject.Copy()
+$mttPrimaryMonitor.IsPrimary = $true
+$wallpaperMttPrimary = Get-WallpaperEngineDisplayHealthDecision `
+    -Monitors @($mttPrimaryMonitor, $hs2Monitor) `
+    -MonitorIdentities $monitorIdentities `
+    -MttDevices @($healthyMttDevice) `
+    -Hs2SecondaryActive $true `
+    -Hs2BindingHealthy $true
+if (-not $wallpaperMttPrimary.Eligible -or
+    $wallpaperMttPrimary.Reason -cne "display-path-bindings-healthy" -or
+    $wallpaperMttPrimary.PrimaryMonitorDevice -cne $mttMonitor.DeviceName -or
+    $wallpaperMttPrimary.MttDeviceInstanceId -cne $healthyMttDevice.InstanceId) {
+    throw "Wallpaper recovery must validate MTT only when it is the active primary display."
 }
 $hs2DesktopPath = Get-HS2SecondaryDesktopTopologyDecision `
-    -Monitors @($primaryMonitor, $hs2Monitor, $mttMonitor)
+    -Monitors @($primaryMonitor, $hs2Monitor, $mttMonitor) `
+    -MonitorIdentities $monitorIdentities
 if (-not $hs2DesktopPath.Active -or
-    $hs2DesktopPath.Reason -cne "three-desktop-paths-with-hs2-active" -or
+    $hs2DesktopPath.Reason -cne "desktop-path-with-hs2-active" -or
     $hs2DesktopPath.TargetMonitorDevice -cne $hs2Monitor.DeviceName) {
-    throw "HS2 secondary health requires the real three-monitor desktop with one 2288x1048 target."
+    throw "HS2 secondary health requires one primary display and one 2288x1048 target."
+}
+$hs2TwoDisplayPath = Get-HS2SecondaryDesktopTopologyDecision `
+    -Monitors @($primaryMonitor, $hs2Monitor) `
+    -MonitorIdentities $monitorIdentities
+if (-not $hs2TwoDisplayPath.Active -or
+    $hs2TwoDisplayPath.Reason -cne "desktop-path-with-hs2-active" -or
+    $hs2TwoDisplayPath.TargetMonitorDevice -cne $hs2Monitor.DeviceName) {
+    throw "HS2 must remain an active Windows secondary display in a valid two-display remote or main-off topology."
 }
 $hs2DesktopMissing = Get-HS2SecondaryDesktopTopologyDecision `
-    -Monitors @($primaryMonitor)
+    -Monitors @($primaryMonitor) `
+    -MonitorIdentities $monitorIdentities
 if ($hs2DesktopMissing.Active -or
     $hs2DesktopMissing.Reason -cne "active-desktop-count-1") {
     throw "A PnP-only HS2/MTT state must not be accepted as an active Windows desktop topology."
@@ -215,13 +265,15 @@ if ($hs2DesktopMissing.Active -or
 $wrongGeometryMonitor = $hs2Monitor.PSObject.Copy()
 $wrongGeometryMonitor.Right = $wrongGeometryMonitor.Left + 1920
 $hs2DesktopWrongGeometry = Get-HS2SecondaryDesktopTopologyDecision `
-    -Monitors @($primaryMonitor, $wrongGeometryMonitor, $mttMonitor)
+    -Monitors @($primaryMonitor, $wrongGeometryMonitor) `
+    -MonitorIdentities $monitorIdentities
 if ($hs2DesktopWrongGeometry.Active -or
     $hs2DesktopWrongGeometry.Reason -cne "hs2-desktop-path-unavailable") {
-    throw "The three-monitor count alone must not impersonate the 2288x1048 HS2 desktop path."
+    throw "A second display alone must not impersonate the 2288x1048 HS2 desktop path."
 }
 $wallpaperAmbiguousPrimary = Get-WallpaperEngineDisplayHealthDecision `
     -Monitors @($primaryMonitor, $primaryMonitor.PSObject.Copy(), $hs2Monitor, $mttMonitor) `
+    -MonitorIdentities $monitorIdentities `
     -MttDevices @($healthyMttDevice) `
     -Hs2SecondaryActive $true `
     -Hs2BindingHealthy $true
@@ -235,15 +287,17 @@ $wallpaperExtraMonitor = [pscustomobject]@{
 }
 $wallpaperAmbiguousTopology = Get-WallpaperEngineDisplayHealthDecision `
     -Monitors @($primaryMonitor, $hs2Monitor, $mttMonitor, $wallpaperExtraMonitor) `
+    -MonitorIdentities $monitorIdentities `
     -MttDevices @($healthyMttDevice) `
     -Hs2SecondaryActive $true `
     -Hs2BindingHealthy $true
-if ($wallpaperAmbiguousTopology.Eligible -or
-    $wallpaperAmbiguousTopology.Reason -cne "active-display-topology-ambiguous") {
-    throw "Wallpaper recovery must fail closed unless the active topology is exactly the bound three displays."
+if (-not $wallpaperAmbiguousTopology.Eligible -or
+    $wallpaperAmbiguousTopology.Reason -cne "display-path-bindings-healthy") {
+    throw "Wallpaper recovery must retain its verified target across extra ordinary displays."
 }
 $wallpaperUnhealthyMtt = Get-WallpaperEngineDisplayHealthDecision `
     -Monitors @($primaryMonitor, $hs2Monitor, $mttMonitor) `
+    -MonitorIdentities $monitorIdentities `
     -MttDevices @([pscustomobject]@{
             InstanceId = $healthyMttDevice.InstanceId
             Present = $true
@@ -403,6 +457,10 @@ $guardWindows = @(
         -ClassName "Chrome_WidgetWin_1" `
         -MonitorDevice $primaryMonitor.DeviceName
 )
+$guardWindows[4].PlacementLeft = 100
+$guardWindows[4].PlacementTop = 100
+$guardWindows[4].PlacementRight = 1300
+$guardWindows[4].PlacementBottom = 900
 $guardPlan = Get-HS2ExclusiveWindowGuardPlan `
     -Monitors @($primaryMonitor, $hs2Monitor) `
     -Windows $guardWindows `
@@ -422,6 +480,47 @@ if ($guardPlan.Actions.Count -ne 1 -or
     $guardPlan.Actions[0].Top -lt $primaryMonitor.WorkTop -or
     $guardPlan.Actions[0].Bottom -gt $primaryMonitor.WorkBottom) {
     throw "HS2 exclusive-window guard must move only ordinary apps into the primary work area."
+}
+
+# A window can overlap HS2 while MonitorFromWindow still reports the primary.
+$overlapMain = [pscustomobject]@{
+    DeviceName = 'main'; IsPrimary = $true
+    Left = 0; Top = 0; Right = 2880; Bottom = 1800
+    WorkLeft = 0; WorkTop = 0; WorkRight = 2880; WorkBottom = 1740
+}
+$overlapHs2 = [pscustomobject]@{
+    DeviceName = 'hs2'; IsPrimary = $false
+    Left = 2880; Top = 0; Right = 5168; Bottom = 1048
+    WorkLeft = 2880; WorkTop = 0; WorkRight = 5168; WorkBottom = 1048
+}
+$overlapExplorer = New-GuardWindow -Hwnd 801 -ProcessId 801 -ProcessName 'explorer' `
+    -ClassName 'CabinetWClass' -MonitorDevice 'main'
+$overlapExplorer.PlacementLeft = 1104; $overlapExplorer.PlacementTop = 638
+$overlapExplorer.PlacementRight = 3048; $overlapExplorer.PlacementBottom = 1808
+$overlapPlan = Get-HS2ExclusiveWindowGuardPlan -Monitors @($overlapMain, $overlapHs2) -Windows @($overlapExplorer)
+if ($overlapPlan.Actions.Count -ne 1 -or $overlapPlan.Actions[0].Action -ne 'Move' -or
+    $overlapPlan.Actions[0].Right -gt 2880 -or $overlapPlan.Actions[0].Bottom -gt 1740 -or
+    $overlapPlan.Actions[0].Left -lt 0 -or $overlapPlan.Actions[0].Top -lt 0) {
+    throw 'A primary-owned visible window crossing HS2 must be contained in the primary work area.'
+}
+foreach ($excludedCase in @('minimized', 'maximized', 'hidden', 'wallpaper', 'shell', 'overlay', 'frame-only')) {
+    $excludedOverlap = $overlapExplorer.PSObject.Copy()
+    switch ($excludedCase) {
+        'minimized' { $excludedOverlap.IsMinimized = $true }
+        'maximized' { $excludedOverlap | Add-Member -NotePropertyName IsMaximized -NotePropertyValue $true }
+        'hidden' { $excludedOverlap.IsVisible = $false }
+        'wallpaper' { $excludedOverlap.ProcessName = 'wallpaper64' }
+        'shell' { $excludedOverlap.ClassName = 'WorkerW' }
+        'overlay' { $excludedOverlap.ProcessName = 'HS2.CrystalOverlay' }
+        'frame-only' {
+            $excludedOverlap | Add-Member -NotePropertyMembers @{
+                HasExtendedFrameBounds = $true; ExtendedFrameLeft = 1104
+                ExtendedFrameTop = 638; ExtendedFrameRight = 2880; ExtendedFrameBottom = 1048
+            }
+        }
+    }
+    $excludedPlan = Get-HS2ExclusiveWindowGuardPlan -Monitors @($overlapMain, $overlapHs2) -Windows @($excludedOverlap)
+    if ($excludedPlan.Actions.Count -ne 0) { throw "Cross-screen protection must ignore $excludedCase." }
 }
 
 $preOverlayGuardPlan = Get-HS2ExclusiveWindowGuardPlan `
@@ -2089,6 +2188,7 @@ foreach ($pattern in @(
     "Set-HS2PreservedActiveState",
     "Set-HS2VerifiedSecondaryState",
     "Invoke-HS2InitialActiveMaintenance",
+    "Test-HS2CurrentSecondaryUsbBindingHealthy",
     "Test-HS2CurrentSecondaryBindingHealthy",
     "Invoke-HS2SecondaryActiveMaintenance",
     "Get-HS2CurrentSecondaryDesktopPathDecision",
@@ -2348,7 +2448,8 @@ $desktopPathDecisionText = Get-WatchdogFunctionText -Name "Get-HS2CurrentSeconda
 foreach ($pattern in @(
         "Get-HS2ActiveRecoveryDecision",
         "HS2ActiveVerifySeconds",
-        "Test-HS2CurrentSecondaryBindingHealthy",
+        "Test-HS2CurrentSecondaryUsbBindingHealthy",
+        "Get-HS2CurrentSecondaryDesktopPathDecision",
         "hs2DisplayStateActive = `$false",
         "hs2OverlayRebindRequired = `$true")) {
     if ($secondaryMaintenanceText -notmatch [regex]::Escape($pattern)) {

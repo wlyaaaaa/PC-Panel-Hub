@@ -44,17 +44,90 @@ function Get-TurzxProcessSnapshot {
 function Stop-MatchingProcess {
     param(
         [scriptblock]$Predicate,
-        [string]$Reason
+        [string]$Reason,
+        [switch]$FailOnStopError
     )
 
+    $stoppedProcessIds = New-Object 'System.Collections.Generic.List[int]'
     $processSnapshot |
         Where-Object {
             $_.ProcessId -ne $PID -and (& $Predicate $_)
         } |
         ForEach-Object {
-            Write-StopLog ("stopping PID={0} reason={1} CMD={2}" -f $_.ProcessId, $Reason, $_.CommandLine)
-            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+            $candidate = $_
+            Write-StopLog ("stopping PID={0} reason={1} CMD={2}" -f $candidate.ProcessId, $Reason, $candidate.CommandLine)
+            try {
+                Stop-Process -Id $candidate.ProcessId -Force -ErrorAction Stop
+                [void]$stoppedProcessIds.Add([int]$candidate.ProcessId)
+            }
+            catch {
+                Write-StopLog ("failed to stop PID={0} reason={1}: {2}" -f $candidate.ProcessId, $Reason, $_.Exception.Message)
+                if ($FailOnStopError -and
+                    $null -ne (Get-Process -Id $candidate.ProcessId -ErrorAction SilentlyContinue)) {
+                    throw
+                }
+            }
         }
+    return $stoppedProcessIds.ToArray()
+}
+
+function Test-MetricsPortAvailable {
+    $listener = $null
+    try {
+        $listener = [System.Net.Sockets.TcpListener]::new(
+            [System.Net.IPAddress]::Parse('127.0.0.1'),
+            18765)
+        $listener.Server.ExclusiveAddressUse = $true
+        $listener.Start()
+        return $true
+    }
+    catch {
+        return $false
+    }
+    finally {
+        if ($null -ne $listener) {
+            $listener.Stop()
+        }
+    }
+}
+
+function Wait-ManagedMetricsAgentExitAndPortRelease {
+    param(
+        [int[]]$ProcessIds,
+        [ValidateRange(1, 30)][int]$TimeoutSeconds = 8
+    )
+
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $remaining = @()
+    do {
+        $remaining = @(
+            foreach ($processId in $ProcessIds) {
+                if ($null -ne (Get-Process -Id $processId -ErrorAction SilentlyContinue)) {
+                    $processId
+                }
+            }
+        )
+        if ($remaining.Count -eq 0 -and (Test-MetricsPortAvailable)) {
+            return
+        }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTime]::UtcNow -lt $deadline)
+
+    $listenerOwners = 'unavailable'
+    try {
+        $ownerIds = @(
+            Get-NetTCPConnection -State Listen -LocalPort 18765 -ErrorAction Stop |
+                Select-Object -ExpandProperty OwningProcess -Unique |
+                Sort-Object
+        )
+        $listenerOwners = if ($ownerIds.Count -eq 0) { 'none' } else { $ownerIds -join ',' }
+    }
+    catch {
+        $listenerOwners = 'probe-failed: ' + $_.Exception.Message
+    }
+    $remainingText = if ($remaining.Count -eq 0) { 'none' } else { $remaining -join ',' }
+    Write-StopLog ("metrics stop proof failed remainingPids={0} port18765Owners={1}" -f $remainingText, $listenerOwners)
+    throw "Managed metrics agent did not exit or port 18765 did not release; remainingPids=$remainingText port18765Owners=$listenerOwners"
 }
 
 function Wait-TurzxStreamProcessesExit {
@@ -176,13 +249,13 @@ if ($IncludeWatchdog) {
 
     # Also catch an additional visible-command-line watchdog, but do it before
     # stopping the stack so no old owner can respawn a COM writer mid-stop.
-    Stop-MatchingProcess -Reason "watchdog-script" -Predicate {
+    [void](Stop-MatchingProcess -Reason "watchdog-script" -Predicate {
         param($p)
         ($p.Name -like "powershell*" -or $p.Name -like "pwsh*") -and
             $p.CommandLine -like "*-File*StartSideScreenWatchdog.ps1*" -and
             $p.CommandLine -like "*StartSideScreenWatchdog.ps1*" -and
             $p.CommandLine -like $sidePattern
-    }
+    })
 
     # An explicit stop also owns the same task's hidden launcher, including
     # its crash cooldown. Otherwise it would undo this stop after 30 seconds.
@@ -190,25 +263,29 @@ if ($IncludeWatchdog) {
         -LauncherPath (Join-Path $side 'StartSideScreenWatchdog-Hidden.vbs')
 }
 
-Stop-MatchingProcess -Reason "metrics-agent" -Predicate {
+$stoppedMetricsProcessIds = @(Stop-MatchingProcess -Reason "metrics-agent" -FailOnStopError -Predicate {
     param($p)
     $p.Name -like "python*" -and $p.CommandLine -like "*turzx_side_screen\metrics_agent.py*" -and $p.CommandLine -like $sidePattern
-}
+})
 
-Stop-MatchingProcess -Reason "top-processes-helper" -Predicate {
+[void](Stop-MatchingProcess -Reason "top-processes-helper" -Predicate {
     param($p)
     $p.Name -like "python*" -and $p.CommandLine -like "*turzx_side_screen\top_processes_helper.py*" -and $p.CommandLine -like $sidePattern
-}
+})
 
-Stop-MatchingProcess -Reason "weather-shim" -Predicate {
+[void](Stop-MatchingProcess -Reason "weather-shim" -Predicate {
     param($p)
     $p.Name -like "python*" -and $p.CommandLine -like "*turzx_weather_shim\turzx_weather_shim.py*" -and $p.CommandLine -like $weatherPattern
-}
+})
 
-Stop-MatchingProcess -Reason "stream-exe" -Predicate {
+[void](Stop-MatchingProcess -Reason "stream-exe" -Predicate {
     param($p)
     $p.Name -like "TURZX.SideScreen.Stream*" -and $p.CommandLine -like $sidePattern
-}
+})
+
+Wait-ManagedMetricsAgentExitAndPortRelease `
+    -ProcessIds $stoppedMetricsProcessIds `
+    -TimeoutSeconds $ProcessSnapshotTimeoutSeconds
 
 $streamParents = @($processSnapshot |
     Where-Object { $_.Name -like "TURZX.SideScreen.Stream*" } |
@@ -239,13 +316,13 @@ catch {
 }
 
 if (-not $SkipStackEntrypoint) {
-    Stop-MatchingProcess -Reason "stack-script" -Predicate {
+    [void](Stop-MatchingProcess -Reason "stack-script" -Predicate {
         param($p)
         ($p.Name -like "powershell*" -or $p.Name -like "pwsh*") -and
             $p.CommandLine -like "*-File*StartSideScreenStack.ps1*" -and
             $p.CommandLine -like "*StartSideScreenStack.ps1*" -and
             $p.CommandLine -like $sidePattern
-    }
+    })
 }
 
 # A new COM writer must never start until the previous stream process has

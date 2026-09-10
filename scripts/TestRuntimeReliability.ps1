@@ -268,6 +268,80 @@ if ($processSnapshotFunction.Extent.Text -notmatch [regex]::Escape('-OperationTi
     }
 }
 
+$matchingStopFunction = $stopAst.Find({param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Stop-MatchingProcess'
+}, $true)
+& {
+    $script:stopErrorLog = @()
+    $processSnapshot = @([pscustomobject]@{ProcessId=62532;CommandLine='project metrics agent'})
+    function Write-StopLog {param([string]$Message) $script:stopErrorLog += $Message}
+    function Stop-Process { [CmdletBinding()]param([int]$Id,[switch]$Force) throw 'simulated stop denied' }
+    function Get-Process { [CmdletBinding()]param([int]$Id) return [pscustomobject]@{Id=$Id} }
+    . ([scriptblock]::Create($matchingStopFunction.Extent.Text))
+    $failure = $null
+    try { Stop-MatchingProcess -Predicate {$true} -Reason 'metrics-agent' -FailOnStopError }
+    catch { $failure = $_.Exception.Message }
+    if ($failure -ne 'simulated stop denied' -or ($script:stopErrorLog -join ' ') -notmatch 'failed to stop PID=62532') {
+        throw 'A live metrics stop failure must preserve the original error and candidate PID.'
+    }
+    function Get-Process { [CmdletBinding()]param([int]$Id) return $null }
+    [void](Stop-MatchingProcess -Predicate {$true} -Reason 'metrics-agent' -FailOnStopError)
+}
+
+$metricsStopProofFunction = $stopAst.Find(
+    {
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq "Wait-ManagedMetricsAgentExitAndPortRelease"
+    },
+    $true)
+if ($null -eq $metricsStopProofFunction -or
+    $metricsStopProofFunction.Extent.Text -notmatch [regex]::Escape('Test-MetricsPortAvailable') -or
+    $metricsStopProofFunction.Extent.Text -notmatch [regex]::Escape('throw')) {
+    throw "Metrics shutdown must prove both the managed PID exit and local port release."
+}
+$stopSourceText = Get-Content -Raw -LiteralPath (Join-Path $side "StopSideScreenStack.ps1")
+if ($stopSourceText -notmatch '(?s)Stop-MatchingProcess\s+-Reason\s+"metrics-agent"\s+-FailOnStopError.*?Wait-ManagedMetricsAgentExitAndPortRelease') {
+    throw "Metrics shutdown failure must prevent a replacement stack from starting."
+}
+& {
+    function Write-StopLog { param([string]$Message) }
+    function Get-Process { param([int]$Id) return $null }
+    function Test-MetricsPortAvailable { return $true }
+    . ([scriptblock]::Create($metricsStopProofFunction.Extent.Text))
+    Wait-ManagedMetricsAgentExitAndPortRelease -ProcessIds @(62532) -TimeoutSeconds 1
+}
+& {
+    $script:metricsStopProofLog = @()
+    function Write-StopLog { param([string]$Message) $script:metricsStopProofLog += $Message }
+    function Get-Process {
+        [CmdletBinding()]
+        param([int]$Id)
+        if ($Id -eq 62532) {
+            return [pscustomobject]@{ Id = $Id }
+        }
+    }
+    function Test-MetricsPortAvailable { return $false }
+    function Get-NetTCPConnection {
+        [CmdletBinding()]
+        param([string]$State, [int]$LocalPort)
+        return [pscustomobject]@{ OwningProcess = 62532 }
+    }
+    . ([scriptblock]::Create($metricsStopProofFunction.Extent.Text))
+    $failure = $null
+    try {
+        Wait-ManagedMetricsAgentExitAndPortRelease -ProcessIds @(62532) -TimeoutSeconds 1
+    }
+    catch {
+        $failure = $_.Exception.Message
+    }
+    if ($failure -notmatch 'remainingPids=62532' -or
+        $failure -notmatch 'port18765Owners=62532' -or
+        ($script:metricsStopProofLog -join "`n") -notmatch 'metrics stop proof failed') {
+        throw "A persistent project metrics PID must fail closed with the exact PID and port-owner evidence."
+    }
+}
+
 $watchdogStopFunction = $restartAst.Find(
     {
         param($node)
