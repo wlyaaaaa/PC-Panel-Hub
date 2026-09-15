@@ -212,6 +212,10 @@ $mainLoopText = $watchdogStart.Substring($mainLoopStart, $mainLoopEnd - $mainLoo
 if ($mainLoopText -match '(?m)^\s*\$child\s*=\s*Start-Stack\s+-Reason') {
     throw "Watchdog main loop must not call Start-Stack without the contained restart adapter."
 }
+if ($watchdogStart -notmatch [regex]::Escape('Claim-TurzxRestartRequest -Path $restartFlag') -or
+    $watchdogStart -notmatch [regex]::Escape('restart request deferred; entering existing child-unavailable cooldown path')) {
+    throw "A failed manual restart request must be consumed once and rejoin the existing cooldown path."
+}
 foreach ($pattern in @(
     'if ($null -eq $child)',
     'Invoke-TurzxStackRestartAttempt',
@@ -220,6 +224,40 @@ foreach ($pattern in @(
     if ($watchdogStart -notmatch [regex]::Escape($pattern)) {
         throw "Watchdog missing unattended restart containment contract: $pattern"
     }
+}
+
+$restartRequestFunction = $restartAst.Find(
+    {
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq "Claim-TurzxRestartRequest"
+    },
+    $true)
+if ($null -eq $restartRequestFunction) {
+    throw "Watchdog must atomically claim a single restart request."
+}
+. ([scriptblock]::Create($restartRequestFunction.Extent.Text))
+$restartRequestRoot = Join-Path ([IO.Path]::GetTempPath()) ("turzx-restart-request-{0}" -f [guid]::NewGuid().ToString("N"))
+New-Item -ItemType Directory -Force -Path $restartRequestRoot | Out-Null
+try {
+    $restartRequestPath = Join-Path $restartRequestRoot "restart-on-start.flag"
+    [IO.File]::WriteAllText($restartRequestPath, "first-request", [Text.UTF8Encoding]::new($false))
+    $claimedRestartRequest = Claim-TurzxRestartRequest -Path $restartRequestPath
+    if ([string]::IsNullOrWhiteSpace($claimedRestartRequest) -or
+        (Test-Path -LiteralPath $restartRequestPath) -or
+        -not (Test-Path -LiteralPath $claimedRestartRequest)) {
+        throw "The watchdog must claim the current restart request before attempting a recycle."
+    }
+
+    [IO.File]::WriteAllText($restartRequestPath, "second-request", [Text.UTF8Encoding]::new($false))
+    Remove-Item -LiteralPath $claimedRestartRequest -Force -ErrorAction Stop
+    if (-not (Test-Path -LiteralPath $restartRequestPath) -or
+        [IO.File]::ReadAllText($restartRequestPath) -ne "second-request") {
+        throw "Consuming a failed request must not erase a newer restart request."
+    }
+}
+finally {
+    Remove-Item -LiteralPath $restartRequestRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 # A stalled local CIM provider previously left the watchdog blocked inside

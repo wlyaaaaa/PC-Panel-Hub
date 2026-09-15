@@ -1700,13 +1700,33 @@ function Test-TurzxChildHeartbeatStartupDeadline {
     return ((Get-TurzxMonotonicMilliseconds) -ge $script:childHeartbeatStartupDeadlineMilliseconds)
 }
 
+function Claim-TurzxRestartRequest {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return $null
+    }
+
+    # Move the exact request out of the well-known path before handling it.
+    # A repair request written while this one is running therefore remains at
+    # $restartFlag for the next watchdog pass instead of being consumed here.
+    $processingPath = "{0}.processing.{1}.{2}" -f `
+        $Path, $PID, ([Guid]::NewGuid().ToString("N"))
+    try {
+        Move-Item -LiteralPath $Path -Destination $processingPath -ErrorAction Stop
+        return $processingPath
+    }
+    catch {
+        return $null
+    }
+}
+
 function Start-Stack {
     param([string]$Reason)
     Stop-Stack -Reason ("pre-start/{0}" -f $Reason)
     if (-not (Set-TurzxPanelBrightness -Brightness $ActiveBrightness)) {
         Write-WatchdogLog ("TURZX brightness restore failed reason={0}; starting stream for recovery" -f $Reason)
     }
-    Remove-Item -LiteralPath $restartFlag -Force -ErrorAction SilentlyContinue
     foreach ($candidatePath in $heartbeatPaths) {
         Remove-Item -LiteralPath $candidatePath -Force -ErrorAction SilentlyContinue
     }
@@ -2171,14 +2191,26 @@ try {
             }
         }
 
-        if (Test-Path -LiteralPath $restartFlag -PathType Leaf) {
+        $claimedRestartRequest = Claim-TurzxRestartRequest -Path $restartFlag
+        if ($null -ne $claimedRestartRequest) {
             Write-WatchdogLog "restart request detected; recycling stack through active watchdog"
-            $consecutiveFailures = 0
-            $heartbeatFailures = 0
-            $restartAttempt = Invoke-TurzxStackRestartAttempt -Reason "restart-request"
-            $child = Set-TurzxChildHeartbeatStartupWindow -Child $restartAttempt.Child
-            if (-not $restartAttempt.Succeeded) { $consecutiveFailures++ }
-            $snapshotStaleHeartbeats = 0
+            try {
+                $consecutiveFailures = 0
+                $heartbeatFailures = 0
+                $restartAttempt = Invoke-TurzxStackRestartAttempt -Reason "restart-request"
+                $child = Set-TurzxChildHeartbeatStartupWindow -Child $restartAttempt.Child
+                if (-not $restartAttempt.Succeeded) {
+                    # Stop proof remains mandatory: never start another stack
+                    # while the old endpoint owns the port.  This failed manual
+                    # request is complete, so rejoin the existing cooldown path.
+                    $consecutiveFailures = $MaxConsecutiveFailures - 1
+                    Write-WatchdogLog "restart request deferred; entering existing child-unavailable cooldown path"
+                }
+                $snapshotStaleHeartbeats = 0
+            }
+            finally {
+                Remove-Item -LiteralPath $claimedRestartRequest -Force -ErrorAction SilentlyContinue
+            }
             continue
         }
 
