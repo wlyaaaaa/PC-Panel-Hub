@@ -43,7 +43,7 @@ try {
  $windows=@($native::CaptureWindows([int[]]@()))
  foreach($w in $windows){if($names.ContainsKey($w.ProcessId)){$w.ProcessName=$names[$w.ProcessId]}}
  $plan=Get-VddWindowReturnPlan -Monitors @($native::CaptureMonitors()) -MonitorIdentities @($native::CaptureMonitorIdentities()) -Windows $windows
- $result=@{status=if(@($rows|Where-Object {-not $_.ReturnedToMain -or -not $_.ShowStatePreserved}).Count -eq 0){'pass'}else{'failed'};utc=[datetime]::UtcNow.ToString('o');cases=$rows;remainingOrdinaryVddWindows=@($plan.Actions).Count;foregroundUnchanged=([DesktopReturnFixture]::GetForegroundWindow() -eq $fg);noDisplayChange=$true}
+ $result=@{status=if(@($rows|Where-Object {-not $_.ReturnedToMain -or -not $_.ShowStatePreserved}).Count -eq 0 -and @($plan.Actions).Count -eq 0 -and [DesktopReturnFixture]::GetForegroundWindow() -eq $fg){'pass'}else{'failed'};utc=[datetime]::UtcNow.ToString('o');cases=$rows;remainingOrdinaryVddWindows=@($plan.Actions).Count;foregroundUnchanged=([DesktopReturnFixture]::GetForegroundWindow() -eq $fg);noDisplayChange=$true}
  [IO.File]::WriteAllText($ResultPath,($result|ConvertTo-Json -Depth 5),[Text.UTF8Encoding]::new($false))
  if($result.status -ne 'pass'){throw 'Live acceptance failed; see result.'}
 } finally {foreach($f in $forms){if(-not $f.IsDisposed){$f.Close();$f.Dispose()}}}
