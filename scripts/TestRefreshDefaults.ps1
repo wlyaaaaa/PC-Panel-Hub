@@ -160,6 +160,10 @@ $config = Get-Content -Raw -Encoding UTF8 -LiteralPath $configPath | ConvertFrom
 if ([int]$config.screen.dataRefreshMs -ne 1000 -or [int]$config.metrics.pollMs -ne 1000) {
     throw "Metrics sampling and the installed Hybrid panel cadence must remain 1000ms."
 }
+$obsoleteScreenKeys = @(@("maxSendMs", "largeDiffFallbackMs", "forceFullFrameOnStart") | Where-Object { $config.screen.PSObject.Properties.Name -contains $_ })
+if ($obsoleteScreenKeys.Count -gt 0) {
+    throw ("Obsolete screen timing knobs must stay removed because production send deadlines are owned by the stream/watchdog arguments: {0}" -f ($obsoleteScreenKeys -join ", "))
+}
 if ([int]$config.ui.maxDiskRows -ne 4) {
     throw "Runtime config must cap the physical-disk UI at four rows."
 }

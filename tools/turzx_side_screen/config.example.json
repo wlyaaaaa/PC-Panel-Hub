@@ -8,10 +8,7 @@
   "screen": {
     "width": 480,
     "height": 1920,
-    "dataRefreshMs": 1000,
-    "maxSendMs": 450,
-    "largeDiffFallbackMs": 1000,
-    "forceFullFrameOnStart": true
+    "dataRefreshMs": 1000
   },
   "metrics": {
     "url": "http://127.0.0.1:18765/snapshot",
