@@ -34,9 +34,11 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $outDir = Join-Path $scriptDir "out"
 $hasExplicitExecutablePath = -not [string]::IsNullOrWhiteSpace($ExecutablePath)
 $exePath = if ($hasExplicitExecutablePath) { $ExecutablePath } else { Join-Path $outDir "TURZX.SideScreen.Stream.exe" }
-$metricsHost = "127.0.0.1"
-$metricsPort = 18765
-$metricsUrl = "http://${metricsHost}:${metricsPort}/snapshot"
+. (Join-Path $PSScriptRoot 'MetricsEndpointPolicy.ps1')
+$metricsEndpoint = Get-TurzxMetricsEndpoint
+$metricsHost = $metricsEndpoint.HostName
+$metricsPort = $metricsEndpoint.Port
+$metricsUrl = $metricsEndpoint.Url
 $metricsLaunchTag = "{0}-{1}" -f `
     [DateTime]::UtcNow.ToString("yyyyMMdd-HHmmssfff"), `
     $PID
@@ -116,34 +118,20 @@ function Find-Python {
 
 function Test-MetricsEndpointReady {
     try {
-        $probe = Invoke-WebRequest -UseBasicParsing -Uri $metricsUrl -TimeoutSec 2
-        return $probe.StatusCode -eq 200 -and -not [string]::IsNullOrWhiteSpace($probe.Content)
+        $healthUri = [UriBuilder]::new($metricsUrl)
+        $healthUri.Path = '/health'
+        $healthUri.Query = ''
+        $probe = Invoke-WebRequest -UseBasicParsing -Uri $healthUri.Uri -TimeoutSec 2
+        $health = $probe.Content | ConvertFrom-Json
+        return $probe.StatusCode -eq 200 -and $health.service -eq 'turzx-metrics' -and $health.status -eq 'ok'
     }
     catch {
         return $false
     }
 }
 
-function Test-MetricsPortAvailable {
-    $listener = $null
-    try {
-        $listener = [System.Net.Sockets.TcpListener]::new(
-            [System.Net.IPAddress]::Parse($metricsHost),
-            $metricsPort
-        )
-        $listener.Server.ExclusiveAddressUse = $true
-        $listener.Start()
-        return $true
-    }
-    catch {
-        return $false
-    }
-    finally {
-        if ($null -ne $listener) {
-            $listener.Stop()
-        }
-    }
-}
+. (Join-Path $PSScriptRoot 'MetricsEndpointPolicy.ps1')
+function Test-MetricsPortAvailable { return (Test-MetricsEndpointBind -Port $metricsPort -HostName $metricsHost) }
 
 function Wait-MetricsEndpointOrPortAvailable {
     param([int]$TimeoutSeconds = 30)
@@ -234,7 +222,7 @@ if (!$Sample -and !$DryRun) {
     if ($metricsState -eq "available") {
         $agentProcess = Start-Process `
             -FilePath $PythonPath `
-            -ArgumentList @($agent, "--host", $metricsHost, "--port", [string]$metricsPort) `
+            -ArgumentList @("-u", $agent, "--host", $metricsHost, "--port", [string]$metricsPort) `
             -WindowStyle Hidden `
             -RedirectStandardOutput $metricsStdoutPath `
             -RedirectStandardError $metricsStderrPath `
@@ -245,7 +233,7 @@ if (!$Sample -and !$DryRun) {
 }
 
 try {
-    $argsList = @("--root", $Root, "--port", $Port, "--interval-ms", [string]$IntervalMs, "--frames", [string]$Frames, "--send-timeout-ms", [string]$SendTimeoutMs, "--diff-send-timeout-ms", [string]$DiffSendTimeoutMs, "--baseline-brightness", [string]$BaselineBrightness, "--max-consecutive-send-failures", [string]$MaxConsecutiveSendFailures, "--full-resync-every-frames", [string]$FullResyncEveryFrames, "--preview-dir", $PreviewDir, "--preview-interval-seconds", [string]$PreviewIntervalSeconds)
+    $argsList = @("--metrics-url", $metricsUrl, "--root", $Root, "--port", $Port, "--interval-ms", [string]$IntervalMs, "--frames", [string]$Frames, "--send-timeout-ms", [string]$SendTimeoutMs, "--diff-send-timeout-ms", [string]$DiffSendTimeoutMs, "--baseline-brightness", [string]$BaselineBrightness, "--max-consecutive-send-failures", [string]$MaxConsecutiveSendFailures, "--full-resync-every-frames", [string]$FullResyncEveryFrames, "--preview-dir", $PreviewDir, "--preview-interval-seconds", [string]$PreviewIntervalSeconds)
     if ($Sample) { $argsList += "--sample" }
     if ($DryRun) { $argsList += "--dry-run" }
     if ($HybridRefresh) { $argsList += "--hybrid-refresh" }

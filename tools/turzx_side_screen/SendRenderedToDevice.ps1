@@ -11,6 +11,8 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+. (Join-Path $PSScriptRoot 'MetricsEndpointPolicy.ps1')
+$metricsEndpoint=Get-TurzxMetricsEndpoint
 $outDir = Join-Path $scriptDir "out"
 $sideExe = Join-Path $outDir "TURZX.SideScreen.exe"
 $sendPng = if ([string]::IsNullOrWhiteSpace($PngPath)) { Join-Path $outDir "side-screen-send.png" } else { $PngPath }
@@ -31,9 +33,9 @@ if ([string]::IsNullOrWhiteSpace($PngPath)) {
         $agent = Join-Path $scriptDir "metrics_agent.py"
         $process = $null
         try {
-            $process = Start-Process -FilePath python -ArgumentList @($agent, "--host", "127.0.0.1", "--port", "18765") -WindowStyle Hidden -PassThru
+            $process = Start-Process -FilePath python -ArgumentList @($agent, "--host", $metricsEndpoint.HostName, "--port", [string]$metricsEndpoint.Port) -WindowStyle Hidden -PassThru
             Start-Sleep -Milliseconds 900
-            & $sideExe --metrics-url "http://127.0.0.1:18765/snapshot" --timeout-ms 5000 --output $sendPng
+            & $sideExe --metrics-url $metricsEndpoint.Url --timeout-ms 5000 --output $sendPng
             if ($LASTEXITCODE -ne 0) {
                 throw "Render HTTP snapshot failed with exit code $LASTEXITCODE"
             }

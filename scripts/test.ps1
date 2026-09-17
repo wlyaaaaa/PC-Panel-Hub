@@ -63,6 +63,10 @@ function Get-LiveStreamEvidence {
     return $null
 }
 
+powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Root "scripts\TestMetricsEndpointPolicy.ps1")
+if ($LASTEXITCODE -ne 0) { throw "TestMetricsEndpointPolicy.ps1 failed" }
+python (Join-Path $side "test_metrics_endpoint_recovery.py")
+if ($LASTEXITCODE -ne 0) { throw "test_metrics_endpoint_recovery.py failed" }
 $runningStream = Get-LiveStreamEvidence
 
 python (Join-Path $side "test_metrics_agent.py")

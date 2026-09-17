@@ -65,12 +65,7 @@ explicit 3-second compatibility fallback and is never selected automatically.
 | Suspend | monitor mode, native offline clock enabled, normal screen output off | stream stopped, verified command `123` sets brightness to `0` |
 | Shutdown/restart | monitor mode, offline clock disabled, screen output off | stream stopped, verified command `123` sets brightness to `0` |
 
-The Windows window-preservation policies are deliberately deferred until that
-secondary display has been verified. Once enabled, they cover the separate case
-where the PC remains awake but the main monitor powers down and leaves the display
-topology. Applications are minimized in place instead of being rearranged onto the
-small HS2 display, and Windows restores their remembered monitor locations when the
-main display reconnects.
+The ordinary-window preservation policies run independently of secondary-mode activation and overlay-process readiness once the display identities are unambiguous. Empty snapshots are safe no-ops. Native Bubbles, Emerald Veil backgrounds, physical blackout layers, instrument overlays, Wallpaper Engine and the shell are not ordinary windows and must not be moved or minimized by either VDD return or the HS2 guard. The policies preserve ordinary apps without changing display topology. The existing watchdog loads the shared policy at startup; a deployed policy revision uses one controlled restart through the existing startup entry, not an extra guard or periodic script reloader.
 
 On resume, HS2 keeps whichever valid controller mode is already present. Only a
 native controller enters the stabilization window before one Windows-secondary

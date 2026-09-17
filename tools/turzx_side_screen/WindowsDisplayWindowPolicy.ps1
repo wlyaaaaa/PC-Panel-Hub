@@ -1,4 +1,4 @@
-Set-StrictMode -Version Latest
+﻿Set-StrictMode -Version Latest
 
 function Get-WindowsDisplayWindowPreservationPlan {
     @(
@@ -328,6 +328,14 @@ namespace TURZX.SideScreen
             IntPtr window,
             [In] ref WindowPlacement placement);
 
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool SetWindowPos(IntPtr window, IntPtr after,
+            int x, int y, int width, int height, uint flags);
+        [DllImport("user32.dll")]
+        private static extern bool GetWindowRect(IntPtr window, out Rect rect);
+        [DllImport("user32.dll", EntryPoint = "GetWindowLongW")]
+        private static extern int GetWindowLong(IntPtr window, int index);
+
         [DllImport("user32.dll")]
         private static extern bool ShowWindowAsync(
             IntPtr window,
@@ -487,6 +495,23 @@ namespace TURZX.SideScreen
                     return true;
                 }
 
+                if ((GetWindowLong(window, -20) & 0x80) == 0)
+                {
+                    Rect normal = placement.NormalPosition;
+                    MonitorInfoEx normalMonitor = new MonitorInfoEx();
+                    normalMonitor.Size = Marshal.SizeOf(typeof(MonitorInfoEx));
+                    if (GetMonitorInfo(MonitorFromRect(ref normal, MonitorDefaultToNearest), ref normalMonitor))
+                    {
+                        int dx=normalMonitor.Work.Left-normalMonitor.Monitor.Left;
+                        int dy=normalMonitor.Work.Top-normalMonitor.Monitor.Top;
+                        placement.NormalPosition.Left += dx;
+                        placement.NormalPosition.Right += dx;
+                        placement.NormalPosition.Top += dy;
+                        placement.NormalPosition.Bottom += dy;
+                        if (!hasExtendedFrame) extendedFrame=placement.NormalPosition;
+                    }
+                }
+
                 StringBuilder title = new StringBuilder(1024);
                 StringBuilder className = new StringBuilder(256);
                 GetWindowText(window, title, title.Capacity);
@@ -536,12 +561,53 @@ namespace TURZX.SideScreen
                 return false;
             }
 
+            // WINDOWPLACEMENT is workspace-relative for ordinary top-level windows.
+            // The planner and DWM snapshots use physical screen coordinates.
+            Rect desired = new Rect { Left=left, Top=top, Right=right, Bottom=bottom };
+            IntPtr target = MonitorFromRect(ref desired, MonitorDefaultToNearest);
+            MonitorInfoEx targetInfo = new MonitorInfoEx();
+            targetInfo.Size = Marshal.SizeOf(typeof(MonitorInfoEx));
+            if (!GetMonitorInfo(target, ref targetInfo)) return false;
+            bool toolWindow = (GetWindowLong(window, -20) & 0x80) != 0;
+            int workspaceX = toolWindow ? 0 : targetInfo.Work.Left-targetInfo.Monitor.Left;
+            int workspaceY = toolWindow ? 0 : targetInfo.Work.Top-targetInfo.Monitor.Top;
+            bool maximized = placement.ShowCommand == 3;
             placement.Flags |= WindowPlacementAsync;
-            placement.NormalPosition.Left = left;
-            placement.NormalPosition.Top = top;
-            placement.NormalPosition.Right = right;
-            placement.NormalPosition.Bottom = bottom;
-            return SetWindowPlacement(window, ref placement);
+            placement.NormalPosition.Left = left-workspaceX;
+            placement.NormalPosition.Top = top-workspaceY;
+            placement.NormalPosition.Right = right-workspaceX;
+            placement.NormalPosition.Bottom = bottom-workspaceY;
+            if (!SetWindowPlacement(window, ref placement)) return false;
+            if (!maximized) return true;
+
+            // Updating rcNormalPosition alone leaves Chromium's maximized frame
+            // on its previous monitor. Move the current frame as well, without
+            // restoring, activating or changing Z-order. Keep native frame insets.
+            Rect outer, frame;
+            int insetLeft=0, insetTop=0, insetRight=0, insetBottom=0;
+            if (GetWindowRect(window, out outer) &&
+                DwmGetWindowAttributeRect(window, DwmWindowAttributeExtendedFrameBounds,
+                    out frame, Marshal.SizeOf(typeof(Rect))) == 0)
+            {
+                insetLeft=Math.Max(0, Math.Min(32, frame.Left-outer.Left));
+                insetTop=Math.Max(0, Math.Min(32, frame.Top-outer.Top));
+                insetRight=Math.Max(0, Math.Min(32, outer.Right-frame.Right));
+                insetBottom=Math.Max(0, Math.Min(32, outer.Bottom-frame.Bottom));
+            }
+            return SetWindowPos(window, IntPtr.Zero,
+                targetInfo.Work.Left-insetLeft, targetInfo.Work.Top-insetTop,
+                targetInfo.Work.Right-targetInfo.Work.Left+insetLeft+insetRight,
+                targetInfo.Work.Bottom-targetInfo.Work.Top+insetTop+insetBottom,
+                0x4000 | 0x0200 | 0x0010 | 0x0004);
+        }
+
+        public static bool MoveWindowPlacementChecked(long windowHandle, int expectedProcessId,
+            int left, int top, int right, int bottom)
+        {
+            uint processId;
+            if (GetWindowThreadProcessId(new IntPtr(windowHandle), out processId) == 0 ||
+                processId != unchecked((uint)expectedProcessId)) return false;
+            return MoveWindowPlacement(windowHandle, left, top, right, bottom);
         }
 
         public static bool MinimizeWindow(long windowHandle)
@@ -562,6 +628,7 @@ function Test-HS2ExclusiveWindowGuardExclusion {
     param(
         [Parameter(Mandatory = $true)]$Window,
         [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
         [Collections.Generic.HashSet[int]]$OverlayProcessIds
     )
 
@@ -580,6 +647,10 @@ function Test-HS2ExclusiveWindowGuardExclusion {
 
     $processName = [string]$Window.ProcessName
     return $processName -in @(
+        "Bubbles",
+        "Bubbles.scr",
+        "EmeraldVeil",
+        "PrimaryOledBlackout",
         "HS2.CrystalOverlay",
         "wallpaper32",
         "wallpaper64",
@@ -590,8 +661,10 @@ function Test-HS2ExclusiveWindowGuardExclusion {
 
 function Get-HS2ExclusiveWindowGuardPlan {
     param(
-        [Parameter(Mandatory = $true)][object[]]$Monitors,
-        [Parameter(Mandatory = $true)][object[]]$Windows,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()]
+        [object[]]$Monitors,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()]
+        [object[]]$Windows,
         [AllowNull()][object]$OverlayProcessIds,
         [string]$PreferredTargetMonitorDevice,
         [string]$PreferredSafeMonitorDevice
@@ -1164,8 +1237,9 @@ function Invoke-HS2ExclusiveWindowGuard {
     if (-not $DryRun) {
         foreach ($action in @($plan.Actions)) {
             $succeeded = if ([string]$action.Action -ceq "Move") {
-                $nativeMethods::MoveWindowPlacement(
+                $nativeMethods::MoveWindowPlacementChecked(
                     [int64]$action.Hwnd,
+                    [int]$action.ProcessId,
                     [int]$action.Left,
                     [int]$action.Top,
                     [int]$action.Right,
@@ -1236,8 +1310,9 @@ function Invoke-VddWindowReturnGuard {
     $failures = New-Object 'System.Collections.Generic.List[object]'
     if (-not $DryRun) {
         foreach ($action in @($plan.Actions)) {
-            if ($nativeMethods::MoveWindowPlacement(
+            if ($nativeMethods::MoveWindowPlacementChecked(
                     [int64]$action.Hwnd,
+                    [int]$action.ProcessId,
                     [int]$action.Left,
                     [int]$action.Top,
                     [int]$action.Right,
@@ -1250,6 +1325,40 @@ function Invoke-VddWindowReturnGuard {
         }
     }
 
+    # An asynchronous Win32 return is dispatch evidence, not migration evidence.
+    # Replan on fresh physical snapshots and count only converged original HWNDs.
+    $dispatchedCount = $applied.Count
+    if (-not $DryRun -and $dispatchedCount -gt 0) {
+        $pending = @($applied.ToArray())
+        $verified = New-Object 'System.Collections.Generic.List[object]'
+        $deadline = [Diagnostics.Stopwatch]::StartNew()
+        do {
+            Start-Sleep -Milliseconds 30
+            $readbackWindows = @($nativeMethods::CaptureWindows($overlayIdArray))
+            foreach ($window in $readbackWindows) {
+                if ($processNames.ContainsKey([int]$window.ProcessId)) {
+                    $window.ProcessName = $processNames[[int]$window.ProcessId]
+                }
+            }
+            $remainingPlan = Get-VddWindowReturnPlan `
+                -Monitors @($nativeMethods::CaptureMonitors()) `
+                -Windows $readbackWindows `
+                -MonitorIdentities @($nativeMethods::CaptureMonitorIdentities()) `
+                -OverlayProcessIds $overlayIdArray
+            $remainingHandles = @($remainingPlan.Actions | ForEach-Object { [int64]$_.Hwnd })
+            $next = @()
+            foreach ($action in $pending) {
+                if ($remainingPlan.Status -eq 'active' -and [int64]$action.Hwnd -notin $remainingHandles) {
+                    [void]$verified.Add($action)
+                }
+                else { $next += $action }
+            }
+            $pending = @($next)
+        } while ($pending.Count -gt 0 -and $deadline.ElapsedMilliseconds -lt 450)
+        foreach ($action in $pending) { [void]$failures.Add($action) }
+        $applied = $verified
+    }
+
     return [pscustomobject]@{
         Status = [string]$plan.Status
         MainMonitorDevice = [string]$plan.MainMonitorDevice
@@ -1257,6 +1366,8 @@ function Invoke-VddWindowReturnGuard {
         PlannedActions = @($plan.Actions)
         AppliedActions = $applied.ToArray()
         FailedActions = $failures.ToArray()
+        DispatchedCount = $dispatchedCount
+        VerifiedCount = $applied.Count
         DryRun = [bool]$DryRun
     }
 }

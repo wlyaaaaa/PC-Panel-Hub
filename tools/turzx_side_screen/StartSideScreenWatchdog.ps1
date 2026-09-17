@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path,
     [string]$Port = "COM7",
     [int]$IntervalMs = 3000,
@@ -120,6 +120,7 @@ $script:turzxStackChild = $null
 $script:turzxBrightnessConsecutiveFailures = 0
 $script:turzxSerialRecoveryLastAttemptUtc = [DateTime]::MinValue
 $script:startupWindowGuardProcess = $null
+$script:startupWindowGuardErrorTask = $null
 
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 . $shutdownPolicy
@@ -264,20 +265,13 @@ function Invoke-WallpaperEngineRenderRebind {
         $workingDirectory = Split-Path -Parent $controlExecutable
         $shellApplication.ShellExecute(
             $controlExecutable,
-            "-control stop",
-            $workingDirectory,
-            "open",
-            0)
-        Start-Sleep -Milliseconds $WallpaperRenderRebindGapMilliseconds
-        $shellApplication.ShellExecute(
-            $controlExecutable,
             "-control play",
             $workingDirectory,
             "open",
             0)
         return [pscustomobject]@{
             Dispatched = $true
-            Status = "control-stop-play-dispatched"
+            Status = "control-play-dispatched"
         }
     }
     catch {
@@ -298,6 +292,7 @@ function Invoke-WallpaperEngineRenderRebind {
 }
 
 function Invoke-WallpaperEngineDisplayRecovery {
+    if (Test-DesktopContinuityWorker) { return }
     $nowUtc = [DateTime]::UtcNow
     if ($script:wallpaperDisplayLastProbeUtc -ne [DateTime]::MinValue -and
         ($nowUtc - $script:wallpaperDisplayLastProbeUtc).TotalSeconds -lt
@@ -394,9 +389,8 @@ function Invoke-WallpaperEngineDisplayRecovery {
         }
         "Rebind" {
             $rebind = Invoke-WallpaperEngineRenderRebind
-            # A failed dispatch still consumes this topology event.  Repeating
-            # stop/play from a High-integrity watcher is riskier than waiting
-            # for a later real display change after the long cooldown.
+            # Fallback is bounded to a real topology event. The normal fast
+            # worker handles playback with its own limited retries.
             $script:wallpaperDisplayLastRebindUtc = $nowUtc
             $script:wallpaperDisplayBaselineFingerprint = $currentFingerprint
             $script:wallpaperDisplayPendingFingerprint = ""
@@ -1435,6 +1429,7 @@ function Invoke-HS2ExclusiveWindowProtection {
 }
 
 function Invoke-VddWindowReturnProtection {
+    if (Test-DesktopContinuityWorker) { return }
     if ($NoWindowPreservationPolicy) {
         return
     }
@@ -1541,40 +1536,47 @@ function Stop-WatchdogParentLivenessGuard {
     }
 }
 
+function Test-DesktopContinuityWorker {
+    return $null -ne $script:startupWindowGuardProcess -and
+        -not $script:startupWindowGuardProcess.HasExited
+}
+
 function Start-HS2StartupWindowGuard {
-    if ($null -ne $script:startupWindowGuardProcess -and
-        -not $script:startupWindowGuardProcess.HasExited) {
-        return
+    if ($NoWindowPreservationPolicy -or (Test-DesktopContinuityWorker)) { return }
+    if ($null -ne $script:startupWindowGuardProcess) {
+        if ($null -ne $script:startupWindowGuardErrorTask -and $script:startupWindowGuardErrorTask.IsCompleted) {
+            $errorText = $script:startupWindowGuardErrorTask.GetAwaiter().GetResult()
+            if (-not [string]::IsNullOrWhiteSpace($errorText)) {
+                [IO.File]::WriteAllText($startupWindowGuardErrorPath, $errorText, [Text.UTF8Encoding]::new($false))
+            }
+        }
+        Write-WatchdogLog ("desktop continuity worker exited code={0}; restarting existing child" -f $script:startupWindowGuardProcess.ExitCode)
+        $script:startupWindowGuardProcess.Dispose()
+        $script:startupWindowGuardProcess = $null
     }
     if (-not (Test-Path -LiteralPath $startupWindowGuardScript -PathType Leaf)) {
         throw "HS2 startup window guard script missing: $startupWindowGuardScript"
     }
     $parent = Get-Process -Id $PID -ErrorAction Stop
-    $arguments = @(
-        '-NoProfile',
-        '-ExecutionPolicy', 'Bypass',
-        '-File', $startupWindowGuardScript,
-        '-ParentProcessId', [string]$PID,
-        '-ParentStartTimeUtcTicks', [string]$parent.StartTime.ToUniversalTime().Ticks,
-        '-DurationSeconds', '180',
-        '-PollMilliseconds', '250'
-    )
     $windowsPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
     if (-not (Test-Path -LiteralPath $windowsPowerShell -PathType Leaf)) {
         throw "Windows PowerShell runtime missing: $windowsPowerShell"
     }
-    $script:startupWindowGuardProcess = Start-Process `
-        -FilePath $windowsPowerShell `
-        -ArgumentList $arguments `
-        -WindowStyle Hidden `
-        -RedirectStandardError $startupWindowGuardErrorPath `
-        -PassThru
-    Start-Sleep -Milliseconds 250
-    $script:startupWindowGuardProcess.Refresh()
+    $start = [Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = $windowsPowerShell
+    $start.Arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -ParentProcessId {1} -ParentStartTimeUtcTicks {2} -DurationSeconds 0 -PollMilliseconds 250' -f `
+        $startupWindowGuardScript,$PID,$parent.StartTime.ToUniversalTime().Ticks
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardError = $true
+    $script:startupWindowGuardProcess = [Diagnostics.Process]::Start($start)
+    $script:startupWindowGuardErrorTask = $script:startupWindowGuardProcess.StandardError.ReadToEndAsync()
+    Start-Sleep -Milliseconds 100
     if ($script:startupWindowGuardProcess.HasExited) {
-        Write-WatchdogLog (
-            "HS2 startup window guard exited early code={0}" -f `
-                $script:startupWindowGuardProcess.ExitCode)
+        Write-WatchdogLog ("HS2 startup window guard exited early code={0}" -f $script:startupWindowGuardProcess.ExitCode)
+    }
+    else {
+        Write-WatchdogLog ("desktop continuity worker started pid={0} pollMs=250 lifetime=parent; windows and play-only topology recovery" -f $script:startupWindowGuardProcess.Id)
     }
 }
 
@@ -2103,6 +2105,7 @@ try {
     $child = Set-TurzxChildHeartbeatStartupWindow -Child $initialAttempt.Child
     if (-not $initialAttempt.Succeeded) { $consecutiveFailures = 1 }
     while ($true) {
+        Start-HS2StartupWindowGuard
         $event = $null
         if (-not $NoPowerEvents) {
             $event = Wait-Event -Timeout $PollSeconds

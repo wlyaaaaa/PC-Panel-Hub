@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path,
     [switch]$IncludeWatchdog,
     [switch]$SkipStackEntrypoint,
@@ -71,25 +71,8 @@ function Stop-MatchingProcess {
     return $stoppedProcessIds.ToArray()
 }
 
-function Test-MetricsPortAvailable {
-    $listener = $null
-    try {
-        $listener = [System.Net.Sockets.TcpListener]::new(
-            [System.Net.IPAddress]::Parse('127.0.0.1'),
-            18765)
-        $listener.Server.ExclusiveAddressUse = $true
-        $listener.Start()
-        return $true
-    }
-    catch {
-        return $false
-    }
-    finally {
-        if ($null -ne $listener) {
-            $listener.Stop()
-        }
-    }
-}
+. (Join-Path $PSScriptRoot 'MetricsEndpointPolicy.ps1')
+function Test-MetricsPortAvailable { $endpoint=Get-TurzxMetricsEndpoint; return (Test-MetricsEndpointBind -Port $endpoint.Port -HostName $endpoint.HostName) }
 
 function Wait-ManagedMetricsAgentExitAndPortRelease {
     param(
@@ -102,7 +85,7 @@ function Wait-ManagedMetricsAgentExitAndPortRelease {
     do {
         $remaining = @(
             foreach ($processId in $ProcessIds) {
-                if ($null -ne (Get-Process -Id $processId -ErrorAction SilentlyContinue)) {
+                if ((Test-MetricsProcessActive -ProcessId $processId)) {
                     $processId
                 }
             }
@@ -116,7 +99,7 @@ function Wait-ManagedMetricsAgentExitAndPortRelease {
     $listenerOwners = 'unavailable'
     try {
         $ownerIds = @(
-            Get-NetTCPConnection -State Listen -LocalPort 18765 -ErrorAction Stop |
+            Get-NetTCPConnection -State Listen -LocalPort (Get-TurzxMetricsEndpoint).Port -ErrorAction Stop |
                 Select-Object -ExpandProperty OwningProcess -Unique |
                 Sort-Object
         )
@@ -287,32 +270,54 @@ Wait-ManagedMetricsAgentExitAndPortRelease `
     -ProcessIds $stoppedMetricsProcessIds `
     -TimeoutSeconds $ProcessSnapshotTimeoutSeconds
 
+# A parent PID from an old CIM snapshot is not permission to kill a process
+# tree. Revalidate the exact project -File entrypoint and its creation time.
+function Test-OwnedStreamParent {
+    param($Candidate, [string]$SideRoot)
+    if ($null -eq $Candidate -or [string]$Candidate.Name -notin @('powershell.exe','pwsh.exe')) { return $false }
+    $fileArgument = [regex]::Match([string]$Candidate.CommandLine,
+        '(?i)(?:^|\s)-File\s+(?:"([^"]+)"|(\S+))')
+    if (-not $fileArgument.Success) { return $false }
+    $path = if ($fileArgument.Groups[1].Success) { $fileArgument.Groups[1].Value } else { $fileArgument.Groups[2].Value }
+    foreach ($name in @('StartVideoStream.ps1','StartSideScreenStack.ps1')) {
+        if ([string]::Equals($path, (Join-Path $SideRoot $name), [StringComparison]::OrdinalIgnoreCase)) { return $true }
+    }
+    return $false
+}
 $streamParents = @($processSnapshot |
-    Where-Object { $_.Name -like "TURZX.SideScreen.Stream*" } |
+    Where-Object { $_.Name -like 'TURZX.SideScreen.Stream*' -and $_.CommandLine -like $sidePattern } |
     Select-Object -ExpandProperty ParentProcessId -Unique |
     Where-Object { $_ -and $_ -ne $PID })
 foreach ($parentPid in $streamParents) {
+    $prior = @($processSnapshot | Where-Object { [int]$_.ProcessId -eq [int]$parentPid })
+    if ($prior.Count -ne 1 -or -not (Test-OwnedStreamParent -Candidate $prior[0] -SideRoot $side)) {
+        Write-StopLog ("not stopping unverified stream parent PID={0}" -f $parentPid)
+        continue
+    }
     try {
-        Write-StopLog ("stopping stream parent PID={0}" -f $parentPid)
-        Stop-Process -Id $parentPid -Force -ErrorAction SilentlyContinue
-        $parentKillOutput = & taskkill.exe /PID $parentPid /F /T 2>&1
-        foreach ($line in $parentKillOutput) {
-            Write-StopLog ("taskkill stream parent: {0}" -f $line)
-        }
+        $fresh = Get-CimInstance Win32_Process -Filter ("ProcessId={0}" -f [int]$parentPid) -ErrorAction Stop
+        if (-not (Test-OwnedStreamParent -Candidate $fresh -SideRoot $side) -or
+            $fresh.CreationDate -ne $prior[0].CreationDate -or
+            -not (Test-MetricsProcessActive -ProcessId ([int]$parentPid))) { continue }
+        Write-StopLog ("stopping verified project stream parent PID={0}" -f $parentPid)
+        Stop-Process -Id $parentPid -Force -ErrorAction Stop
+        # Never /T: unrelated descendants may have been reparented or reused.
     }
-    catch {
-        Write-StopLog ("stream parent kill failed PID={0}: {1}" -f $parentPid, $_.Exception.Message)
-    }
+    catch { Write-StopLog ("verified parent stop failed PID={0}: {1}" -f $parentPid,$_.Exception.Message) }
 }
 
-try {
-    $taskkillOutput = & taskkill.exe /IM "TURZX.SideScreen.Stream.exe" /F /T 2>&1
-    foreach ($line in $taskkillOutput) {
-        Write-StopLog ("taskkill stream: {0}" -f $line)
+# Hard fallback stays exact-PID and exact project image. A machine-wide /IM or
+# tree kill can affect another task; it is not a valid COM-ownership proof.
+$freshStreams = @(Get-CimInstance Win32_Process -Filter "Name='TURZX.SideScreen.Stream.exe'" -ErrorAction Stop)
+foreach ($stream in $freshStreams) {
+    if ([string]$stream.CommandLine -notlike $sidePattern -or
+        [string]$stream.ExecutablePath -notlike ($side + '\*')) { continue }
+    try {
+        if (-not (Test-MetricsProcessActive -ProcessId ([int]$stream.ProcessId))) { continue }
+        $fallbackOutput = & taskkill.exe /PID ([int]$stream.ProcessId) /F 2>&1
+        foreach ($line in $fallbackOutput) { Write-StopLog ("taskkill exact stream: {0}" -f $line) }
     }
-}
-catch {
-    Write-StopLog ("taskkill stream failed: {0}" -f $_.Exception.Message)
+    catch { Write-StopLog ("exact stream stop failed PID={0}: {1}" -f $stream.ProcessId,$_.Exception.Message) }
 }
 
 if (-not $SkipStackEntrypoint) {

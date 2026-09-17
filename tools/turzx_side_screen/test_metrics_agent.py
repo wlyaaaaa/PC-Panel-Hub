@@ -101,7 +101,7 @@ class MetricsAgentTests(unittest.TestCase):
         state = {"active": 0, "calls": 0, "peak": 0}
         errors = []
 
-        def blocking_build():
+        def blocking_build(*, nonblocking_gpu=False):
             with state_lock:
                 state["active"] += 1
                 state["calls"] += 1
@@ -133,8 +133,10 @@ class MetricsAgentTests(unittest.TestCase):
                 time.sleep(0.05)
             finally:
                 release_collectors.set()
-                first.join(timeout=2.0)
-                second.join(timeout=2.0)
+                if first.ident is not None:
+                    first.join(timeout=2.0)
+                if second.ident is not None:
+                    second.join(timeout=2.0)
 
         self.assertFalse(first.is_alive())
         self.assertFalse(second.is_alive())

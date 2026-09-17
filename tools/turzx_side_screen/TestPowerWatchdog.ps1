@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 )
 
@@ -623,6 +623,31 @@ if ($vddReturnPlan.Status -cne 'active' -or
     $vddReturnPlan.Actions[0].Bottom -gt $primaryMonitor.WorkBottom) {
     throw 'VDD return guard must use hardware identity and only move ordinary VDD windows into the physical-main work area.'
 }
+# Desktop protection is a display-scoped layer, not an ordinary movable app.
+$emptyOverlayIds = [Collections.Generic.HashSet[int]]::new()
+foreach ($protectedName in @('Bubbles', 'Bubbles.scr', 'EmeraldVeil', 'PrimaryOledBlackout', 'wallpaper64')) {
+    $protectedWindow = $vddOrdinaryWindow.PSObject.Copy()
+    $protectedWindow.ProcessName = $protectedName
+    if (-not (Test-HS2ExclusiveWindowGuardExclusion -Window $protectedWindow -OverlayProcessIds $emptyOverlayIds)) {
+        throw "Desktop protection must be excluded before an HS2 overlay PID exists: $protectedName"
+    }
+    $protectedPlan = Get-VddWindowReturnPlan -Monitors @($primaryMonitor, $hs2Monitor, $mttMonitor) `
+        -Windows @($protectedWindow) -MonitorIdentities $windowGuardMonitorIdentities -OverlayProcessIds @()
+    if ($protectedPlan.Actions.Count -ne 0) { throw "VDD return must preserve desktop protection: $protectedName" }
+    $protectedWindow.MonitorDevice = $hs2Monitor.DeviceName
+    $protectedWindow.PlacementLeft = $hs2Monitor.Left
+    $protectedWindow.PlacementTop = $hs2Monitor.Top
+    $protectedWindow.PlacementRight = $hs2Monitor.Right
+    $protectedWindow.PlacementBottom = $hs2Monitor.Bottom
+    $hs2ProtectedPlan = Get-HS2ExclusiveWindowGuardPlan -Monitors @($primaryMonitor, $hs2Monitor) `
+        -Windows @($protectedWindow) -OverlayProcessIds @()
+    if ($hs2ProtectedPlan.Actions.Count -ne 0) { throw "HS2 guard must preserve desktop protection: $protectedName" }
+}
+if (Test-HS2ExclusiveWindowGuardExclusion -Window $vddOrdinaryWindow -OverlayProcessIds $emptyOverlayIds) {
+    throw 'The desktop protection exception must not exempt ordinary application windows.'
+}
+$emptyGuardPlan = Get-HS2ExclusiveWindowGuardPlan -Monitors @() -Windows @() -OverlayProcessIds @()
+if ($emptyGuardPlan.Actions.Count -ne 0) { throw 'Empty display/window snapshots must have no window actions.' }
 $straddlingMainWindow = New-GuardWindow `
     -Hwnd 9 `
     -ProcessId 906 `
@@ -2353,7 +2378,7 @@ if ($wallpaperRecoveryText -match '(?s)Get-PnpDevice\s+`?\s*-PresentOnly\s+`?\s*
 $wallpaperRebindText = Get-WatchdogFunctionText -Name "Invoke-WallpaperEngineRenderRebind"
 $wallpaperResolverText = Get-WatchdogFunctionText -Name "Resolve-WallpaperEngineControlExecutable"
 foreach ($pattern in @(
-        "-control stop",
+
         "-control play",
         "ShellExecute")) {
     if ($wallpaperRebindText -notmatch [regex]::Escape($pattern)) {
@@ -2364,6 +2389,7 @@ if ($wallpaperResolverText -notmatch [regex]::Escape("wallpaper32.exe")) {
     throw "Wallpaper render rebind must resolve the nonpersistent wallpaper32.exe control client."
 }
 foreach ($forbiddenWallpaperPattern in @(
+        "-control stop",
         "Start-Process",
         "wallpaper64.exe",
         "-Verb RunAs",
@@ -2643,6 +2669,22 @@ if ($watchdogText -notmatch [regex]::Escape("hs2-startup-window-guard.stderr.log
     $watchdogText -notmatch "startup window guard exited early") {
     throw "The startup window guard must expose an early-child failure without a console window."
 }
+foreach ($required in @('Invoke-VddWindowReturnGuard', 'PolicySha256', 'Local\TURZX.DesktopContinuity',
+        "'-control play'", '$DurationSeconds -eq 0', '$wallpaperAttempts -lt 3',
+        'knownWallpaperClient', 'StartTicks', 'WallpaperResumeCount')) {
+    if ($startupWindowGuardText -notmatch [regex]::Escape($required)) {
+        throw "Continuous desktop worker is missing its lifecycle or bounded recovery contract: $required"
+    }
+}
+if ($startupWindowGuardText -match [regex]::Escape('-control stop')) {
+    throw 'Desktop continuity must never stop Wallpaper Engine before resuming it.'
+}
+if ($watchdogText -notmatch '(?s)while \(\$true\) \{\s*Start-HS2StartupWindowGuard' -or
+    $watchdogText -notmatch 'CreateNoWindow = \$true' -or
+    $watchdogText -notmatch [regex]::Escape('-DurationSeconds 0')) {
+    throw 'The existing parent must own, invisibly launch and supervise its single continuous helper.'
+}
+
 $windowPolicyText = Get-Content -LiteralPath $windowPreservationPolicy -Raw
 $windowPolicyTokens = $null
 $windowPolicyParseErrors = $null
@@ -2691,7 +2733,7 @@ if (-not $moveWindowPlacementMatch.Success) {
     throw 'Window placement method is missing from the VDD return policy.'
 }
 $moveWindowPlacementText = $moveWindowPlacementMatch.Value
-if ($moveWindowPlacementText -match 'placement\.(ShowCommand|MinimumPosition|MaximumPosition)\s*=') {
+if ($moveWindowPlacementText -match 'placement\.(ShowCommand|MinimumPosition|MaximumPosition)\s*=(?!=)') {
     throw 'Window relocation must preserve minimized and maximized placement semantics.'
 }
 foreach ($pattern in @(

@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 )
 
@@ -345,6 +345,8 @@ if ($stopSourceText -notmatch '(?s)Stop-MatchingProcess\s+-Reason\s+"metrics-age
 & {
     function Write-StopLog { param([string]$Message) }
     function Get-Process { param([int]$Id) return $null }
+    function Test-MetricsProcessActive { param([int]$ProcessId) return $false }
+    function Get-TurzxMetricsEndpoint { [pscustomobject]@{Port=18765} }
     function Test-MetricsPortAvailable { return $true }
     . ([scriptblock]::Create($metricsStopProofFunction.Extent.Text))
     Wait-ManagedMetricsAgentExitAndPortRelease -ProcessIds @(62532) -TimeoutSeconds 1
@@ -359,6 +361,8 @@ if ($stopSourceText -notmatch '(?s)Stop-MatchingProcess\s+-Reason\s+"metrics-age
             return [pscustomobject]@{ Id = $Id }
         }
     }
+    function Test-MetricsProcessActive { param([int]$ProcessId) return $true }
+    function Get-TurzxMetricsEndpoint { [pscustomobject]@{Port=18765} }
     function Test-MetricsPortAvailable { return $false }
     function Get-NetTCPConnection {
         [CmdletBinding()]
@@ -1113,3 +1117,24 @@ finally {
 }
 
 Write-Host "Runtime reliability checks completed."
+
+# Stale PID ancestry cannot expand this project's kill boundary.
+$parentDefinition = $stopAst.Find({param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Test-OwnedStreamParent'
+}, $true)
+if ($null -eq $parentDefinition) { throw 'Exact project-parent validation is missing.' }
+& {
+    param($definition,$side)
+    . ([scriptblock]::Create($definition.Extent.Text))
+    $owned = [pscustomobject]@{Name='powershell.exe';CommandLine=('powershell.exe -NoProfile -File "{0}\StartVideoStream.ps1"' -f $side)}
+    if (-not (Test-OwnedStreamParent $owned $side)) { throw 'The exact project launcher must be recognized.' }
+    foreach ($command in @('powershell.exe -File E:\Other\script.ps1',
+        ('powershell.exe -File E:\Other\script.ps1 -File "{0}\StartVideoStream.ps1"' -f $side),
+        'powershell.exe -EncodedCommand AAAA')) {
+        $owned.CommandLine=$command
+        if (Test-OwnedStreamParent $owned $side) { throw 'An unrelated first entrypoint must not be treated as a project parent.' }
+    }
+} $parentDefinition $side
+if ($stopSourceText -match 'taskkill\.exe[^\r\n]*(?:/IM\b|/T\b)') {
+    throw 'Machine-wide and descendant tree kills are forbidden for the panel stop path.'
+}

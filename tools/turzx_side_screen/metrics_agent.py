@@ -360,15 +360,15 @@ def empty_snapshot() -> dict[str, Any]:
     }
 
 
-def build_snapshot() -> dict[str, Any]:
+def build_snapshot(*, nonblocking_gpu: bool = False) -> dict[str, Any]:
     # ThreadingHTTPServer may dispatch overlapping /snapshot requests. The
     # collectors below share rate-sampler baselines and history buffers, so a
     # second build must not advance or rewind that mutable state mid-sample.
     with _snapshot_build_lock:
-        return _build_snapshot_unlocked()
+        return _build_snapshot_unlocked(nonblocking_gpu=nonblocking_gpu)
 
 
-def _build_snapshot_unlocked() -> dict[str, Any]:
+def _build_snapshot_unlocked(*, nonblocking_gpu: bool = False) -> dict[str, Any]:
     snapshot = empty_snapshot()
     now_dt = dt.datetime.now(dt.timezone.utc)
     now = (
@@ -386,7 +386,7 @@ def _build_snapshot_unlocked() -> dict[str, Any]:
         ("weather", read_weather_snapshot),
         ("foreground_app", read_foreground_app),
         ("cpu", read_cpu_snapshot),
-        ("gpu", read_gpu_snapshot),
+        ("gpu", read_gpu_snapshot_background if nonblocking_gpu else read_gpu_snapshot),
         ("fps", read_fps_snapshot),
         ("memory", read_memory_snapshot),
         ("disks", enumerate_disks),
@@ -1670,6 +1670,55 @@ def read_gpu_snapshot() -> dict[str, Any]:
     _gpu_cache_value = dict(snapshot)
     _gpu_cache_expires_at = now + ttl
     return snapshot
+
+
+class GpuSnapshotPublisher:
+    """At most one slow GPU read; other metrics and HTTP requests never queue behind it."""
+    def __init__(self, sample: Callable[[], dict[str, Any]], now: Callable[[], float] = time.monotonic):
+        self._sample, self._now = sample, now
+        self._lock = threading.Lock()
+        self._running = False
+        self._value: dict[str, Any] | None = None
+        self._completed_at = 0.0
+
+    def read(self) -> dict[str, Any]:
+        with self._lock:
+            age = self._now() - self._completed_at
+            if not self._running and (self._value is None or age >= GPU_CACHE_TTL_SECONDS):
+                self._running = True
+                threading.Thread(target=self._refresh, name="turzx-gpu-sampler", daemon=True).start()
+            if self._value is None or age > GPU_LAST_GOOD_MAX_AGE_SECONDS:
+                value = dict(empty_snapshot()["gpu"])
+                value["status"] = "warming" if self._value is None else "stale"
+                value["sample_age_seconds"] = None if self._value is None else round(age, 3)
+                return value
+            value = dict(self._value)
+            value["sample_age_seconds"] = round(max(age, 0.0), 3)
+            if age > GPU_CACHE_TTL_SECONDS:
+                value["source"] = str(value.get("source") or "gpu").removesuffix("+stale") + "+stale"
+                value["status"] = "stale"
+            return value
+
+    def _refresh(self) -> None:
+        try:
+            value = self._sample()
+        except Exception:
+            value = _fallback_gpu_snapshot()
+        with self._lock:
+            self._value = dict(value)
+            self._completed_at = self._now()
+            self._running = False
+
+
+_gpu_publisher: GpuSnapshotPublisher | None = None
+
+
+def read_gpu_snapshot_background() -> dict[str, Any]:
+    global _gpu_publisher
+    # build_snapshot serializes creation and history; the publisher serializes its own reader.
+    if _gpu_publisher is None:
+        _gpu_publisher = GpuSnapshotPublisher(read_gpu_snapshot)
+    return _gpu_publisher.read()
 
 
 class CpuUsageSampler:
@@ -3778,7 +3827,18 @@ def make_handler(snapshot_provider: Callable[[], dict[str, Any]]) -> type[BaseHT
         server_version = "TURZXMetricsAgent/1.0"
 
         def do_GET(self) -> None:
-            if urlsplit(self.path).path != "/snapshot":
+            path = urlsplit(self.path).path
+            if path == "/health":
+                # Liveness is independent of slow first hardware/database samples.
+                body = b'{"status":"ok","service":"turzx-metrics"}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if path != "/snapshot":
                 self.send_error(404, "Not Found")
                 return
 
@@ -3822,8 +3882,18 @@ def create_server(
     port: int = DEFAULT_PORT,
     snapshot_provider: Callable[[], dict[str, Any]] | None = None,
 ) -> ThreadingHTTPServer:
-    provider = snapshot_provider or build_snapshot
-    return ThreadingHTTPServer((host, port), make_handler(provider))
+    provider = snapshot_provider or (lambda: build_snapshot(nonblocking_gpu=True))
+    class MetricsHTTPServer(ThreadingHTTPServer):
+        # On Windows SO_REUSEADDR may route requests to a dying earlier server.
+        # Never replace a listener implicitly. A configuration change is explicit.
+        allow_reuse_address = os.name != "nt"
+
+        def server_bind(self) -> None:
+            if os.name == "nt":
+                self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            super().server_bind()
+
+    return MetricsHTTPServer((host, port), make_handler(provider))
 
 
 def run_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> None:
@@ -3839,8 +3909,9 @@ def run_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="TURZX side screen metrics agent")
-    parser.add_argument("--host", default=DEFAULT_HOST)
-    parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+    metrics = _load_config().get("metrics", {})
+    parser.add_argument("--host", default=metrics.get("listenHost", DEFAULT_HOST))
+    parser.add_argument("--port", type=int, default=metrics.get("listenPort", DEFAULT_PORT))
     args = parser.parse_args(argv)
 
     run_server(args.host, args.port)
