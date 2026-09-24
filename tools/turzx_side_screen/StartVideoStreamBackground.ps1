@@ -1,6 +1,6 @@
 ﻿param(
     [string]$Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path,
-    [string]$Port = "COM7",
+    [string]$Port = "",
     [int]$IntervalMs = 3000,
     [ValidateRange(3000, 60000)][int]$SendTimeoutMs = 10000,
     [ValidateRange(100, 5000)][int]$DiffSendTimeoutMs = 900,
@@ -15,7 +15,11 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+. (Join-Path $PSScriptRoot 'PanelDevicePolicy.ps1')
+$Port = Get-TurzxConfiguredPort -Root $Root -Port $Port
+
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+. (Join-Path $scriptDir "HiddenProcessLauncher.ps1")
 $outDir = Join-Path $scriptDir "out"
 $logPath = Join-Path $outDir "video-stream.log"
 $errPath = Join-Path $outDir "video-stream.err.log"
@@ -54,7 +58,7 @@ if ($AltHelper) {
     $arguments += "-AltHelper"
 }
 
-$process = Start-Process -FilePath powershell -ArgumentList $arguments -WindowStyle Hidden -RedirectStandardOutput $logPath -RedirectStandardError $errPath -PassThru
+$process = Start-HiddenProcess -FilePath powershell.exe -ArgumentList $arguments -RedirectStandardOutput $logPath -RedirectStandardError $errPath
 Set-Content -LiteralPath $pidPath -Value $process.Id -Encoding ASCII
 
 Write-Host ("Started TURZX video stream PID {0}" -f $process.Id)

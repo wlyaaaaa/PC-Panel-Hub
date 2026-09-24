@@ -1,6 +1,7 @@
 $ErrorActionPreference = "Stop"
 
 $shimDir = $PSScriptRoot
+. (Join-Path $shimDir "..\turzx_side_screen\HiddenProcessLauncher.ps1")
 $rootDir = (Resolve-Path (Join-Path $shimDir "..\..")).Path
 $shimScript = Join-Path $shimDir "turzx_weather_shim.py"
 $metricsAppPath = Join-Path $rootDir "TURZX.weatherfix.metrics.exe"
@@ -44,10 +45,9 @@ if (-not $listener) {
     if (-not [string]::IsNullOrWhiteSpace($weatherConfigPath)) {
         $shimArguments += @("--config", $weatherConfigPath)
     }
-    Start-Process -FilePath $python `
+    Start-HiddenProcess -FilePath $python `
         -ArgumentList $shimArguments `
-        -WorkingDirectory $shimDir `
-        -WindowStyle Hidden
+        -WorkingDirectory $shimDir | Out-Null
 
     Start-Sleep -Seconds 2
 }

@@ -2,9 +2,9 @@
 
 自研 TURZX 副屏 v1 采用混合路线：
 
-- Python `metrics_agent.py` 提供实时 JSON 快照，不直接读取 PostgreSQL。
+- Python `metrics_agent.py` 提供实时 JSON 快照；可选 FPS 通过本机配置的 TimeAudit PostgreSQL 只读链取得。
 - C# renderer 用 `System.Drawing/GDI+` 画 480x1920 bitmap。
-- C# protocol 层只用 `RJCP.SerialPortStream` 推送 COM7，禁止回退普通 `SerialPort`。
+- 生产串流通过反射调用本机厂商程序集的串口驱动；独立协议与亮度工具使用 `RJCP.SerialPortStream`，不回退普通 `SerialPort`。串口由显式 `-Port` 或本机 `config.json` 的 `serial.port` 决定。
 - 屏幕目标 1 秒刷新；数据采集可以更快，但渲染循环会复用上一帧数据，避免慢采集阻塞 COM 推屏。
 
 ## UI
@@ -18,7 +18,7 @@
 
 ## JSON Snapshot
 
-默认接口：
+无本机覆盖时的默认接口（实际值以 `config.json` 中 `metrics` 为准）：
 
 ```text
 GET http://127.0.0.1:18765/snapshot

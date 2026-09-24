@@ -2,15 +2,21 @@ param(
     [string]$Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path,
     [string]$TaskName = "TURZX SideScreen",
     [string]$ResumeTaskName = "TURZX SideScreen Resume",
-    [string]$Port = "COM7",
+    [string]$Port = "",
     [int]$IntervalMs = 3000,
     [switch]$HybridRefresh = $true,
+    [switch]$FullFrame,
     [switch]$AltHelper,
     [switch]$DoNotDisableOldTasks
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+$portWasExplicit = $PSBoundParameters.ContainsKey('Port')
+. (Join-Path $Root 'tools\turzx_side_screen\PanelDevicePolicy.ps1')
+$Port = Get-TurzxConfiguredPort -Root $Root -Port $Port
+if ($FullFrame) { $HybridRefresh = $false }
 
 $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).
     IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -41,7 +47,8 @@ $wscriptPath = Join-Path $env:WINDIR "System32\wscript.exe"
 $refreshArguments = ""
 if ($HybridRefresh) { $refreshArguments += " -HybridRefresh" }
 if ($AltHelper) { $refreshArguments += " -AltHelper" }
-$launcherArguments = ('"{0}" -Root "{1}" -Port "{2}" -IntervalMs {3}{4}' -f $launcher, $Root, $Port, $IntervalMs, $refreshArguments)
+$portArguments = if ($portWasExplicit) { ' -Port "{0}"' -f $Port } else { '' }
+$launcherArguments = ('"{0}" -Root "{1}"{2} -IntervalMs {3}{4}' -f $launcher, $Root, $portArguments, $IntervalMs, $refreshArguments)
 $action = New-ScheduledTaskAction `
     -Execute $wscriptPath `
     -Argument $launcherArguments `
@@ -93,7 +100,9 @@ if (-not $DoNotDisableOldTasks) {
 $shortcutScript = Join-Path $Root "scripts\create-desktop-shortcut.ps1"
 if (Test-Path -LiteralPath $shortcutScript) {
     try {
-        powershell -NoProfile -ExecutionPolicy Bypass -File $shortcutScript -Root $Root -Port $Port -IntervalMs $IntervalMs | Out-Host
+        $shortcutArguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $shortcutScript, '-Root', $Root, '-IntervalMs', [string]$IntervalMs)
+        if ($portWasExplicit) { $shortcutArguments += @('-Port', $Port) }
+        powershell @shortcutArguments | Out-Host
     }
     catch {
         Write-Warning ("Startup task installed, but shortcut creation failed: {0}" -f $_.Exception.Message)

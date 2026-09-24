@@ -7,6 +7,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $side = Join-Path $Root "tools\turzx_side_screen"
+$hs2Tests = Join-Path $Root "tools\hs2_crystal_overlay\tests\HS2.CrystalOverlay.Tests\HS2.CrystalOverlay.Tests.csproj"
 
 function Get-LiveStreamEvidence {
     $productionTransportModes = @(
@@ -75,6 +76,12 @@ if ($LASTEXITCODE -ne 0) { throw "test_metrics_agent.py failed" }
 python (Join-Path $Root "tools\turzx_weather_shim\test_weather_shim.py")
 if ($LASTEXITCODE -ne 0) { throw "test_weather_shim.py failed" }
 
+powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $side "TestProtocolEncoding.ps1")
+if ($LASTEXITCODE -ne 0) { throw "TestProtocolEncoding.ps1 failed" }
+
+& dotnet test $hs2Tests --nologo --verbosity quiet
+if ($LASTEXITCODE -ne 0) { throw "HS2.CrystalOverlay.Tests failed" }
+
 powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $side "TestRenderer.ps1")
 if ($LASTEXITCODE -ne 0) { throw "TestRenderer.ps1 failed" }
 
@@ -90,11 +97,17 @@ if ($LASTEXITCODE -ne 0) { throw "TestShortcutScripts.ps1 failed" }
 powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Root "scripts\TestRefreshDefaults.ps1") -Root $Root
 if ($LASTEXITCODE -ne 0) { throw "TestRefreshDefaults.ps1 failed" }
 
+powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Root "scripts\TestPanelDevicePolicy.ps1") -Root $Root
+if ($LASTEXITCODE -ne 0) { throw "TestPanelDevicePolicy.ps1 failed" }
+
 powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $side "TestStreamCadence.ps1")
 if ($LASTEXITCODE -ne 0) { throw "TestStreamCadence.ps1 failed" }
 
 powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Root "scripts\TestRuntimeReliability.ps1") -Root $Root
 if ($LASTEXITCODE -ne 0) { throw "TestRuntimeReliability.ps1 failed" }
+
+powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $side "TestHiddenProcessLauncher.ps1")
+if ($LASTEXITCODE -ne 0) { throw "TestHiddenProcessLauncher.ps1 failed" }
 
 powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Root "scripts\TestWatchdogLauncherRecovery.ps1") -Root $Root
 if ($LASTEXITCODE -ne 0) { throw "TestWatchdogLauncherRecovery.ps1 failed" }

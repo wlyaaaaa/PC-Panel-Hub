@@ -164,8 +164,4 @@ $obsoleteScreenKeys = @(@("maxSendMs", "largeDiffFallbackMs", "forceFullFrameOnS
 if ($obsoleteScreenKeys.Count -gt 0) {
     throw ("Obsolete screen timing knobs must stay removed because production send deadlines are owned by the stream/watchdog arguments: {0}" -f ($obsoleteScreenKeys -join ", "))
 }
-if ([int]$config.ui.maxDiskRows -ne 4) {
-    throw "Runtime config must cap the physical-disk UI at four rows."
-}
-
 Write-Host "Refresh default checks completed."

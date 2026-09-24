@@ -1,6 +1,6 @@
 param(
     [string]$Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path,
-    [string]$Port = "COM7",
+    [string]$Port = "",
     [string]$DevCode = "VID_0525&PID_A4A7",
     [int]$TimeoutMs = 15000,
     [switch]$DryRun
@@ -8,6 +8,9 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+. (Join-Path $PSScriptRoot 'PanelDevicePolicy.ps1')
+$Port = Get-TurzxConfiguredPort -Root $Root -Port $Port
 
 $Root = (Resolve-Path -LiteralPath $Root).Path
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path

@@ -1,0 +1,5 @@
+# Optional host metrics and TimeAudit database integration.
+psutil
+asyncpg
+# Provides the pynvml import used for NVIDIA metrics.
+nvidia-ml-py

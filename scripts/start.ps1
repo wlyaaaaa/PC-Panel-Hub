@@ -1,9 +1,10 @@
 param(
     [string]$Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path,
     [string]$TaskName = "TURZX SideScreen",
-    [string]$Port = "COM7",
+    [string]$Port = "",
     [int]$IntervalMs = 3000,
     [switch]$HybridRefresh = $true,
+    [switch]$FullFrame,
     [switch]$AltHelper,
     [switch]$Direct
 )
@@ -11,7 +12,11 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$hybridRefreshWasExplicit = $PSBoundParameters.ContainsKey("HybridRefresh")
+. (Join-Path $Root 'tools\turzx_side_screen\PanelDevicePolicy.ps1')
+$Port = Get-TurzxConfiguredPort -Root $Root -Port $Port
+if ($FullFrame) { $HybridRefresh = $false }
+
+$hybridRefreshWasExplicit = $PSBoundParameters.ContainsKey("HybridRefresh") -or [bool]$FullFrame
 $altHelperWasExplicit = $PSBoundParameters.ContainsKey("AltHelper")
 $effectiveHybridRefresh = [bool]$HybridRefresh
 $effectiveAltHelper = [bool]$AltHelper
@@ -66,6 +71,10 @@ if (-not $Direct) {
     $scheduledTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
     if ($null -ne $scheduledTask) {
         $registeredArguments = (($scheduledTask.Actions | ForEach-Object { [string]$_.Arguments }) -join ' ')
+        $registeredPort = [regex]::Match($registeredArguments, '(?i)(?:^|\s)-Port\s+"?(COM[1-9][0-9]*)"?(?:\s|$)')
+        if ($registeredPort.Success -and $registeredPort.Groups[1].Value -ine $Port) {
+            throw "The scheduled task pins a different serial port. Re-run install-startup-admin.ps1 to adopt config.json, or stop the task and use -Direct -Port $Port."
+        }
         $effectiveHybridRefresh = Resolve-RequestedSwitchMode `
             -Arguments $registeredArguments `
             -FlagName "HybridRefresh" `
@@ -81,7 +90,7 @@ if (-not $Direct) {
             -HybridRefreshEnabled $effectiveHybridRefresh `
             -AltHelperEnabled $effectiveAltHelper
         if (-not $modeMatches) {
-            Write-Warning ("Scheduled task mode does not match the requested mode; using the direct launcher. Re-run install-startup-admin.ps1 to persist the change. registered=<{0}> requestedHybrid={1} requestedAlt={2}" -f $registeredArguments, $effectiveHybridRefresh, $effectiveAltHelper)
+            throw 'The scheduled task uses a different refresh/helper mode. Re-run install-startup-admin.ps1 with the requested mode, then start it again. For a temporary direct run, stop the existing task/watchdog first and use -Direct.'
         }
         else {
             $outDir = Join-Path $Root "tools\turzx_side_screen\out"

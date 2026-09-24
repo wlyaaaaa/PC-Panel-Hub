@@ -1,13 +1,16 @@
 param(
     [string]$Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path,
     [string]$TaskName = "TURZX SideScreen",
-    [string]$Port = "COM7",
+    [string]$Port = "",
     [int]$IntervalMs = 3000,
     [switch]$NoRestart
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Continue"
+
+. (Join-Path $Root 'tools\turzx_side_screen\PanelDevicePolicy.ps1')
+$Port = Get-TurzxConfiguredPort -Root $Root -Port $Port
 
 $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).
     IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)

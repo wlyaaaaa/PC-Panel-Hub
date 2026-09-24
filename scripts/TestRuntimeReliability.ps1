@@ -419,13 +419,11 @@ foreach ($pattern in @(
         return $false
     }
     function Write-WatchdogLog { param([string]$Message) }
-    function Start-Process {
+    function Start-HiddenProcess {
         [CmdletBinding()]
         param(
             [string]$FilePath,
-            [object]$ArgumentList,
-            [object]$WindowStyle,
-            [switch]$PassThru
+            [object]$ArgumentList
         )
         return $fakeStopProcess
     }
@@ -563,7 +561,7 @@ foreach ($pattern in @(
     }
 }
 $liveRecycleIndex = $fastRepair.IndexOf('if ($liveWatchdogOwner)', [StringComparison]::Ordinal)
-$fullRestartIndex = $fastRepair.IndexOf('& pwsh.exe', [StringComparison]::OrdinalIgnoreCase)
+$fullRestartIndex = $fastRepair.IndexOf('-File $startPath', [StringComparison]::OrdinalIgnoreCase)
 if ($liveRecycleIndex -lt 0 -or $fullRestartIndex -le $liveRecycleIndex) {
     throw "Fast panel repair must try the in-place watchdog recycle before a full watchdog restart."
 }
@@ -708,7 +706,7 @@ foreach ($pattern in @(
     '[string]$PythonPath',
     '"TURZX.SideScreen.Stream.*.exe"',
     '$staleBuildCutoff',
-    'Start-Process',
+    'Start-HiddenProcess',
     '-FilePath $PythonPath'
 )) {
     if ($streamStart -notmatch [regex]::Escape($pattern)) {

@@ -1,6 +1,6 @@
 ﻿param(
     [string]$Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path,
-    [string]$Port = "COM7",
+    [string]$Port = "",
     [string]$DevCode = "VID_0525&PID_A4A7",
     [string]$PngPath = "",
     [switch]$Sample,
@@ -10,8 +10,14 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+. (Join-Path $PSScriptRoot 'PanelDevicePolicy.ps1')
+$Port = Get-TurzxConfiguredPort -Root $Root -Port $Port
+Get-TurzxVerifiedSerialEndpoint -Port $Port | Out-Null
+Assert-TurzxStreamStopped
+
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $PSScriptRoot 'MetricsEndpointPolicy.ps1')
+. (Join-Path $PSScriptRoot 'HiddenProcessLauncher.ps1')
 $metricsEndpoint=Get-TurzxMetricsEndpoint
 $outDir = Join-Path $scriptDir "out"
 $sideExe = Join-Path $outDir "TURZX.SideScreen.exe"
@@ -33,7 +39,7 @@ if ([string]::IsNullOrWhiteSpace($PngPath)) {
         $agent = Join-Path $scriptDir "metrics_agent.py"
         $process = $null
         try {
-            $process = Start-Process -FilePath python -ArgumentList @($agent, "--host", $metricsEndpoint.HostName, "--port", [string]$metricsEndpoint.Port) -WindowStyle Hidden -PassThru
+            $process = Start-HiddenProcess -FilePath python -ArgumentList @($agent, "--host", $metricsEndpoint.HostName, "--port", [string]$metricsEndpoint.Port)
             Start-Sleep -Milliseconds 900
             & $sideExe --metrics-url $metricsEndpoint.Url --timeout-ms 5000 --output $sendPng
             if ($LASTEXITCODE -ne 0) {

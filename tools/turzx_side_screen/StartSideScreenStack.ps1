@@ -1,6 +1,6 @@
 ﻿param(
     [string]$Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path,
-    [string]$Port = "COM7",
+    [string]$Port = "",
     [int]$IntervalMs = 3000,
     [ValidateRange(3000, 60000)][int]$SendTimeoutMs = 10000,
     [ValidateRange(100, 5000)][int]$DiffSendTimeoutMs = 900,
@@ -19,7 +19,11 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+. (Join-Path $PSScriptRoot 'PanelDevicePolicy.ps1')
+$Port = Get-TurzxConfiguredPort -Root $Root -Port $Port
+
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+. (Join-Path $scriptDir "HiddenProcessLauncher.ps1")
 $outDir = Join-Path $scriptDir "out"
 $logPath = Join-Path $outDir "side-screen-stack.log"
 $stdoutPath = Join-Path $outDir "side-screen-stack.stdout.log"
@@ -119,10 +123,9 @@ if (-not $Worker) {
     if ($AltHelper) {
         $watchdogArguments += "-AltHelper"
     }
-    Start-Process -FilePath "powershell.exe" `
+    Start-HiddenProcess -FilePath "powershell.exe" `
         -ArgumentList $watchdogArguments `
-        -WorkingDirectory $scriptDir `
-        -WindowStyle Hidden | Out-Null
+        -WorkingDirectory $scriptDir | Out-Null
     exit 0
 }
 
@@ -211,16 +214,14 @@ Write-StackLog ("python selected path={0} timeauditModulesRequired={1}" -f $pyth
 ))
 $weatherShim = Join-Path $Root "tools\turzx_weather_shim\turzx_weather_shim.py"
 $weatherDir = Split-Path -Parent $weatherShim
-Start-Process -FilePath $python `
+Start-HiddenProcess -FilePath $python `
     -ArgumentList @($weatherShim, "--host", "127.0.0.1", "--port", "18080") `
-    -WorkingDirectory $weatherDir `
-    -WindowStyle Hidden
+    -WorkingDirectory $weatherDir | Out-Null
 Write-StackLog "weather shim launched"
 
-Start-Process -FilePath $python `
+Start-HiddenProcess -FilePath $python `
     -ArgumentList @((Join-Path $scriptDir "top_processes_helper.py"), "--cache-path", (Join-Path $outDir "top-processes.json"), "--interval-seconds", "3", "--limit", "5") `
-    -WorkingDirectory $scriptDir `
-    -WindowStyle Hidden
+    -WorkingDirectory $scriptDir | Out-Null
 Write-StackLog "top processes helper launched"
 
 Start-Sleep -Milliseconds 900

@@ -10,6 +10,13 @@ $ErrorActionPreference = "Stop"
 $Root = (Resolve-Path $Root).Path
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 
+# The index defines the package's file set. Tracked edits are still read from
+# the working tree, so this does not require a commit before local packaging.
+$trackedPaths = @(& git -C $Root ls-files --cached --)
+if ($LASTEXITCODE -ne 0 -or $trackedPaths.Count -eq 0) {
+    throw "Cannot list tracked release inputs from Git: $Root"
+}
+
 $publicToolExtensions = @(
     ".appxmanifest",
     ".cmd",
@@ -24,6 +31,7 @@ $publicToolExtensions = @(
     ".py",
     ".slnx",
     ".svg",
+    ".txt",
     ".vbs",
     ".xaml"
 )
@@ -45,8 +53,9 @@ function Copy-PublicToolTree {
     )
 
     New-Item -ItemType Directory -Force -Path $Destination | Out-Null
-    Get-ChildItem -LiteralPath $Source -Recurse -File | ForEach-Object {
-        $relativePath = $_.FullName.Substring($Source.Length) -replace '^[\\/]+', ''
+    $sourceRelative = ($Source.Substring($Root.Length) -replace '^[\\/]+', '') -replace '\\', '/'
+    $trackedPaths | Where-Object { $_.StartsWith("$sourceRelative/", [StringComparison]::Ordinal) } | ForEach-Object {
+        $relativePath = $_.Substring($sourceRelative.Length + 1)
         $relativeDirectory = Split-Path -Parent $relativePath
         $directoryNames = if ([string]::IsNullOrWhiteSpace($relativeDirectory)) {
             @()
@@ -57,7 +66,7 @@ function Copy-PublicToolTree {
         $hasExcludedDirectory = @(
             $directoryNames | Where-Object { $_ -in $excludedToolDirectories }
         ).Count -gt 0
-        $extension = $_.Extension.ToLowerInvariant()
+        $extension = [System.IO.Path]::GetExtension($relativePath).ToLowerInvariant()
         $normalizedRelativePath = $relativePath -replace '\\', '/'
         $isApprovedHs2Asset = (
             (Split-Path -Leaf $Source) -eq "hs2_crystal_overlay" -and
@@ -67,11 +76,16 @@ function Copy-PublicToolTree {
             (Split-Path -Leaf $Source) -eq "turzx_side_screen" -and
             $normalizedRelativePath -eq "config.example.json"
         )
+        $isApprovedRequirements = (
+            (Split-Path -Leaf $Source) -eq "turzx_side_screen" -and
+            $normalizedRelativePath -eq "requirements.txt"
+        )
 
         if (
             $hasExcludedDirectory -or
             $extension -notin $publicToolExtensions -or
             ($extension -eq ".json" -and -not $isApprovedConfigExample) -or
+            ($extension -eq ".txt" -and -not $isApprovedRequirements) -or
             ($extension -in @(".ico", ".png") -and -not $isApprovedHs2Asset)
         ) {
             return
@@ -79,7 +93,7 @@ function Copy-PublicToolTree {
 
         $target = Join-Path $Destination $relativePath
         New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target) | Out-Null
-        Copy-Item -LiteralPath $_.FullName -Destination $target -Force
+        Copy-Item -LiteralPath (Join-Path $Source $relativePath) -Destination $target -Force
     }
 }
 
@@ -93,12 +107,15 @@ New-Item -ItemType Directory -Force -Path $staging | Out-Null
 
 try {
     foreach ($item in @("README.md", "AGENTS.md", "LICENSE", ".gitignore", "start-side-screen.cmd", "install-startup.cmd", "uninstall-startup.cmd")) {
+        if ($trackedPaths -cnotcontains $item) {
+            throw "Required release input is not tracked by Git: $item"
+        }
         Copy-Item -LiteralPath (Join-Path $Root $item) -Destination (Join-Path $staging $item) -Force
     }
 
     New-Item -ItemType Directory -Force -Path (Join-Path $staging "docs") | Out-Null
-    Get-ChildItem -LiteralPath (Join-Path $Root "docs") -File -Filter "*.md" | ForEach-Object {
-        Copy-Item -LiteralPath $_.FullName -Destination (Join-Path (Join-Path $staging "docs") $_.Name) -Force
+    $trackedPaths | Where-Object { $_ -cmatch '^docs/[^/]+\.md$' } | ForEach-Object {
+        Copy-Item -LiteralPath (Join-Path $Root $_) -Destination (Join-Path $staging $_) -Force
     }
     Copy-PublicToolTree `
         -Source (Join-Path $Root "scripts") `

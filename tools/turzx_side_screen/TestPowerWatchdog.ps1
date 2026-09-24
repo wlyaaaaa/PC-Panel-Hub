@@ -2169,7 +2169,6 @@ $watchdogText = Get-Content -Raw -LiteralPath $watchdog
 foreach ($productionPath in @($watchdog, $displayPowerPolicy, $activeRecoveryPolicy)) {
     $productionText = Get-Content -Raw -LiteralPath $productionPath
     foreach ($forbiddenPrimaryOrVddToken in @(
-            "PHLC34B",
             "ensure_only_display",
             "ensure_primary",
             "ChangeDisplaySettings",

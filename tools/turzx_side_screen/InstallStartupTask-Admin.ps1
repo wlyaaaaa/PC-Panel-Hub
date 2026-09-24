@@ -1,6 +1,6 @@
 param(
     [string]$Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path,
-    [string]$Port = "COM7",
+    [string]$Port = "",
     [int]$IntervalMs = 3000
 )
 
@@ -12,4 +12,6 @@ if (!(Test-Path -LiteralPath $installer)) {
     throw "Missing repository installer: $installer"
 }
 
-powershell -NoProfile -ExecutionPolicy Bypass -File $installer -Root $Root -Port $Port -IntervalMs $IntervalMs
+$installerArguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $installer, '-Root', $Root, '-IntervalMs', [string]$IntervalMs)
+if ($PSBoundParameters.ContainsKey('Port')) { $installerArguments += @('-Port', $Port) }
+powershell @installerArguments

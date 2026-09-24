@@ -9,6 +9,7 @@
 - 不为测试随意重置 USB root hub、整棵 USB 树或无关设备。计划任务和普通 watchdog 默认不得重启 Hub、删除设备或执行 PnP 扫描；HS2 Code 43 硬件恢复只能在显式人工 opt-in 下使用健康状态已记录且唯一匹配的专用 hub、端口 2 子节点及 LIAN LI sibling 拓扑，缺失或歧义时失败关闭。
 - 只有 L-Connect 回读结果明确为 `Verified=true`，且唯一的 hub、AD23 Windows 显示设备与 LED sibling 拓扑连续两次满足物理存在、`Status=OK`、`ProblemCode=0`，并成功保存同一绑定，才能把 HS2 记为 Active 并启动叠加层。普通窗口保护独立于 Active 与叠加层启动：`WindowsDisplayWindowPolicy` 能唯一识别 2288×1048 目标屏及窗口、主屏归属后，启动保护循环即可先按现有搬移或最小化规则处理误入的普通窗口；不因此改变屏幕模式或拓扑，不移动浮层、Wallpaper Engine 或桌面外壳窗口。
 - 睡眠恢复只有长驻主 watchdog 一个 owner；不得另注册会强杀 watchdog、重启 USB 设备或扫描 PnP 的并行 Resume task。旧 `TURZX SideScreen Resume` 任务必须保持禁用。
+- 现有 TURZX 自动恢复只允许在原有失败阈值、退避和停流证明下重启身份匹配的单一串口端点，不扩为 Hub、子树或 PnP 扫描；HS2 硬件恢复的人工入口为 `scripts/repair-hs2.ps1`，默认只检查，显式 `-Apply` 才进入既有受限恢复。
 
 ## 工作区与公开边界
 

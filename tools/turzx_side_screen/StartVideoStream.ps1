@@ -1,6 +1,6 @@
 ﻿param(
     [string]$Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path,
-    [string]$Port = "COM7",
+    [string]$Port = "",
     [int]$IntervalMs = 3000,
     [int]$Frames = 0,
     [ValidateRange(3000, 60000)][int]$SendTimeoutMs = 10000,
@@ -23,6 +23,8 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+. (Join-Path $PSScriptRoot 'PanelDevicePolicy.ps1')
+$Port = Get-TurzxConfiguredPort -Root $Root -Port $Port
 if ($Diff -and -not $DryRun -and -not $AllowUnverifiedDifferentialProtocol) {
     throw "Live differential command 204 is unverified. Production must use the full-frame transport."
 }
@@ -30,7 +32,13 @@ if ($HybridRefresh -and $Diff) {
     throw "HybridRefresh is a distinct guarded mode; do not combine it with the legacy Diff switch."
 }
 
+if (-not $DryRun) {
+    Get-TurzxVerifiedSerialEndpoint -Port $Port | Out-Null
+    Assert-TurzxStreamStopped
+}
+
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+. (Join-Path $scriptDir "HiddenProcessLauncher.ps1")
 $outDir = Join-Path $scriptDir "out"
 $hasExplicitExecutablePath = -not [string]::IsNullOrWhiteSpace($ExecutablePath)
 $exePath = if ($hasExplicitExecutablePath) { $ExecutablePath } else { Join-Path $outDir "TURZX.SideScreen.Stream.exe" }
@@ -220,13 +228,11 @@ if (!$Sample -and !$DryRun) {
     $agent = Join-Path $scriptDir "metrics_agent.py"
     $metricsState = Wait-MetricsEndpointOrPortAvailable
     if ($metricsState -eq "available") {
-        $agentProcess = Start-Process `
+        $agentProcess = Start-HiddenProcess `
             -FilePath $PythonPath `
             -ArgumentList @("-u", $agent, "--host", $metricsHost, "--port", [string]$metricsPort) `
-            -WindowStyle Hidden `
             -RedirectStandardOutput $metricsStdoutPath `
-            -RedirectStandardError $metricsStderrPath `
-            -PassThru
+            -RedirectStandardError $metricsStderrPath
     }
 
     Wait-MetricsEndpointReady -Process $agentProcess

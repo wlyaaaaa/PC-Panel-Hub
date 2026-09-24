@@ -663,6 +663,11 @@ class MetricsAgentTests(unittest.TestCase):
             server.server_close()
             thread.join(timeout=2)
 
+    def test_metrics_server_rejects_non_loopback_and_dns_listen_hosts(self):
+        for host in ("0.0.0.0", "192.0.2.1", "localhost"):
+            with self.subTest(host=host), self.assertRaises(ValueError):
+                metrics_agent.create_server(host, 0)
+
     def test_local_addresses_does_not_depend_on_dns_lookup(self):
         with patch.object(
             metrics_agent.socket,
@@ -1731,6 +1736,33 @@ class MetricsAgentTests(unittest.TestCase):
             dsn,
         )
 
+    def test_timeaudit_password_accepts_configured_database_user(self):
+        dsn = metrics_agent._configured_timeaudit_dsn(
+            {
+                "TIMEAUDIT_DB_USER": "panel reader",
+                "TIMEAUDIT_DB_PASSWORD": "example value",
+            }
+        )
+        self.assertEqual(
+            "postgresql://panel%20reader:example%20value@127.0.0.1:45432/time_audit",
+            dsn,
+        )
+
+    def test_timeaudit_password_accepts_configured_host_and_database(self):
+        dsn = metrics_agent._configured_timeaudit_dsn(
+            {
+                "TIMEAUDIT_DB_USER": "reader",
+                "TIMEAUDIT_DB_PASSWORD": "example value",
+                "TIMEAUDIT_DB_HOST": "db.internal",
+                "TIMEAUDIT_DB_HOST_PORT": "5432",
+                "TIMEAUDIT_DB_NAME": "panel data",
+            }
+        )
+        self.assertEqual(
+            "postgresql://reader:example%20value@db.internal:5432/panel%20data",
+            dsn,
+        )
+
     def test_fps_snapshot_cold_cache_reports_connecting_not_idle(self):
         with patch.object(
             metrics_agent,
@@ -1907,6 +1939,7 @@ class MetricsAgentTests(unittest.TestCase):
         refresh_calls = []
 
         with (
+            patch.object(metrics_agent, "TIMEAUDIT_DSN", "postgresql://local/test"),
             patch.object(
                 metrics_agent.asyncio,
                 "run",
@@ -1929,6 +1962,7 @@ class MetricsAgentTests(unittest.TestCase):
         refresh_calls = []
 
         with (
+            patch.object(metrics_agent, "TIMEAUDIT_DSN", "postgresql://local/test"),
             patch.object(
                 metrics_agent.asyncio,
                 "run",

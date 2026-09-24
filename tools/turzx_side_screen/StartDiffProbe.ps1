@@ -1,6 +1,6 @@
 param(
     [string]$Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path,
-    [string]$Port = "COM7",
+    [string]$Port = "",
     [int]$Frames = 6,
     [int]$IntervalMs = 1000,
     [int]$TimeoutMs = 90000,
@@ -12,6 +12,13 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+. (Join-Path $PSScriptRoot 'PanelDevicePolicy.ps1')
+$Port = Get-TurzxConfiguredPort -Root $Root -Port $Port
+if (-not $DryRun) {
+    Get-TurzxVerifiedSerialEndpoint -Port $Port | Out-Null
+    Assert-TurzxStreamStopped
+}
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $outDir = Join-Path $scriptDir "out"

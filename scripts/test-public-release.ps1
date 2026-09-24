@@ -12,9 +12,11 @@ if (!(Test-Path -LiteralPath $builder)) {
 }
 
 $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("turzx_public_release_" + [Guid]::NewGuid().ToString("N"))
+$untrackedFixture = Join-Path $root ("tools\turzx_side_screen\untracked-release-probe-" + [Guid]::NewGuid().ToString("N") + ".md")
 New-Item -ItemType Directory -Force -Path $tempRoot | Out-Null
 
 try {
+    Set-Content -LiteralPath $untrackedFixture -Value "This untracked file must stay out of the source package."
     $missingOutput = & powershell -NoProfile -ExecutionPolicy Bypass -File $checker -Root $tempRoot -AsJson 2>$null
     if ($LASTEXITCODE -eq 0) {
         throw "Runtime checker should fail when vendor runtime files are missing."
@@ -68,7 +70,14 @@ try {
 
     $requiredEntries = @(
         "scripts/build-release.ps1",
+        "scripts/repair-hs2.ps1",
+        "scripts/TestPanelDevicePolicy.ps1",
         "tools/turzx_side_screen/metrics_agent.py",
+        "tools/turzx_side_screen/PanelDevicePolicy.ps1",
+        "tools/turzx_side_screen/HiddenProcessLauncher.ps1",
+        "tools/turzx_side_screen/HiddenProcessLauncher.cs",
+        "tools/turzx_side_screen/TestHiddenProcessLauncher.ps1",
+        "tools/turzx_side_screen/requirements.txt",
         "tools/turzx_side_screen/config.example.json",
         "tools/turzx_weather_shim/turzx_weather_shim.py",
         "tools/turzx_weather_shim/start_turzx_weatherfix.ps1",
@@ -76,12 +85,16 @@ try {
         "tools/hs2_crystal_overlay/Publish-HS2Task.ps1",
         "tools/hs2_crystal_overlay/src/HS2.CrystalOverlay/HS2.CrystalOverlay.csproj",
         "tools/hs2_crystal_overlay/src/HS2.CrystalOverlay.Core/HS2.CrystalOverlay.Core.csproj",
-        "tools/hs2_crystal_overlay/tests/HS2.CrystalOverlay.Tests/HS2.CrystalOverlay.Tests.csproj"
+        "tools/hs2_crystal_overlay/tests/HS2.CrystalOverlay.Tests/HS2.CrystalOverlay.Tests.csproj",
+        "tools/hs2_crystal_overlay/tests/HS2.CrystalOverlay.Tests/ImportantTaskPipeServerTests.cs"
     )
     foreach ($requiredEntry in $requiredEntries) {
         if ($entries -notcontains $requiredEntry) {
             throw "Release ZIP is missing required entry: $requiredEntry"
         }
+    }
+    if ($entries -contains ("tools/turzx_side_screen/" + (Split-Path -Leaf $untrackedFixture))) {
+        throw "Release ZIP included an untracked source file."
     }
 
     $exampleConfig = Get-Content -LiteralPath (Join-Path $expanded "tools\turzx_side_screen\config.example.json") -Raw | ConvertFrom-Json
@@ -132,6 +145,9 @@ try {
     }
 }
 finally {
+    if (Test-Path -LiteralPath $untrackedFixture) {
+        Remove-Item -LiteralPath $untrackedFixture -Force
+    }
     if (Test-Path -LiteralPath $tempRoot) {
         Remove-Item -LiteralPath $tempRoot -Recurse -Force
     }

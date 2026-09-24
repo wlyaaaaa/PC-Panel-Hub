@@ -20,7 +20,7 @@ HS2 的设计、数据来源、配置方法和明确限制见 [docs/hs2-crystal-
 - 两种受控的 `COM7` 传输模式：
   - 已验证的 command `200` 全帧路径，默认周期为 3 秒；
   - 显式启用的 1 Hz 混合候选路径：按厂商行为完成 command `200` 启动/恢复基线，再发送有界的 command `204` 差分数据。
-- 睡眠与关机协调：睡眠时 HS2 使用原生离线时钟，TURZX 使用已验证的亮度关闭命令；关机或重启时关闭两块屏幕输出。
+- 睡眠与关机协调：主 watchdog 收到电源事件后请求 HS2 原生离线时钟和 TURZX 亮度关闭；关机或重启时请求关闭两块屏幕输出。Windows 的异步电源通知不保证处理在挂起前完成，实际效果须按本机睡眠模式验收。
 - 有界 JSONL 诊断，以及明确的数据来源、陈旧和错误状态。
 - 以最高运行级别启动的 Windows 计划任务。
 
@@ -47,6 +47,7 @@ HS2 的设计、数据来源、配置方法和明确限制见 [docs/hs2-crystal-
 - 操作系统：Windows。
 - 建议 Python 3.11 或更高版本。
 - 渲染器和串流程序需要 .NET Framework 编译器 `csc.exe`。
+- 常规回归还需要 .NET 10 SDK，以运行协议编码与 HS2 核心测试。Python 可选硬件采集依赖列在 `tools/turzx_side_screen/requirements.txt`，可用 `python -m pip install -r tools/turzx_side_screen/requirements.txt` 安装；各来源缺失仍按原有能力状态报告。
 - 硬件指标建议使用 NVIDIA NVML 和 LibreHardwareMonitor。
 - FPS 来自可选的 TimeAudit 帧链：优先读取 RTSS 官方共享内存，顺序为精确前台、RTSS 最近前台、用户启用的 Wallpaper 桌面 renderer 和唯一新鲜帧源；RTSS 映射不可用时才回退 PresentMon。副屏仍只通过 `TIMEAUDIT_DSN` 或本机 `TIMEAUDIT_DB_PASSWORD` 读取 PostgreSQL，不直接依赖 RTSS，也不保存数据库密码。遗留的本机 `127.0.0.1:55432` DSN 会在内存中迁移到避开 Windows 动态端口池的 `45432`，不会回写秘密。
 - RTSS 映射可用但没有新鲜帧源时显示正常等待，不把 Wallpaper 的 GPU 负载误报成采集异常；状态缺失、数据过期或 RTSS/PresentMon 均不可用时才显示异常。
@@ -59,6 +60,10 @@ HS2 的设计、数据来源、配置方法和明确限制见 [docs/hs2-crystal-
 会被 Git 忽略；`start_turzx_weatherfix.ps1` 在未显式设置
 `TURZX_WEATHER_CONFIG` 时会自动使用这份本机文件。示例中的天气坐标为
 `null`，未填写时天气 shim 失败关闭，不会回落到作者位置。
+
+串口优先级为显式 `-Port`、`serial.port`、兼容默认 `COM7`。正常串流、单帧和亮度入口在打开串口前核对唯一的 `VID_0525&PID_A4A7` 设备与健康状态，并拒绝已有帧流时另开写入者；COM 号变化时不会自动猜测其他端点。新安装任务未显式传 `-Port` 时会在每次启动读取配置；旧任务若固定了不同端口，启动器会说明冲突，应重装同一任务以采用配置。
+
+`480×1920` 几何、驱动速率及布局由当前渲染/传输实现固定，不是可配置项。示例已移除无消费者的 `serial.baudRate`、串口驱动选择、`screen.width/height` 和 `ui.*`；旧本地文件保留这些字段也不会改变画面。窗口返回策略目前针对唯一 `PHLC34B` 主屏与 `MTT1337` VDD；缺失或歧义时保持零动作并记录预期标识，不会凭分辨率将陌生显示器当成主屏。
 
 公开仓库不包含原版 TURZX 二进制。启动串流前，需在仓库根目录旁准备：
 
@@ -83,15 +88,15 @@ start-side-screen.cmd
 
 ```powershell
 Set-Location 'C:\path\to\PC-Panel-Hub'
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start.ps1 -Port COM7 -IntervalMs 3000
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start.ps1 -IntervalMs 3000
 ```
 
 若机箱副屏已经冻结或计划任务意外退出，使用快速修复入口；它会先核对
-`COM7` 是否仍精确绑定 `VID_0525&PID_A4A7` 且设备为 Present/OK，再以唯一
+配置串口是否仍精确绑定 `VID_0525&PID_A4A7` 且设备为 Present/OK，再以唯一
 串口写入者和固定 1 Hz 混合刷新重启，并等待新心跳验收：
 
 ```powershell
-pwsh -NoProfile -ExecutionPolicy Bypass -File .\scripts\repair-panel.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\repair-panel.ps1
 ```
 
 个人启动和开机任务默认固定为 1 Hz 混合刷新，不再以降低到 3 秒刷新作为稳定性修复。启动或看门狗重启后会在第 60、120、180 帧（`60, 120, and 180`）各重建一次串口会话、重新 prime/恢复亮度并发送完整 command `200` 基线，以纠正“主机心跳正常但实体屏没有接收新会话”的静默冻结；三分钟后恢复为连续的每秒 command `204` 增量刷新，并保留每 900 帧一次的长期全帧恢复。每次全帧纠偏预计短暂停顿约 2.5 秒，但不会把常态刷新改成 3 秒。仅在明确诊断兼容性时才用 `-HybridRefresh:$false` 进入 **3-second compatibility fallback**。
@@ -111,7 +116,7 @@ install-startup.cmd
 或从管理员 PowerShell 安装：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-startup-admin.ps1 -Port COM7 -IntervalMs 3000
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-startup-admin.ps1 -IntervalMs 3000
 ```
 
 卸载开机启动任务：
@@ -125,6 +130,14 @@ uninstall-startup.cmd
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\uninstall-startup-admin.ps1
 ```
+
+HS2 Code 43 的人工恢复入口默认只检查已保存的健康拓扑绑定：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\repair-hs2.ps1
+```
+
+仅在明确需要硬件恢复时，以管理员运行同一入口并加 `-Apply`。它会显示确认，再复核唯一专用 Hub、port 2 故障子节点与 LIAN LI sibling；缺失或歧义时拒绝。该路径可能重启专用 Hub、移除精确故障子节点和扫描设备，永远不接入普通 watchdog。TURZX 的既有自动恢复仅在失败阈值、退避与停流证明成立时重启自身串口端点；二者作用域不同。
 
 ## 测试、构建与状态检查
 
@@ -147,7 +160,11 @@ Get-ScheduledTask | Where-Object { $_.TaskName -like '*TURZX*' } |
   Select-Object TaskName,State,@{Name='RunLevel';Expression={$_.Principal.RunLevel}}
 ```
 
-测试通过只能证明代码和主机侧契约满足预期；涉及串流、断电、睡眠、恢复或画面刷新的结论，仍需另做实体验收。
+常规入口包含协议编码、HS2 .NET 核心、指标采集、启动策略与渲染测试，不接触实体串口。源码发布包只取 Git 已跟踪文件集合，使用当前工作树内容；未提交的已跟踪修改仍需在发布前审阅，未跟踪笔记不会进入包。
+
+`-IntervalMs 3000` 控制全帧兼容周期；启用混合模式时生产周期固定为 1 Hz。`start.ps1` 与安装器可用 `-FullFrame` 显式选择全帧模式，兼容直接 PowerShell 调用的 `-HybridRefresh:$false`。快速修复入口维持既有 1 Hz 混合模式。
+
+测试通过只能证明代码和主机侧契约满足预期；涉及串流、断电、睡眠、恢复或画面刷新的结论，仍需另做实体验收。先用 `powercfg /a` 确认本机支持的睡眠类型；不把未支持的 S0ix 当作失败。窗口返回的独立实机检查为 `scripts\TestDesktopWindowReturn.ps1 -Live -ResultPath <本机结果路径>`，可显式指定主屏/VDD 硬件 ID；它创建测试窗口，因此不在常规回归中自动运行。遗留 `RestartSideScreenAfterResume*` 只为旧安装诊断保留，禁止重新注册 Resume 任务。
 
 ## 运行日志
 

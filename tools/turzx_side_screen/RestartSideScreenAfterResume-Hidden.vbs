@@ -1,4 +1,5 @@
-' Hidden one-shot launcher for the TURZX SideScreen resume recovery task.
+' LEGACY COMPATIBILITY ONLY. Do not register this as a Resume task.
+' Sleep/resume is owned by the main watchdog.
 Dim fso, shell, here, toolsRoot, root, port, intervalMs, delaySeconds, hybridRefresh, altHelper, i, arg, command, exitCode
 
 Set fso = CreateObject("Scripting.FileSystemObject")

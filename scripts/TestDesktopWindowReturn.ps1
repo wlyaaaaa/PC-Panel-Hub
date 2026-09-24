@@ -1,4 +1,9 @@
-param([Parameter(Mandatory=$true)][switch]$Live,[Parameter(Mandatory=$true)][string]$ResultPath)
+param(
+ [Parameter(Mandatory=$true)][switch]$Live,
+ [Parameter(Mandatory=$true)][string]$ResultPath,
+ [ValidatePattern('^[A-Za-z0-9]+$')][string]$MainMonitorHardwareId='PHLC34B',
+ [ValidatePattern('^[A-Za-z0-9]+$')][string]$VddMonitorHardwareId='MTT1337'
+)
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
 if([Diagnostics.Process]::GetCurrentProcess().SessionId -eq 0){throw 'Interactive desktop required.'}
@@ -15,10 +20,10 @@ public sealed class DesktopReturnFixture:Form {
 $native=Initialize-HS2ExclusiveWindowGuardNativeMethods
 $native::UsePerMonitorV2DpiAwareness()
 $monitors=@($native::CaptureMonitors());$ids=@($native::CaptureMonitorIdentities())
-$mainIds=@($ids|Where-Object {Test-WindowGuardMonitorHardwareId -Identity $_ -HardwareId 'PHLC34B'}|ForEach-Object DeviceName)
-$vddIds=@($ids|Where-Object {Test-WindowGuardMonitorHardwareId -Identity $_ -HardwareId 'MTT1337'}|ForEach-Object DeviceName)
+$mainIds=@($ids|Where-Object {Test-WindowGuardMonitorHardwareId -Identity $_ -HardwareId $MainMonitorHardwareId}|ForEach-Object DeviceName)
+$vddIds=@($ids|Where-Object {Test-WindowGuardMonitorHardwareId -Identity $_ -HardwareId $VddMonitorHardwareId}|ForEach-Object DeviceName)
 $main=@($monitors|Where-Object {$mainIds -contains $_.DeviceName});$vdd=@($monitors|Where-Object {$vddIds -contains $_.DeviceName})
-if($main.Count -ne 1 -or $vdd.Count -ne 1){throw 'Unique main and VDD required; no topology modification.'}
+if($main.Count -ne 1 -or $vdd.Count -ne 1){throw "Unique main ($MainMonitorHardwareId) and VDD ($VddMonitorHardwareId) required; no topology modification."}
 $rows=@();$forms=@();$fg=[DesktopReturnFixture]::GetForegroundWindow()
 try {
  foreach($state in @('Normal','Minimized','Maximized')) {
@@ -42,7 +47,7 @@ try {
  $names=@{};Get-Process|ForEach-Object{$names[[int]$_.Id]=$_.ProcessName}
  $windows=@($native::CaptureWindows([int[]]@()))
  foreach($w in $windows){if($names.ContainsKey($w.ProcessId)){$w.ProcessName=$names[$w.ProcessId]}}
- $plan=Get-VddWindowReturnPlan -Monitors @($native::CaptureMonitors()) -MonitorIdentities @($native::CaptureMonitorIdentities()) -Windows $windows
+ $plan=Get-VddWindowReturnPlan -Monitors @($native::CaptureMonitors()) -MonitorIdentities @($native::CaptureMonitorIdentities()) -Windows $windows -MainMonitorHardwareId $MainMonitorHardwareId -VddMonitorHardwareId $VddMonitorHardwareId
  $result=@{status=if(@($rows|Where-Object {-not $_.ReturnedToMain -or -not $_.ShowStatePreserved}).Count -eq 0 -and @($plan.Actions).Count -eq 0 -and [DesktopReturnFixture]::GetForegroundWindow() -eq $fg){'pass'}else{'failed'};utc=[datetime]::UtcNow.ToString('o');cases=$rows;remainingOrdinaryVddWindows=@($plan.Actions).Count;foregroundUnchanged=([DesktopReturnFixture]::GetForegroundWindow() -eq $fg);noDisplayChange=$true}
  [IO.File]::WriteAllText($ResultPath,($result|ConvertTo-Json -Depth 5),[Text.UTF8Encoding]::new($false))
  if($result.status -ne 'pass'){throw 'Live acceptance failed; see result.'}

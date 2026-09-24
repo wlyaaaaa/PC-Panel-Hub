@@ -7,7 +7,7 @@ Set shell = CreateObject("WScript.Shell")
 here = fso.GetParentFolderName(WScript.ScriptFullName)
 toolsRoot = fso.GetParentFolderName(here)
 root = fso.GetParentFolderName(toolsRoot)
-port = "COM7"
+port = ""
 intervalMs = "3000"
 hybridRefresh = False
 altHelper = False
@@ -44,7 +44,8 @@ Do While i < WScript.Arguments.Count
 Loop
 
 shell.CurrentDirectory = here
-command = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File """ & here & "\StartSideScreenWatchdog.ps1"" -Root """ & root & """ -Port " & port & " -IntervalMs " & intervalMs
+command = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File """ & here & "\StartSideScreenWatchdog.ps1"" -Root """ & root & """ -IntervalMs " & intervalMs
+If Len(port) > 0 Then command = command & " -Port """ & port & """"
 If hybridRefresh Then command = command & " -HybridRefresh -PollSeconds 1"
 If altHelper Then command = command & " -AltHelper"
 ' Keep recovery in the existing task launcher: Task Scheduler may record a

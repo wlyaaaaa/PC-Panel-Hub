@@ -1,13 +1,16 @@
 param(
     [string]$Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path,
     [string]$TaskName = "TURZX SideScreen",
-    [string]$Port = "COM7",
+    [string]$Port = "",
     [ValidateRange(10, 180)][int]$WaitSeconds = 120,
     [switch]$HybridRefresh = $true
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+. (Join-Path $Root 'tools\turzx_side_screen\PanelDevicePolicy.ps1')
+$Port = Get-TurzxConfiguredPort -Root $Root -Port $Port
 
 if (-not $HybridRefresh) {
     throw "Fast repair is intentionally fixed to the one-second HybridRefresh production mode."
@@ -92,7 +95,7 @@ if ($liveWatchdogOwner) {
     Write-Host ("Requested in-place stack recycle from live watchdog PID={0}; HS2/display ownership preserved." -f $watchdogPid)
 }
 else {
-    & pwsh.exe -NoProfile -ExecutionPolicy Bypass -File $startPath -Root $Root -TaskName $TaskName -Port $Port -HybridRefresh
+    & (Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe') -NoProfile -ExecutionPolicy Bypass -File $startPath -Root $Root -TaskName $TaskName -Port $Port -HybridRefresh
     if ($LASTEXITCODE -ne 0) {
         throw "scripts\start.ps1 failed with exit code $LASTEXITCODE."
     }

@@ -1,3 +1,5 @@
+# LEGACY COMPATIBILITY ONLY. Do not register this as a Resume task.
+# The long-running main watchdog is the only sleep/resume owner.
 param(
     [string]$Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path,
     [string]$TaskName = "TURZX SideScreen",

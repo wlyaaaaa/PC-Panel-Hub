@@ -2,7 +2,7 @@ param(
     [string]$Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path,
     [string]$ShortcutName = "TURZX SideScreen Start.lnk",
     [string]$StartMenuShortcutName = "TURZX SideScreen.lnk",
-    [string]$Port = "COM7",
+    [string]$Port = "",
     [int]$IntervalMs = 3000,
     [switch]$NoDesktop,
     [switch]$NoStartMenu,
@@ -11,6 +11,13 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+$portArguments = ''
+if ($PSBoundParameters.ContainsKey('Port')) {
+    . (Join-Path $Root 'tools\turzx_side_screen\PanelDevicePolicy.ps1')
+    $Port = Get-TurzxConfiguredPort -Root $Root -Port $Port
+    $portArguments = ' -Port "{0}"' -f $Port
+}
 
 $Root = (Resolve-Path -LiteralPath $Root).Path
 $startScript = Join-Path $Root "scripts\start.ps1"
@@ -39,7 +46,7 @@ function New-SideScreenShortcut {
     $shell = New-Object -ComObject WScript.Shell
     $shortcut = $shell.CreateShortcut($ShortcutPath)
     $shortcut.TargetPath = Join-Path $env:WINDIR "System32\WindowsPowerShell\v1.0\powershell.exe"
-    $shortcut.Arguments = ('-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" -Root "{1}" -Port "{2}" -IntervalMs {3}' -f $startScript, $Root, $Port, $IntervalMs)
+    $shortcut.Arguments = ('-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" -Root "{1}"{2} -IntervalMs {3}' -f $startScript, $Root, $portArguments, $IntervalMs)
     $shortcut.WorkingDirectory = $Root
     $shortcut.IconLocation = Join-Path $env:WINDIR "System32\shell32.dll,25"
     $shortcut.Description = "Start or restart the TURZX SideScreen watchdog."

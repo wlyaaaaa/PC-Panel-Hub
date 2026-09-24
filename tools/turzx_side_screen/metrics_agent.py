@@ -10,6 +10,7 @@ from ctypes import wintypes
 import datetime as dt
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import importlib
+import ipaddress
 import json
 import math
 import os
@@ -109,9 +110,14 @@ def _configured_timeaudit_dsn(
     if not password:
         return None
     encoded_password = quote(password, safe="")
+    username = quote((source.get("TIMEAUDIT_DB_USER") or "").strip() or "leyang", safe="")
+    hostname = (source.get("TIMEAUDIT_DB_HOST") or "").strip() or "127.0.0.1"
+    database = quote((source.get("TIMEAUDIT_DB_NAME") or "").strip() or "time_audit", safe="")
+    if ":" in hostname and not hostname.startswith("["):
+        hostname = f"[{hostname}]"
     return (
-        f"postgresql://leyang:{encoded_password}"
-        f"@127.0.0.1:{host_port}/time_audit"
+        f"postgresql://{username}:{encoded_password}"
+        f"@{hostname}:{host_port}/{database}"
     )
 
 
@@ -3967,11 +3973,19 @@ def create_server(
     port: int = DEFAULT_PORT,
     snapshot_provider: Callable[[], dict[str, Any]] | None = None,
 ) -> ThreadingHTTPServer:
+    try:
+        listen_address = ipaddress.ip_address(host)
+    except ValueError as exc:
+        raise ValueError("Metrics listen host must be a numeric loopback address") from exc
+    if not listen_address.is_loopback:
+        raise ValueError("Metrics listen host must be a loopback address")
+
     provider = snapshot_provider or (lambda: build_snapshot(nonblocking_gpu=True))
     class MetricsHTTPServer(ThreadingHTTPServer):
         # On Windows SO_REUSEADDR may route requests to a dying earlier server.
         # Never replace a listener implicitly. A configuration change is explicit.
         allow_reuse_address = os.name != "nt"
+        address_family = socket.AF_INET6 if listen_address.version == 6 else socket.AF_INET
 
         def server_bind(self) -> None:
             if os.name == "nt":

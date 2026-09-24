@@ -2,7 +2,7 @@
 
 Scope: v1 reusable protocol layer for the 480x1920 TURZX side screen.
 
-Verified from `tools\turzx_protocol_probe\TurzxProtocolProbe.cs` and local black-box converter samples:
+Historical local evidence: the private, untracked probe `tools\turzx_protocol_probe\TurzxProtocolProbe.cs` and local black-box converter samples. That probe is not distributed in this repository and is not a vendor specification. Reproducible host-side encoding checks are in `TestProtocolEncoding.ps1`:
 
 - Full frame size: `480 * 1920 * 4 = 3686400` bytes.
 - Device pixel order: row-major `B, G, R, A`.

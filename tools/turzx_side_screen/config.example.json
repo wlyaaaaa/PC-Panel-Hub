@@ -1,13 +1,8 @@
 {
   "serial": {
-    "port": "COM7",
-    "baudRate": 2000000,
-    "useRjcpSerialPortStream": true,
-    "allowSystemIoPortsFallback": false
+    "port": "COM7"
   },
   "screen": {
-    "width": 480,
-    "height": 1920,
     "dataRefreshMs": 1000
   },
   "metrics": {
@@ -28,16 +23,5 @@
   "network": {
     "pingHost": "1.1.1.1",
     "publicInterface": ""
-  },
-  "ui": {
-    "designSvg": "tools\\turzx_side_screen\\design\\dashboard-final-candidate.svg",
-    "background": "#f4faf7",
-    "cpuAccent": "#0284c7",
-    "gpuAccent": "#db2777",
-    "networkAccent": "#059669",
-    "diskAccent": "#15803d",
-    "maxTopProcesses": 3,
-    "maxDiskRows": 4,
-    "historySeconds": 60
   }
 }

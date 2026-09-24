@@ -1,6 +1,6 @@
 ﻿param(
     [string]$Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path,
-    [string]$Port = "COM7",
+    [string]$Port = "",
     [int]$IntervalMs = 3000,
     [ValidateRange(3000, 60000)][int]$SendTimeoutMs = 10000,
     [ValidateRange(100, 5000)][int]$DiffSendTimeoutMs = 900,
@@ -52,8 +52,12 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+. (Join-Path $PSScriptRoot 'PanelDevicePolicy.ps1')
+$Port = Get-TurzxConfiguredPort -Root $Root -Port $Port
+
 $Root = (Resolve-Path -LiteralPath $Root).Path
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+. (Join-Path $scriptDir "HiddenProcessLauncher.ps1")
 $outDir = Join-Path $scriptDir "out"
 $logPath = Join-Path $outDir "side-screen-watchdog.log"
 $hs2UsbTopologyBindingPath = Join-Path $outDir "hs2-usb-topology-binding.json"
@@ -423,7 +427,7 @@ function Stop-Stack {
     if ($null -ne $trackedChild) {
         try {
             if (-not $trackedChild.HasExited) {
-                # This handle came from this watchdog's own Start-Process call.
+                # This handle came from this watchdog's own hidden-process launch.
                 # Retire it before accepting the bounded CIM fallback, otherwise
                 # an old stack could wake up later and create another COM writer.
                 Write-WatchdogLog ("stopping tracked stack child pid={0} reason={1}" -f $trackedChild.Id, $Reason)
@@ -443,7 +447,7 @@ function Stop-Stack {
         "-Quiet",
         "-ProcessSnapshotTimeoutSeconds", [string]$StopProcessSnapshotTimeoutSeconds
     )
-    $stopProcess = Start-Process -FilePath "powershell.exe" -ArgumentList $stopArguments -WindowStyle Hidden -PassThru
+    $stopProcess = Start-HiddenProcess -FilePath "powershell.exe" -ArgumentList $stopArguments
     $completed = $false
     try {
         $completed = $stopProcess.WaitForExit($StopStackTimeoutSeconds * 1000)
@@ -561,7 +565,7 @@ function Invoke-TurzxSerialEndpointRecovery {
     $script:turzxSerialRecoveryLastAttemptUtc = $nowUtc
     try {
         $endpoint = Get-TurzxExactSerialEndpoint
-        $restartOutput = & pnputil.exe `
+        $restartOutput = & (Join-Path $env:WINDIR 'System32\pnputil.exe') `
             /restart-device `
             ([string]$endpoint.InstanceId) 2>&1
         if ($LASTEXITCODE -ne 0) {
@@ -1447,7 +1451,7 @@ function Invoke-VddWindowReturnProtection {
             $guardArguments.OverlayProcessIds = $overlayProcessIds
         }
         $result = Invoke-VddWindowReturnGuard @guardArguments
-        $status = '{0}|main={1}|vdd={2}' -f `
+        $status = '{0}|main={1}|vdd={2}|expected-main=PHLC34B|expected-vdd=MTT1337' -f `
             [string]$result.Status,
             [string]$result.MainMonitorDevice,
             [string]$result.VddMonitorDevice
@@ -1757,7 +1761,7 @@ function Start-Stack {
     if ($AltHelper) {
         $arguments += "-AltHelper"
     }
-    $process = Start-Process -FilePath "powershell.exe" -ArgumentList $arguments -WindowStyle Hidden -PassThru
+    $process = Start-HiddenProcess -FilePath "powershell.exe" -ArgumentList $arguments
     Set-Content -LiteralPath $childPidPath -Value $process.Id -Encoding ASCII
     Write-WatchdogLog ("stack child pid={0}" -f $process.Id)
     return $process
