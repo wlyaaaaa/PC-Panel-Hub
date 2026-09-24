@@ -9,6 +9,12 @@ HS2 的设计、数据来源、配置方法和明确限制见 [docs/hs2-crystal-
 
 ## 主要组成
 
+同一指标服务的 `GET /public-telemetry` 提供 `turzx.public-telemetry.v1` 窄投影，只有网络探测与 DPC 占用，不返回目标地址、网卡名、前台、进程、账号或原始错误。该入口复用现有采样器，不构建 `/snapshot`，也不另开采集循环。
+
+公开网络字段 `latency_ms` 是最近探测 RTT，`packet_loss_percent` 是最近至多 15 次尝试的失败比例；`attempt_count`/`success_count` 和 `window_start_unix`/`window_end_unix`/`window_seconds` 给出实际样本窗。`jitter_ms` 是最近至多 15 次成功 RTT 的相邻绝对差平均，另带 `jitter_sample_count`、`jitter_window_*`、`jitter_observed_at_unix` 与 `jitter_status`；不足两次成功时公开值为 null。探测失败包括超时或工具不可用，不等同于已确定网络丢包原因。
+
+网络仍按原 2 秒 TTL 异步单飞，响应不等待 Ping；`connecting`、`stale`、`unavailable` 不改写旧来源时间。`observed_at_unix` 是最近尝试完成时间，抖动保留最近成功样本时间。`system.dpc_usage_percent` 是真实 PDH DPC 时间占比及其读取时间，不是 DPC 延迟；计数器基线未就绪或读取失败时值和时间均为 null。原 `/snapshot` 合同保留。
+
 - Python 指标代理：采集硬件、网络、磁盘、天气、FPS、前台应用和进程排行。
 - C# / GDI+ 渲染器：生成 `480x1920` 仪表盘并发送到 TURZX 屏幕。
 - 两种受控的 `COM7` 传输模式：

@@ -1597,6 +1597,20 @@ class WindowsPdhPercentSampler:
 class WindowsDpcTimeSampler(WindowsPdhPercentSampler):
     COUNTER_PATH = r"\Processor Information(_Total)\% DPC Time"
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._observation_lock = threading.Lock()
+
+    def sample_observation(self) -> dict[str, Any]:
+        with self._observation_lock:
+            value = super().sample()
+            return {"dpc_usage_percent": value,
+                    "observed_at_unix": time.time() if value is not None else None,
+                    "status": "live" if value is not None else "unavailable"}
+
+    def sample(self) -> float | None:
+        return self.sample_observation()["dpc_usage_percent"]
+
 
 class WindowsProcessorUtilitySampler(WindowsPdhPercentSampler):
     COUNTER_PATH = r"\Processor Information(_Total)\% Processor Utility"
@@ -3136,7 +3150,7 @@ class NetworkRateSampler:
         timestamp = self._now()
         rx_rate = None
         tx_rate = None
-        latency = self._latency_sampler.sample()
+        latency = self.sample_latency()
 
         if current is not None:
             rx_total = _parse_counter_int(_network_counter_field(current, "bytes_recv"))
@@ -3193,6 +3207,10 @@ class NetworkRateSampler:
             return self._read_counters()
         except Exception:
             return None
+
+    def sample_latency(self) -> dict[str, Any]:
+        """Share the existing probe without collecting addresses or rate counters."""
+        return self._latency_sampler.sample()
 
 
 def _read_network_counters_psutil() -> Any | None:
@@ -3379,14 +3397,18 @@ class NetworkLatencySampler:
         read_ping_ms: Callable[[], float | None] | None = None,
         now: Callable[[], float] | None = None,
         ttl_seconds: float = NETWORK_LATENCY_TTL_SECONDS,
+        wall_time: Callable[[], float] | None = None,
     ):
         self._read_ping_ms = read_ping_ms or _read_ping_ms
         self._now = now or time.monotonic
         self._ttl_seconds = ttl_seconds
+        self._wall_time = wall_time or time.time
         self._last_result: dict[str, Any] | None = None
         self._last_expires_at = 0.0
         self._history: deque[float] = deque(maxlen=15)
         self._outcome_history: deque[bool] = deque(maxlen=15)
+        self._attempt_times: deque[tuple[float, float]] = deque(maxlen=15)
+        self._success_times: deque[tuple[float, float]] = deque(maxlen=15)
         self._lock = threading.Lock()
         self._refreshing = False
         self._refresh_thread: threading.Thread | None = None
@@ -3407,6 +3429,7 @@ class NetworkLatencySampler:
                     "packet_loss_percent": None,
                     "source": "ping",
                     "status": "connecting",
+                    **self._observation_metadata(),
                 }
             stale = dict(self._last_result)
             stale["status"] = "stale"
@@ -3423,11 +3446,14 @@ class NetworkLatencySampler:
         except Exception:
             ping_ms = None
         completed_at = self._now()
+        observed_at = self._wall_time()
         with self._lock:
             succeeded = ping_ms is not None
             self._outcome_history.append(succeeded)
+            self._attempt_times.append((observed_at, completed_at))
             if ping_ms is not None:
                 self._history.append(ping_ms)
+                self._success_times.append((observed_at, completed_at))
             failures = sum(1 for outcome in self._outcome_history if not outcome)
             packet_loss = round(
                 failures / len(self._outcome_history) * 100.0,
@@ -3443,9 +3469,22 @@ class NetworkLatencySampler:
                 "packet_loss_percent": packet_loss,
                 "source": "ping",
                 "status": "live" if succeeded else "unavailable",
+                **self._observation_metadata(),
             }
             self._last_expires_at = completed_at + self._ttl_seconds
             self._refreshing = False
+
+    def _observation_metadata(self) -> dict[str, Any]:
+        def window(times):
+            return (times[0][0], times[-1][0], round(max(0.0, times[-1][1] - times[0][1]), 3)) if times else (None, None, None)
+        start, end, seconds = window(self._attempt_times)
+        jitter_start, jitter_end, jitter_seconds = window(self._success_times)
+        return {"observed_at_unix": end, "attempt_count": len(self._outcome_history),
+                "success_count": sum(self._outcome_history), "window_start_unix": start,
+                "window_end_unix": end, "window_seconds": seconds,
+                "jitter_observed_at_unix": jitter_end, "jitter_sample_count": len(self._history),
+                "jitter_window_start_unix": jitter_start, "jitter_window_end_unix": jitter_end,
+                "jitter_window_seconds": jitter_seconds}
 
 
 def _network_jitter(history: deque[float]) -> float:
@@ -3502,6 +3541,38 @@ _NETWORK_SAMPLER = NetworkRateSampler()
 
 def read_network_snapshot() -> dict[str, Any]:
     return _NETWORK_SAMPLER.sample()
+
+
+def public_telemetry_projection(latency: dict[str, Any], dpc: dict[str, Any]) -> dict[str, Any]:
+    """Explicit projection: never return targets, addresses, config or raw errors."""
+    network = {key: latency.get(key) for key in (
+        "jitter_ms", "packet_loss_percent", "observed_at_unix", "status",
+        "attempt_count", "success_count", "window_start_unix", "window_end_unix", "window_seconds",
+        "jitter_observed_at_unix", "jitter_sample_count", "jitter_window_start_unix",
+        "jitter_window_end_unix", "jitter_window_seconds")}
+    network["latency_ms"] = latency.get("ping_ms")
+    network["status"] = network["status"] or "unavailable"
+    if (network["jitter_sample_count"] or 0) < 2:
+        network["jitter_ms"] = None
+        network["jitter_status"] = "unavailable"
+    else:
+        network["jitter_status"] = "live" if network["status"] == "live" else "stale"
+    system = {key: dpc.get(key) for key in ("dpc_usage_percent", "observed_at_unix", "status")}
+    system["status"] = system["status"] or "unavailable"
+    return {"schema": "turzx.public-telemetry.v1", "network": network, "system": system}
+
+
+def read_public_telemetry() -> dict[str, Any]:
+    # Each source is independent. No full snapshot/private collector runs here.
+    try:
+        latency = _NETWORK_SAMPLER.sample_latency()
+    except Exception:
+        latency = {}
+    try:
+        dpc = _DPC_TIME_SAMPLER.sample_observation()
+    except Exception:
+        dpc = {}
+    return public_telemetry_projection(latency, dpc)
 
 
 def _local_addresses() -> list[str]:
@@ -3822,7 +3893,8 @@ def _bytes_to_gb(value: int) -> float:
     return round(value / (1024**3), 2)
 
 
-def make_handler(snapshot_provider: Callable[[], dict[str, Any]]) -> type[BaseHTTPRequestHandler]:
+def make_handler(snapshot_provider: Callable[[], dict[str, Any]],
+                 public_provider: Callable[[], dict[str, Any]] | None = None) -> type[BaseHTTPRequestHandler]:
     class SnapshotHandler(BaseHTTPRequestHandler):
         server_version = "TURZXMetricsAgent/1.0"
 
@@ -3831,6 +3903,19 @@ def make_handler(snapshot_provider: Callable[[], dict[str, Any]]) -> type[BaseHT
             if path == "/health":
                 # Liveness is independent of slow first hardware/database samples.
                 body = b'{"status":"ok","service":"turzx-metrics"}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if path == "/public-telemetry":
+                try:
+                    payload = (public_provider or read_public_telemetry)()
+                except Exception:
+                    payload = public_telemetry_projection({}, {})
+                body = json.dumps(payload, ensure_ascii=True, allow_nan=False, separators=(",", ":")).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Cache-Control", "no-store")

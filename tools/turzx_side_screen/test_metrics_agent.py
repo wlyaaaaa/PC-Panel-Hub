@@ -2297,5 +2297,72 @@ class MetricsAgentTests(unittest.TestCase):
         self.assertEqual(13.9, snapshot["memory"]["vram_usage_percent"])
 
 
+class PublicTelemetryTests(unittest.TestCase):
+    def test_actual_windows_times_and_unknown_values(self):
+        clock, readings = [10.0], iter([10., 30., None])
+        sampler = metrics_agent.NetworkLatencySampler(read_ping_ms=lambda: next(readings), now=lambda: clock[0], wall_time=lambda: 1000 + clock[0], ttl_seconds=30)
+        sampler._refresh()
+        self.assertIsNone(metrics_agent.public_telemetry_projection(sampler.sample(), {})["network"]["jitter_ms"])
+        for current in (12, 14):
+            clock[0] = current
+            sampler._refresh()
+        result = metrics_agent.public_telemetry_projection(sampler.sample(), {})["network"]
+        self.assertIsNone(result["latency_ms"])
+        self.assertEqual(result["status"], "unavailable")
+        self.assertEqual((result["attempt_count"], result["success_count"], result["observed_at_unix"], result["window_seconds"]), (3, 2, 1014, 4))
+        self.assertEqual((result["jitter_ms"], result["jitter_status"], result["jitter_sample_count"], result["jitter_observed_at_unix"], result["jitter_window_seconds"]), (20, "stale", 2, 1012, 2))
+        self.assertEqual(result["packet_loss_percent"], 33.3)
+        clock[0] = 20
+        self.assertEqual(sampler.sample()["observed_at_unix"], 1014)
+
+    def test_windows_are_sample_bounded(self):
+        clock = [0.]
+        sampler = metrics_agent.NetworkLatencySampler(read_ping_ms=lambda: None if clock[0] % 2 else 20, now=lambda: clock[0], wall_time=lambda: 1000 + clock[0], ttl_seconds=30)
+        for current in range(20):
+            clock[0] = float(current)
+            sampler._refresh()
+        value = sampler.sample()
+        self.assertEqual((value["attempt_count"], value["success_count"], value["window_start_unix"], value["jitter_sample_count"], value["jitter_window_start_unix"]), (15, 7, 1005, 10, 1000))
+
+    def test_projection_allowlist_and_missing_dpc(self):
+        private = {"target": "private-target", "addresses": ["private-address"], "account": "private-account"}
+        value = metrics_agent.public_telemetry_projection(private, private)
+        self.assertEqual(set(value), {"schema", "network", "system"})
+        self.assertNotIn("private-", json.dumps(value))
+        self.assertEqual(value["system"], {"dpc_usage_percent": None, "observed_at_unix": None, "status": "unavailable"})
+        for key in ("latency_ms", "jitter_ms", "packet_loss_percent", "observed_at_unix"):
+            self.assertIsNone(value["network"][key])
+        with patch.object(metrics_agent.time, "time", return_value=1234):
+            self.assertEqual(metrics_agent.WindowsDpcTimeSampler(read_value=lambda: .25).sample_observation(), {"dpc_usage_percent": .25, "observed_at_unix": 1234, "status": "live"})
+        self.assertIsNone(metrics_agent.WindowsDpcTimeSampler(read_value=lambda: None).sample_observation()["dpc_usage_percent"])
+
+    def test_http_uses_no_private_collector_and_does_not_wait_for_ping(self):
+        release, calls = threading.Event(), []
+        def probe():
+            calls.append(1)
+            release.wait(2)
+            return 25
+        sampler = metrics_agent.NetworkLatencySampler(read_ping_ms=probe)
+        network = metrics_agent.NetworkRateSampler(latency_sampler=sampler, read_counters=lambda: self.fail("rate collector invoked"))
+        with patch.object(metrics_agent, "_NETWORK_SAMPLER", network), patch.object(metrics_agent, "_DPC_TIME_SAMPLER", SimpleNamespace(sample_observation=lambda: {})):
+            server = metrics_agent.create_server("127.0.0.1", 0, snapshot_provider=lambda: self.fail("private snapshot invoked"))
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            try:
+                for _ in range(2):
+                    started = time.perf_counter()
+                    with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/public-telemetry", timeout=1) as response:
+                        value = json.load(response)
+                        self.assertEqual(response.headers["Cache-Control"], "no-store")
+                    self.assertLess(time.perf_counter() - started, .5)
+                    self.assertEqual(value["network"]["status"], "connecting")
+                    self.assertIsNone(value["network"]["observed_at_unix"])
+                self.assertEqual(len(calls), 1)
+            finally:
+                release.set()
+                if sampler._refresh_thread: sampler._refresh_thread.join(2)
+                server.shutdown()
+                server.server_close()
+
+
 if __name__ == "__main__":
     unittest.main()
