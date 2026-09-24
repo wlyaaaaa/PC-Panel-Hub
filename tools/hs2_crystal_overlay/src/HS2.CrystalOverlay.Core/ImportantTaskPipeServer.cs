@@ -28,7 +28,7 @@ public static class ImportantTaskPipeServer
                     PipeDirection.In,
                     1,
                     PipeTransmissionMode.Byte,
-                    PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+                    PipeOptions.Asynchronous);
                 await pipe.WaitForConnectionAsync(cancellationToken);
                 using var reader = new StreamReader(
                     pipe,
