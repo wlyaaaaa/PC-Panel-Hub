@@ -166,6 +166,12 @@ Get-ScheduledTask | Where-Object { $_.TaskName -like '*TURZX*' } |
 
 测试通过只能证明代码和主机侧契约满足预期；涉及串流、断电、睡眠、恢复或画面刷新的结论，仍需另做实体验收。先用 `powercfg /a` 确认本机支持的睡眠类型；不把未支持的 S0ix 当作失败。窗口返回的独立实机检查为 `scripts\TestDesktopWindowReturn.ps1 -Live -ResultPath <本机结果路径>`，可显式指定主屏/VDD 硬件 ID；它创建测试窗口，因此不在常规回归中自动运行。遗留 `RestartSideScreenAfterResume*` 只为旧安装诊断保留，禁止重新注册 Resume 任务。
 
+### 待实机验收：睡眠时副屏可能来不及关
+
+- 现象：电脑进入睡眠后，副屏可能仍停在最后一帧，没有熄灭或切到离线时钟。
+- 原因推断（尚未实机复现）：主 watchdog 靠异步的 Windows 电源事件得知要睡眠，系统不会等它把 HS2 切到离线时钟、把 TURZX 亮度关掉再挂起；Modern Standby 下该事件的时机也和 S3 不同。
+- 以后要做的验收：先用 `powercfg /a` 确认本机睡眠类型，在实际支持的模式下睡眠、唤醒各几次，分别记录两块屏睡眠时是否熄灭或切到离线时钟、唤醒后是否恢复刷新。验收前本项不改代码。
+
 ## 运行日志
 
 生成文件不会纳入 Git：
