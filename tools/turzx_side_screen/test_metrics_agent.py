@@ -1726,14 +1726,17 @@ class MetricsAgentTests(unittest.TestCase):
             metrics_agent._configured_timeaudit_dsn({"TIMEAUDIT_DSN": remote}),
         )
 
-    def test_timeaudit_password_builds_local_dsn_without_persisting_it(self):
-        dsn = metrics_agent._configured_timeaudit_dsn(
-            {"TIMEAUDIT_DB_PASSWORD": "example value"}
-        )
+    def test_timeaudit_password_without_user_leaves_fps_database_disabled(self):
+        for user in (None, "", "   "):
+            source = {"TIMEAUDIT_DB_PASSWORD": "example value"}
+            if user is not None:
+                source["TIMEAUDIT_DB_USER"] = user
+            with self.subTest(user=user):
+                self.assertIsNone(metrics_agent._configured_timeaudit_dsn(source))
 
-        self.assertEqual(
-            "postgresql://leyang:example%20value@127.0.0.1:45432/time_audit",
-            dsn,
+    def test_timeaudit_user_without_password_leaves_fps_database_disabled(self):
+        self.assertIsNone(
+            metrics_agent._configured_timeaudit_dsn({"TIMEAUDIT_DB_USER": "reader"})
         )
 
     def test_timeaudit_password_accepts_configured_database_user(self):

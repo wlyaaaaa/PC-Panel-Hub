@@ -107,10 +107,13 @@ def _configured_timeaudit_dsn(
         return explicit
 
     password = source.get("TIMEAUDIT_DB_PASSWORD")
-    if not password:
+    user = (source.get("TIMEAUDIT_DB_USER") or "").strip()
+    # There is no built-in account: without an explicit user the FPS
+    # database read stays disabled rather than guessing one.
+    if not password or not user:
         return None
     encoded_password = quote(password, safe="")
-    username = quote((source.get("TIMEAUDIT_DB_USER") or "").strip() or "leyang", safe="")
+    username = quote(user, safe="")
     hostname = (source.get("TIMEAUDIT_DB_HOST") or "").strip() or "127.0.0.1"
     database = quote((source.get("TIMEAUDIT_DB_NAME") or "").strip() or "time_audit", safe="")
     if ":" in hostname and not hostname.startswith("["):

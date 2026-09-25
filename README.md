@@ -49,7 +49,7 @@ HS2 的设计、数据来源、配置方法和明确限制见 [docs/hs2-crystal-
 - 渲染器和串流程序需要 .NET Framework 编译器 `csc.exe`。
 - 常规回归还需要 .NET 10 SDK，以运行协议编码与 HS2 核心测试。Python 可选硬件采集依赖列在 `tools/turzx_side_screen/requirements.txt`，可用 `python -m pip install -r tools/turzx_side_screen/requirements.txt` 安装；各来源缺失仍按原有能力状态报告。
 - 硬件指标建议使用 NVIDIA NVML 和 LibreHardwareMonitor。
-- FPS 来自可选的 TimeAudit 帧链：优先读取 RTSS 官方共享内存，顺序为精确前台、RTSS 最近前台、用户启用的 Wallpaper 桌面 renderer 和唯一新鲜帧源；RTSS 映射不可用时才回退 PresentMon。副屏仍只通过 `TIMEAUDIT_DSN` 或本机 `TIMEAUDIT_DB_PASSWORD` 读取 PostgreSQL，不直接依赖 RTSS，也不保存数据库密码。遗留的本机 `127.0.0.1:55432` DSN 会在内存中迁移到避开 Windows 动态端口池的 `45432`，不会回写秘密。
+- FPS 来自可选的 TimeAudit 帧链：优先读取 RTSS 官方共享内存，顺序为精确前台、RTSS 最近前台、用户启用的 Wallpaper 桌面 renderer 和唯一新鲜帧源；RTSS 映射不可用时才回退 PresentMon。副屏仍只通过 `TIMEAUDIT_DSN`，或同时设置的本机 `TIMEAUDIT_DB_USER` 与 `TIMEAUDIT_DB_PASSWORD` 读取 PostgreSQL；代码不内置任何数据库用户名，两者缺一时不启用 FPS 数据库读取。副屏不直接依赖 RTSS，也不保存数据库密码。遗留的本机 `127.0.0.1:55432` DSN 会在内存中迁移到避开 Windows 动态端口池的 `45432`，不会回写秘密。
 - RTSS 映射可用但没有新鲜帧源时显示正常等待，不把 Wallpaper 的 GPU 负载误报成采集异常；状态缺失、数据过期或 RTSS/PresentMon 均不可用时才显示异常。
 - DPC 显示值来自 Windows `Processor Information(_Total)\% DPC Time`，不是合成的调度延迟指标。
 - 物理磁盘会按其盘符合并；名称为 `RECOVER` 的卷、虚拟盘、RAM 盘，以及小于 `32,000,000,000` 字节的 USB/可移动介质会被排除。

@@ -39,7 +39,7 @@ function Test-PythonModules {
 function Find-Python {
     $requiresTimeAudit = (
         -not [string]::IsNullOrWhiteSpace($env:TIMEAUDIT_DSN) -or
-        -not [string]::IsNullOrWhiteSpace($env:TIMEAUDIT_DB_PASSWORD)
+        (-not [string]::IsNullOrWhiteSpace($env:TIMEAUDIT_DB_PASSWORD) -and -not [string]::IsNullOrWhiteSpace($env:TIMEAUDIT_DB_USER))
     )
     $requiredModules = if ($requiresTimeAudit) { @("psutil", "asyncpg") } else { @() }
     $command = Get-Command python -ErrorAction SilentlyContinue
@@ -80,7 +80,7 @@ $python = Find-Python
 if ([string]::IsNullOrWhiteSpace($python)) {
     if (
         [string]::IsNullOrWhiteSpace($env:TIMEAUDIT_DSN) -and
-        [string]::IsNullOrWhiteSpace($env:TIMEAUDIT_DB_PASSWORD)
+        ([string]::IsNullOrWhiteSpace($env:TIMEAUDIT_DB_PASSWORD) -or [string]::IsNullOrWhiteSpace($env:TIMEAUDIT_DB_USER))
     ) {
         $missing.Add("python")
     } else {

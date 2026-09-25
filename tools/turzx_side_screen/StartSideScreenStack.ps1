@@ -149,7 +149,7 @@ function Test-PythonModules {
 function Find-Python {
     $requiresTimeAudit = (
         -not [string]::IsNullOrWhiteSpace($env:TIMEAUDIT_DSN) -or
-        -not [string]::IsNullOrWhiteSpace($env:TIMEAUDIT_DB_PASSWORD)
+        (-not [string]::IsNullOrWhiteSpace($env:TIMEAUDIT_DB_PASSWORD) -and -not [string]::IsNullOrWhiteSpace($env:TIMEAUDIT_DB_USER))
     )
     $requiredModules = if ($requiresTimeAudit) { @("psutil", "asyncpg") } else { @() }
     $cmd = Get-Command python -ErrorAction SilentlyContinue
@@ -210,7 +210,7 @@ Stop-ProcessByCommandLine -NamePattern "TURZX.SideScreen.Stream.exe" -CommandPat
 $python = Find-Python
 Write-StackLog ("python selected path={0} timeauditModulesRequired={1}" -f $python, (
     -not [string]::IsNullOrWhiteSpace($env:TIMEAUDIT_DSN) -or
-    -not [string]::IsNullOrWhiteSpace($env:TIMEAUDIT_DB_PASSWORD)
+    (-not [string]::IsNullOrWhiteSpace($env:TIMEAUDIT_DB_PASSWORD) -and -not [string]::IsNullOrWhiteSpace($env:TIMEAUDIT_DB_USER))
 ))
 $weatherShim = Join-Path $Root "tools\turzx_weather_shim\turzx_weather_shim.py"
 $weatherDir = Split-Path -Parent $weatherShim
