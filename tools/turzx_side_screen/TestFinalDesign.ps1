@@ -1,3 +1,9 @@
+param(
+    # Regular regression checks only the design source. The PNG preview
+    # needs a local headless browser and is opt-in.
+    [switch]$RenderPreview
+)
+
 $ErrorActionPreference = "Stop"
 
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -41,9 +47,18 @@ $chromeCandidates = @(
 )
 
 $browser = $chromeCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
-if ($browser) {
+if ($RenderPreview -and $browser) {
     $svgUrl = "file:///" + ($svg -replace "\\", "/")
-    & $browser --headless=new --disable-gpu --hide-scrollbars "--screenshot=$png" --window-size=480,1920 $svgUrl | Out-Null
+    # A private profile keeps the headless render away from any running browser session.
+    $profileDir = Join-Path ([IO.Path]::GetTempPath()) ("turzx-final-design-" + [guid]::NewGuid().ToString("N"))
+    try {
+        & $browser --headless=new --disable-gpu --hide-scrollbars "--user-data-dir=$profileDir" "--screenshot=$png" --window-size=480,1920 $svgUrl | Out-Null
+    }
+    finally {
+        if (Test-Path -LiteralPath $profileDir) {
+            Remove-Item -LiteralPath $profileDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
     if (!(Test-Path -LiteralPath $png)) {
         throw "Failed to render PNG: $png"
     }

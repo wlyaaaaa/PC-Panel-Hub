@@ -85,8 +85,7 @@ try {
         "tools/hs2_crystal_overlay/Publish-HS2Task.ps1",
         "tools/hs2_crystal_overlay/src/HS2.CrystalOverlay/HS2.CrystalOverlay.csproj",
         "tools/hs2_crystal_overlay/src/HS2.CrystalOverlay.Core/HS2.CrystalOverlay.Core.csproj",
-        "tools/hs2_crystal_overlay/tests/HS2.CrystalOverlay.Tests/HS2.CrystalOverlay.Tests.csproj",
-        "tools/hs2_crystal_overlay/tests/HS2.CrystalOverlay.Tests/ImportantTaskPipeServerTests.cs"
+        "tools/hs2_crystal_overlay/tests/HS2.CrystalOverlay.Tests/HS2.CrystalOverlay.Tests.csproj"
     )
     foreach ($requiredEntry in $requiredEntries) {
         if ($entries -notcontains $requiredEntry) {

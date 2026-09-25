@@ -160,7 +160,7 @@ Get-ScheduledTask | Where-Object { $_.TaskName -like '*TURZX*' } |
   Select-Object TaskName,State,@{Name='RunLevel';Expression={$_.Principal.RunLevel}}
 ```
 
-常规入口包含协议编码、HS2 .NET 核心、指标采集、启动策略与渲染测试，不接触实体串口。源码发布包只取 Git 已跟踪文件集合，使用当前工作树内容；未提交的已跟踪修改仍需在发布前审阅，未跟踪笔记不会进入包。
+常规入口包含协议编码、HS2 .NET 核心、指标采集、启动策略与渲染测试，以及设计稿校验和差分探针干跑（后者要借用本机的 TURZX 厂商程序集转换帧，公开检出没有该程序集时显示 SKIP），均不接触实体串口。设计稿 PNG 预览需要本机无头浏览器，只在显式 `TestFinalDesign.ps1 -RenderPreview` 时生成。源码发布包只取 Git 已跟踪文件集合，使用当前工作树内容；未提交的已跟踪修改仍需在发布前审阅，未跟踪笔记不会进入包。
 
 `-IntervalMs 3000` 控制全帧兼容周期；启用混合模式时生产周期固定为 1 Hz。`start.ps1` 与安装器可用 `-FullFrame` 显式选择全帧模式，兼容直接 PowerShell 调用的 `-HybridRefresh:$false`。快速修复入口维持既有 1 Hz 混合模式。
 

@@ -85,8 +85,24 @@ if ($LASTEXITCODE -ne 0) { throw "HS2.CrystalOverlay.Tests failed" }
 powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $side "TestRenderer.ps1")
 if ($LASTEXITCODE -ne 0) { throw "TestRenderer.ps1 failed" }
 
+powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $side "TestFinalDesign.ps1")
+if ($LASTEXITCODE -ne 0) { throw "TestFinalDesign.ps1 failed" }
+
+# Runs TestSideScreenApp.ps1 first (sample render, no device), then the HTTP path.
 powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $side "TestHttpPipeline.ps1")
 if ($LASTEXITCODE -ne 0) { throw "TestHttpPipeline.ps1 failed" }
+
+# The diff probe dry run converts frames through the local vendor assembly,
+# which the public checkout does not ship; it never opens the serial port.
+$vendorAssembly = @("TURZX.weatherfix.metrics.exe", "TURZX.exe") |
+    Where-Object { Test-Path -LiteralPath (Join-Path $Root $_) -PathType Leaf } |
+    Select-Object -First 1
+if ($vendorAssembly) {
+    powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $side "TestDiffProbe.ps1") -Root $Root
+    if ($LASTEXITCODE -ne 0) { throw "TestDiffProbe.ps1 failed" }
+} else {
+    Write-Host "SKIP TestDiffProbe.ps1 because no local TURZX vendor assembly is present under $Root"
+}
 
 powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $side "TestPowerWatchdog.ps1") -Root $Root
 if ($LASTEXITCODE -ne 0) { throw "TestPowerWatchdog.ps1 failed" }
