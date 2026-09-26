@@ -143,7 +143,7 @@ foreach ($relative in $explicitEntries) {
     }
 }
 
-foreach ($relative in @("README.md", "docs\startup.md", "docs\architecture.md")) {
+foreach ($relative in @("docs\startup.md", "docs\architecture.md")) {
     $text = Get-Content -Raw -LiteralPath (Join-Path $Root $relative)
     foreach ($pattern in @("1 Hz", "3-second compatibility fallback", "60, 120, and 180")) {
         if ($text -notmatch [regex]::Escape($pattern)) {

@@ -26,6 +26,14 @@ Historical local evidence: the private, untracked probe `tools\turzx_protocol_pr
 
 Not implemented in the reusable v1 protocol layer:
 
+The vendor assembly's readable method path contains command `204`, but the
+payload and sequence layout are not a verified public protocol. Earlier
+full-frame observations measured about 2.35 seconds for a 3,686,400-byte frame,
+which is why one-second operation uses a bounded device-specific hybrid path.
+Host writes and heartbeat success cannot prove that the display accepted the
+frame. A failed delta exits the writer; the watchdog reopens the session and
+the installed path periodically repeats a verified full-frame baseline.
+
 - Command `204` differential/partial refresh. `TurzxProtocolProbe.cs` did not verify a
   reusable payload contract, so `WriteDifferentialFrame` intentionally throws
   `NotSupportedException`. The separate device-specific HybridRefresh wrapper is an

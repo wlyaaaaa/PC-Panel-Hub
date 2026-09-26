@@ -51,6 +51,25 @@ PC Panel Hub is intentionally split into small local processes:
    - Treats a real HTTP response as metrics health. A stale process-table entry
      cannot suppress replacement; startup waits for port `18765` to release.
 
+## Narrow telemetry interface
+
+The metrics service also serves `GET /public-telemetry` as
+`turzx.public-telemetry.v1`. It reuses the existing sampler rather than building
+another snapshot or collection loop. The response is limited to network probe
+quality and Windows DPC time; it excludes probe targets, interface names,
+foreground applications, processes, accounts and raw errors. The existing
+`/snapshot` contract remains intact.
+
+`latency_ms` is the latest probe round trip. `packet_loss_percent` covers at
+most 15 recent attempts; attempt/success counts and window timestamps describe
+the actual sample. `jitter_ms` averages adjacent successful round trips from
+at most 15 successes and is null with fewer than two successes. A timeout or
+missing tool is a failed probe, not proof of the underlying cause. Network data
+keeps its 2-second asynchronous TTL and can report connecting, stale or
+unavailable without rewriting the old observation time. DPC usage is the
+Windows `% DPC Time` counter, not scheduling latency; unreadable values and
+their timestamps are null.
+
 ## Data Freshness
 
 - Main metrics sampling target: `1000ms`. Sources that are too expensive or inherently

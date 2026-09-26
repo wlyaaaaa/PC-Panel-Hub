@@ -1,5 +1,27 @@
 # Startup Task
 
+## Local configuration
+
+Copy `tools/turzx_side_screen/config.example.json` to the ignored
+`config.json` in the same directory. Set the actual serial port, physical
+public-egress interface and weather coordinates there. Without weather
+coordinates, the weather adapter reports unavailable rather than assuming a
+location. An explicit `-Port` overrides `serial.port`; `COM7` is only the
+compatibility default. The public checkout also needs the local vendor
+`RJCP.SerialPortStream.dll` and either `TURZX.exe` or
+`TURZX.weatherfix.metrics.exe` alongside the repository root.
+
+Run `scripts/check-runtime.ps1` for dependency diagnostics. Manual launch is
+`start-side-screen.cmd`; `scripts/repair-panel.ps1` checks the exact device,
+reclaims the single serial writer and waits for a fresh host heartbeat.
+For HS2 Code 43, `scripts/repair-hs2.ps1` checks the saved topology;
+administrator `-Apply` is the separate hardware recovery action.
+
+FPS is optional TimeAudit data. Supply `TIMEAUDIT_DSN`, or both
+`TIMEAUDIT_DB_USER` and `TIMEAUDIT_DB_PASSWORD` in the local environment;
+missing credentials leave that source unavailable. The panel reads this source
+only and does not store the database password.
+
 The recommended startup path is a Windows Scheduled Task:
 
 - Task name: `TURZX SideScreen`
