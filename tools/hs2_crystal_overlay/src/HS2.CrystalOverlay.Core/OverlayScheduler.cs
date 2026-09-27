@@ -54,13 +54,13 @@ public sealed class OverlayScheduler
             return false;
         }
 
-        var usesVisibleTimer = UsesVisibleTimer(request, policy);
+        var usesVisibleTimer = UsesVisibleTimer(policy);
         var existingItem = items.GetValueOrDefault(request.EventId);
         var existingTimer = visibleTimers.GetValueOrDefault(request.EventId);
         var preservesVisibleTimer =
             usesVisibleTimer &&
             existingItem is not null &&
-            UsesVisibleTimer(existingItem.Request, existingItem.Policy) &&
+            UsesVisibleTimer(existingItem.Policy) &&
             existingTimer is not null &&
             IsSameVisibleOccurrence(existingItem.Request, request);
         var preservesOrderingIdentity =
@@ -68,11 +68,6 @@ public sealed class OverlayScheduler
             existingItem.Request.Kind == request.Kind &&
             existingItem.Request.Source == request.Source &&
             (!usesVisibleTimer || preservesVisibleTimer);
-        DateTimeOffset? expiresAt =
-            policy.Lifetime == OverlayLifetime.Timed &&
-            !usesVisibleTimer
-                ? now + policy.Duration!.Value
-                : null;
         var publishSequence = preservesOrderingIdentity
             ? existingItem!.PublishSequence
             : ++nextPublishSequence;
@@ -83,7 +78,7 @@ public sealed class OverlayScheduler
             preservesOrderingIdentity
                 ? existingItem!.PublishedAt
                 : now,
-            expiresAt,
+            null,
             publishSequence);
 
         if (usesVisibleTimer)
@@ -270,19 +265,7 @@ public sealed class OverlayScheduler
     {
         foreach (var eventId in items
                      .Where(pair =>
-                         pair.Value.ExpiresAt is not null &&
-                         pair.Value.ExpiresAt <= now)
-                     .Select(pair => pair.Key)
-                     .ToArray())
-        {
-            RemoveItem(eventId);
-        }
-
-        foreach (var eventId in items
-                     .Where(pair =>
-                         UsesVisibleTimer(
-                             pair.Value.Request,
-                             pair.Value.Policy) &&
+                         UsesVisibleTimer(pair.Value.Policy) &&
                          !IsStackedNotification(pair.Value.Policy) &&
                          now - pair.Value.PublishedAt >=
                              MaximumQueuedDeferredCardAge)
@@ -476,22 +459,15 @@ public sealed class OverlayScheduler
     private static bool IsDismissible(OverlayKind kind) =>
         kind is
             OverlayKind.MediaTrackChange or
-            OverlayKind.GameAchievement or
             OverlayKind.GameSummary or
-            OverlayKind.SystemOperation or
             OverlayKind.DeviceOrNetwork or
-            OverlayKind.ImportantTaskComplete or
-            OverlayKind.HardwareResolved or
             OverlayKind.PhoneConnection or
             OverlayKind.PhoneNotification or
             OverlayKind.PhoneDynamic or
             OverlayKind.PhoneVerificationCode;
 
-    private static bool UsesVisibleTimer(
-        OverlayRequest request,
-        OverlayPresentationPolicy policy) =>
-        policy.Lifetime == OverlayLifetime.Timed &&
-        request.Kind != OverlayKind.SystemOperation;
+    private static bool UsesVisibleTimer(OverlayPresentationPolicy policy) =>
+        policy.Lifetime == OverlayLifetime.Timed;
 
     private static bool IsSameVisibleOccurrence(
         OverlayRequest previous,

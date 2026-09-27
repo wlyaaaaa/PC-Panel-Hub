@@ -89,16 +89,7 @@ internal sealed class CrystalCardWindow : IDisposable
                 target.Height,
                 item.Policy.VisualTier ==
                 OverlayVisualTier.StackedNotification);
-            if (item.Request.Kind == OverlayKind.SystemOperation &&
-                item.Request.Visual?.AudioIcon is not null)
-            {
-                DrawAudioHud(
-                    graphics,
-                    item,
-                    target.Width,
-                    target.Height);
-            }
-            else if (item.Request.Kind ==
+            if (item.Request.Kind ==
                      OverlayKind.PhoneVerificationCode)
             {
                 DrawVerificationCode(
@@ -222,16 +213,9 @@ internal sealed class CrystalCardWindow : IDisposable
         DateTimeOffset now)
     {
         var visual = item.Request.Visual;
-        var marqueeProgress = visual?.MarqueeProgress ??
-            AmbientMarqueeProgress(now);
+        var marqueeProgress = AmbientMarqueeProgress(now);
         var expanded = item.Request.Kind == OverlayKind.MediaTrackChange;
-        var identityOnly =
-            string.IsNullOrWhiteSpace(item.Request.Body) &&
-            visual?.Progress is null &&
-            string.IsNullOrWhiteSpace(visual?.Meta);
-        var padding = identityOnly
-            ? expanded ? 30f : 24f
-            : expanded ? 42f : 32f;
+        var padding = expanded ? 30f : 24f;
         var contentX = padding;
         var artworkSize = height - padding * 2;
         if (TryDrawArtwork(
@@ -246,16 +230,12 @@ internal sealed class CrystalCardWindow : IDisposable
         var accent = ParseColor(
             visual?.AccentHex,
             Color.FromArgb(244, 137, 247, 255));
-        var titleTop = identityOnly
-            ? expanded ? 32f : 28f
-            : expanded ? 18f : 12f;
+        var titleTop = expanded ? 32f : 28f;
         using var dot = new SolidBrush(accent);
         graphics.FillEllipse(
             dot,
             contentX,
-            identityOnly
-                ? titleTop + (expanded ? 16 : 12)
-                : expanded ? 36 : 27,
+            titleTop + (expanded ? 16 : 12),
             expanded ? 11 : 9,
             expanded ? 11 : 9);
         contentX += expanded ? 23 : 20;
@@ -305,9 +285,7 @@ internal sealed class CrystalCardWindow : IDisposable
                 subtitle,
                 new RectangleF(
                     contentX,
-                    identityOnly
-                        ? titleTop + (expanded ? 64 : 62)
-                        : expanded ? 72 : 58,
+                    titleTop + (expanded ? 64 : 62),
                     right - contentX,
                     expanded ? 43 : 38),
                 expanded ? 34 : 32,
@@ -316,99 +294,6 @@ internal sealed class CrystalCardWindow : IDisposable
                 Color.FromArgb(225, 224, 246, 249));
         }
 
-        if (!string.IsNullOrWhiteSpace(item.Request.Body))
-        {
-            var hasTranslation =
-                !string.IsNullOrWhiteSpace(visual?.SecondaryBody);
-            DrawScrollingText(
-                graphics,
-                item.Request.Body!,
-                new RectangleF(
-                    contentX,
-                    expanded ? 105 : 78,
-                    right - contentX,
-                    expanded
-                        ? (hasTranslation ? 68 : 108)
-                        : (hasTranslation ? 50 : 80)),
-                expanded ? 47 : 39,
-                FontStyle.Bold,
-                Color.FromArgb(250, 255, 255, 255),
-                marqueeProgress);
-            if (hasTranslation)
-            {
-                DrawScrollingText(
-                    graphics,
-                    visual!.SecondaryBody!,
-                    new RectangleF(
-                        contentX,
-                        expanded ? 174 : 126,
-                        right - contentX,
-                        expanded ? 43 : 32),
-                    expanded ? 27 : 23,
-                    FontStyle.Regular,
-                    Color.FromArgb(230, 213, 247, 250),
-                    marqueeProgress);
-            }
-        }
-
-        var hasTimeline = visual?.Progress is not null ||
-                          !string.IsNullOrWhiteSpace(visual?.Meta);
-        if (hasTimeline)
-        {
-            var progressY = height - (expanded ? 39 : 36);
-            var metaWidth = string.IsNullOrWhiteSpace(visual?.Meta)
-                ? 0f
-                : Math.Min(300, width * 0.31f);
-            var progressRight =
-                right - metaWidth - (metaWidth > 0 ? 24 : 0);
-            using var timeline = new Pen(
-                Color.FromArgb(54, 224, 252, 255),
-                2.2f)
-            {
-                StartCap = LineCap.Round,
-                EndCap = LineCap.Round,
-            };
-            graphics.DrawLine(
-                timeline,
-                contentX,
-                progressY,
-                progressRight,
-                progressY);
-            if (visual?.Progress is not null)
-            {
-                var ratio = (float)Math.Clamp(
-                    visual.Progress.Value,
-                    0,
-                    1);
-                using var progress = new Pen(accent, 3.1f)
-                {
-                    StartCap = LineCap.Round,
-                    EndCap = LineCap.Round,
-                };
-                graphics.DrawLine(
-                    progress,
-                    contentX,
-                    progressY,
-                    contentX + (progressRight - contentX) * ratio,
-                    progressY);
-            }
-
-            if (metaWidth > 0)
-            {
-                DrawText(
-                    graphics,
-                    visual!.Meta!,
-                    new RectangleF(
-                        right - metaWidth,
-                        progressY - 22,
-                        metaWidth,
-                        38),
-                    expanded ? 21 : 19,
-                    FontStyle.Regular,
-                    Color.FromArgb(220, 230, 244, 247),
-                    StringAlignment.Far);
-            }
-        }
     }
 
     private static void DrawPhoneNotification(
@@ -611,113 +496,6 @@ internal sealed class CrystalCardWindow : IDisposable
             StringAlignment.Center);
     }
 
-    private static void DrawAudioHud(
-        Graphics graphics,
-        OverlayItem item,
-        int width,
-        int height)
-    {
-        var icon = item.Request.Visual?.AudioIcon ??
-                   AudioHudIcon.Silent;
-        var accent = ParseColor(
-            item.Request.Visual?.AccentHex,
-            Color.FromArgb(244, 156, 231, 255));
-        var narrow = width < 900;
-        var iconSize = Math.Clamp(
-            height * (narrow ? 0.48f : 0.52f),
-            78f,
-            122f);
-        var left = narrow ? 42f : 54f;
-        var iconBounds = new RectangleF(
-            left,
-            (height - iconSize) / 2f,
-            iconSize,
-            iconSize);
-        DrawAudioIcon(graphics, iconBounds, icon, accent);
-
-        var textLeft = iconBounds.Right + (narrow ? 30f : 42f);
-        DrawFittedText(
-            graphics,
-            item.Request.Title,
-            new RectangleF(
-                textLeft,
-                20,
-                Math.Max(1, width - textLeft - left),
-                height - 40),
-            narrow ? 76f : 88f,
-            narrow ? 58f : 68f,
-            FontStyle.Bold,
-            Color.FromArgb(252, 244, 255, 251));
-    }
-
-    private static void DrawAudioIcon(
-        Graphics graphics,
-        RectangleF bounds,
-        AudioHudIcon icon,
-        Color accent)
-    {
-        using var fill = new SolidBrush(accent);
-        using var path = new GraphicsPath();
-        path.AddPolygon(
-        [
-            new PointF(bounds.Left + bounds.Width * 0.08f,
-                bounds.Top + bounds.Height * 0.39f),
-            new PointF(bounds.Left + bounds.Width * 0.30f,
-                bounds.Top + bounds.Height * 0.39f),
-            new PointF(bounds.Left + bounds.Width * 0.54f,
-                bounds.Top + bounds.Height * 0.17f),
-            new PointF(bounds.Left + bounds.Width * 0.54f,
-                bounds.Top + bounds.Height * 0.83f),
-            new PointF(bounds.Left + bounds.Width * 0.30f,
-                bounds.Top + bounds.Height * 0.61f),
-            new PointF(bounds.Left + bounds.Width * 0.08f,
-                bounds.Top + bounds.Height * 0.61f),
-        ]);
-        graphics.FillPath(fill, path);
-
-        using var pen = new Pen(
-            accent,
-            Math.Max(4f, bounds.Width * 0.052f))
-        {
-            StartCap = LineCap.Round,
-            EndCap = LineCap.Round,
-        };
-        if (icon == AudioHudIcon.Muted)
-        {
-            graphics.DrawLine(
-                pen,
-                bounds.Left + bounds.Width * 0.66f,
-                bounds.Top + bounds.Height * 0.35f,
-                bounds.Left + bounds.Width * 0.92f,
-                bounds.Top + bounds.Height * 0.65f);
-            graphics.DrawLine(
-                pen,
-                bounds.Left + bounds.Width * 0.92f,
-                bounds.Top + bounds.Height * 0.35f,
-                bounds.Left + bounds.Width * 0.66f,
-                bounds.Top + bounds.Height * 0.65f);
-            return;
-        }
-
-        var waveCount = icon switch
-        {
-            AudioHudIcon.Low => 1,
-            AudioHudIcon.Medium => 2,
-            AudioHudIcon.High => 3,
-            _ => 0,
-        };
-        for (var wave = 0; wave < waveCount; wave++)
-        {
-            var inset = bounds.Width * (0.27f - wave * 0.09f);
-            var arcBounds = new RectangleF(
-                bounds.Left + bounds.Width * 0.44f - inset,
-                bounds.Top + inset,
-                bounds.Width * 0.55f + inset * 2,
-                bounds.Height - inset * 2);
-            graphics.DrawArc(pen, arcBounds, -48, 96);
-        }
-    }
-
     private static void DrawEvent(
         Graphics graphics,
         OverlayItem item,
@@ -727,13 +505,8 @@ internal sealed class CrystalCardWindow : IDisposable
         var visual = item.Request.Visual;
         var compact = item.Request.Kind is
             OverlayKind.GameActive or
-            OverlayKind.ImportantTask or
-            OverlayKind.ImportantTaskComplete or
-            OverlayKind.HardwareResolved or
-            OverlayKind.SystemOperation or
             OverlayKind.DeviceOrNetwork;
         var operation = item.Request.Kind is
-            OverlayKind.SystemOperation or
             OverlayKind.DeviceOrNetwork;
         var narrow = width < 900;
         var padding = compact ? 40f : 50f;
@@ -761,8 +534,6 @@ internal sealed class CrystalCardWindow : IDisposable
             StringAlignment.Far);
 
         var titleTop = operation ? 48f : compact ? 70f : 84f;
-        var hasProgress = visual?.Progress is not null;
-        var progressY = height - 64f;
         var operationTitleHeight = Math.Clamp(
             height * 0.38f,
             62f,
@@ -795,9 +566,7 @@ internal sealed class CrystalCardWindow : IDisposable
             var bottomReserve = string.IsNullOrWhiteSpace(visual?.Meta)
                 ? operation ? 10f : 16f
                 : compact ? 58f : 68f;
-            var bodyHeight = hasProgress
-                ? Math.Max(0, progressY - bodyTop - 15)
-                : Math.Max(0, height - bodyTop - bottomReserve);
+            var bodyHeight = Math.Max(0, height - bodyTop - bottomReserve);
             var bodyBounds = new RectangleF(
                 padding,
                 bodyTop,
@@ -827,36 +596,6 @@ internal sealed class CrystalCardWindow : IDisposable
                     FontStyle.Bold,
                     bodyColor);
             }
-        }
-
-        if (visual?.Progress is not null)
-        {
-            var ratio =
-                (float)Math.Clamp(visual.Progress.Value, 0, 1);
-            using var track = new Pen(
-                Color.FromArgb(74, 224, 252, 255),
-                3.2f)
-            {
-                StartCap = LineCap.Round,
-                EndCap = LineCap.Round,
-            };
-            graphics.DrawLine(
-                track,
-                padding,
-                progressY,
-                width - padding,
-                progressY);
-            using var progress = new Pen(accent, 5.2f)
-            {
-                StartCap = LineCap.Round,
-                EndCap = LineCap.Round,
-            };
-            graphics.DrawLine(
-                progress,
-                padding,
-                progressY,
-                padding + (width - padding * 2) * ratio,
-                progressY);
         }
 
         if (!string.IsNullOrWhiteSpace(visual?.Meta))
@@ -1284,13 +1023,8 @@ internal sealed class CrystalCardWindow : IDisposable
         {
             OverlayKind.MediaActive => (Width: 820, Height: 176),
             OverlayKind.GameActive => (Width: 980, Height: 240),
-            OverlayKind.ImportantTask => (Width: 980, Height: 290),
-            OverlayKind.ImportantTaskComplete => (Width: 980, Height: 290),
-            OverlayKind.HardwareResolved => (Width: 980, Height: 240),
-            OverlayKind.SystemOperation => (Width: 820, Height: 220),
             OverlayKind.DeviceOrNetwork => (Width: 940, Height: 260),
             OverlayKind.MediaTrackChange => (Width: 940, Height: 210),
-            OverlayKind.GameAchievement => (Width: 1180, Height: 380),
             OverlayKind.GameSummary => (Width: 1180, Height: 400),
             OverlayKind.PhoneVerificationCode =>
                 (Width: 860, Height: 220),
@@ -1422,14 +1156,8 @@ internal sealed class CrystalCardWindow : IDisposable
     {
         OverlayKind.Glance => "抬眼总览",
         OverlayKind.GameActive => "游戏进行中",
-        OverlayKind.GameAchievement => "成就已解锁",
         OverlayKind.GameSummary => "本次游戏",
-        OverlayKind.SystemOperation => "系统操作",
         OverlayKind.DeviceOrNetwork => "设备状态",
-        OverlayKind.ImportantTask => "重要任务",
-        OverlayKind.ImportantTaskComplete => "任务已完成",
-        OverlayKind.HardwareAlert => "硬件告警",
-        OverlayKind.HardwareResolved => "告警已恢复",
         OverlayKind.PhoneConnection => "手机连接",
         OverlayKind.PhoneNotification => "手机通知",
         OverlayKind.PhoneDynamic => "手机动态",
@@ -1445,9 +1173,6 @@ internal sealed class CrystalCardWindow : IDisposable
         OverlaySource.Steam => "STEAM",
         OverlaySource.XiaomiHyperConnect => "小米妙享",
         OverlaySource.PhoneLink => "手机连接",
-        OverlaySource.Hardware => "TURZX",
-        OverlaySource.Task => "任务 / TASK",
-        OverlaySource.Game => "游戏 / GAME",
         _ => "WINDOWS",
     };
 

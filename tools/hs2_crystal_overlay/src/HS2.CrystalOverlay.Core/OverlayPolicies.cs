@@ -26,22 +26,10 @@ public static class OverlayPolicies
                 OverlayVisualTier.Crystal, 8, 610, Normal),
             [OverlayKind.GameActive] = Active(
                 OverlayVisualTier.Crystal, 180, Normal),
-            [OverlayKind.GameAchievement] = Timed(
-                OverlayVisualTier.Crystal, 12, 620, Normal),
             [OverlayKind.GameSummary] = Timed(
                 OverlayVisualTier.Crystal, 60, 600, Normal),
-            [OverlayKind.SystemOperation] = Timed(
-                OverlayVisualTier.Crystal, 6, 640, Normal),
             [OverlayKind.DeviceOrNetwork] = Timed(
                 OverlayVisualTier.Crystal, 12, 650, Normal),
-            [OverlayKind.ImportantTask] = Active(
-                OverlayVisualTier.Crystal, 700, Normal),
-            [OverlayKind.ImportantTaskComplete] = Timed(
-                OverlayVisualTier.Crystal, 15, 710, Normal),
-            [OverlayKind.HardwareAlert] = Active(
-                OverlayVisualTier.Emphasis, 1000, Critical),
-            [OverlayKind.HardwareResolved] = Timed(
-                OverlayVisualTier.Crystal, 10, 990, Normal),
             [OverlayKind.PhoneBattery] = Active(
                 OverlayVisualTier.Direct, 50, Ambient),
             [OverlayKind.PhoneConnection] = Timed(
@@ -73,15 +61,13 @@ public static class OverlayPolicies
         OverlayVisualTier tier,
         int seconds,
         int priority,
-        TypographyScale typography,
-        bool canPin = false) =>
+        TypographyScale typography) =>
         new(
             tier,
             OverlayLifetime.Timed,
             TimeSpan.FromSeconds(seconds),
             priority,
-            typography,
-            canPin);
+            typography);
 
     private static OverlayPresentationPolicy Active(
         OverlayVisualTier tier,

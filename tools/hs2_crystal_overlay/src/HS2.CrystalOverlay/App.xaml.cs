@@ -14,13 +14,11 @@ public partial class App : Application
     private OverlayController? controller;
     private PhoneBatterySourceCoordinator? phoneBattery;
     private MediaSessionSource? media;
-    private HardwareAlertSourceCoordinator? hardwareAlerts;
     private GlanceSourceCoordinator? glance;
     private SteamGameSourceCoordinator? steamGames;
-    private AudioOperationSourceCoordinator? audioOperations;
-    private DeviceNetworkSourceCoordinator? deviceNetwork;
+    private AudioDeviceSourceCoordinator? audioDevices;
+    private NetworkSourceCoordinator? deviceNetwork;
     private PhoneNotificationSourceCoordinator? phoneNotifications;
-    private ImportantTaskSourceCoordinator? importantTasks;
     private GlobalHotkeyCoordinator? hotkeys;
     private bool runtimeDisposed;
 
@@ -61,52 +59,17 @@ public partial class App : Application
             new DirectOverlayWindow(),
             placement);
 
-        var activationArguments = string.IsNullOrWhiteSpace(args.Arguments)
-            ? []
-            : args.Arguments.Split(
-                ' ',
-                StringSplitOptions.RemoveEmptyEntries |
-                StringSplitOptions.TrimEntries);
-        var demoArgument = Environment.GetCommandLineArgs()
-            .Skip(1)
-            .Concat(activationArguments)
-            .FirstOrDefault(argument =>
-                string.Equals(
-                    argument,
-                    "--demo",
-                    StringComparison.OrdinalIgnoreCase) ||
-                argument.StartsWith(
-                    "--demo=",
-                    StringComparison.OrdinalIgnoreCase));
         glance = new GlanceSourceCoordinator(controller);
         hotkeys = new GlobalHotkeyCoordinator(
             window.DispatcherQueue,
             controller.ClearDismissible,
             glance.Toggle);
-        if (demoArgument is not null)
-        {
-            var separator = demoArgument.IndexOf('=');
-            var scenario = separator < 0
-                ? "full"
-                : demoArgument[(separator + 1)..];
-            DemoSource.Publish(controller, scenario);
-        }
-        else
-        {
-            phoneBattery = new PhoneBatterySourceCoordinator(controller);
-            media = new MediaSessionSource(controller);
-            hardwareAlerts =
-                new HardwareAlertSourceCoordinator(controller);
-            steamGames = new SteamGameSourceCoordinator(controller);
-            audioOperations =
-                new AudioOperationSourceCoordinator(controller);
-            deviceNetwork =
-                new DeviceNetworkSourceCoordinator(controller);
-            phoneNotifications =
-                new PhoneNotificationSourceCoordinator(controller);
-            importantTasks =
-                new ImportantTaskSourceCoordinator(controller);
-        }
+        phoneBattery = new PhoneBatterySourceCoordinator(controller);
+        media = new MediaSessionSource(controller);
+        steamGames = new SteamGameSourceCoordinator(controller);
+        audioDevices = new AudioDeviceSourceCoordinator(controller);
+        deviceNetwork = new NetworkSourceCoordinator(controller);
+        phoneNotifications = new PhoneNotificationSourceCoordinator(controller);
 
         if (foreground != 0)
         {
@@ -123,12 +86,10 @@ public partial class App : Application
 
         runtimeDisposed = true;
         hotkeys?.Dispose();
-        importantTasks?.Dispose();
         phoneNotifications?.Dispose();
         deviceNetwork?.Dispose();
-        audioOperations?.Dispose();
+        audioDevices?.Dispose();
         steamGames?.Dispose();
-        hardwareAlerts?.Dispose();
         media?.Dispose();
         phoneBattery?.Dispose();
         glance?.Dispose();

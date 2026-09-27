@@ -82,7 +82,8 @@ try {
         "tools/turzx_weather_shim/turzx_weather_shim.py",
         "tools/turzx_weather_shim/start_turzx_weatherfix.ps1",
         "tools/hs2_crystal_overlay/HS2.CrystalOverlay.slnx",
-        "tools/hs2_crystal_overlay/Publish-HS2Task.ps1",
+        "tools/hs2_crystal_overlay/Publish-HS2Overlay.ps1",
+        "tools/hs2_crystal_overlay/Install-HS2Overlay.ps1",
         "tools/hs2_crystal_overlay/src/HS2.CrystalOverlay/HS2.CrystalOverlay.csproj",
         "tools/hs2_crystal_overlay/src/HS2.CrystalOverlay.Core/HS2.CrystalOverlay.Core.csproj",
         "tools/hs2_crystal_overlay/tests/HS2.CrystalOverlay.Tests/HS2.CrystalOverlay.Tests.csproj"

@@ -5,40 +5,17 @@ namespace HS2.CrystalOverlay.Tests;
 public sealed class NetworkConnectivityTests
 {
     [Theory]
-    [InlineData("connecting")]
-    [InlineData("stale")]
-    [InlineData("unavailable")]
-    [InlineData(null)]
-    public void TransientLatencyStatesAreUnknown(string? status)
+    [InlineData(true, true, NetworkConnectivityState.Online)]
+    [InlineData(true, false, NetworkConnectivityState.Online)]
+    [InlineData(false, true, NetworkConnectivityState.Offline)]
+    [InlineData(false, false, NetworkConnectivityState.Offline)]
+    [InlineData(null, false, NetworkConnectivityState.Offline)]
+    [InlineData(null, true, NetworkConnectivityState.Unknown)]
+    [InlineData(null, null, NetworkConnectivityState.Unknown)]
+    public void ClassifiesWindowsConnectivity(bool? internet, bool? adapter,
+        NetworkConnectivityState expected)
     {
-        Assert.Equal(
-            NetworkConnectivityState.Unknown,
-            NetworkConnectivityClassifier.Classify(
-                status,
-                hasInternetAccess: null,
-                hasNetworkInterface: true));
-    }
-
-    [Fact]
-    public void WindowsInternetEvidenceOverridesAStalePingSample()
-    {
-        Assert.Equal(
-            NetworkConnectivityState.Online,
-            NetworkConnectivityClassifier.Classify(
-                "stale",
-                hasInternetAccess: true,
-                hasNetworkInterface: true));
-    }
-
-    [Fact]
-    public void FailedPingAndNoWindowsInternetEvidenceIsOffline()
-    {
-        Assert.Equal(
-            NetworkConnectivityState.Offline,
-            NetworkConnectivityClassifier.Classify(
-                "unavailable",
-                hasInternetAccess: false,
-                hasNetworkInterface: true));
+        Assert.Equal(expected, NetworkConnectivityClassifier.Classify(internet, adapter));
     }
 
     [Fact]
@@ -87,24 +64,5 @@ public sealed class NetworkConnectivityTests
             tracker.Observe(NetworkConnectivityState.Online));
     }
 
-    [Fact]
-    public void TrackerCanConfirmAnOutagePresentAtStartup()
-    {
-        var tracker = new NetworkConnectivityTracker(
-            offlineConfirmationCount: 3,
-            reportInitialOffline: true);
 
-        Assert.Equal(
-            NetworkConnectivityTransition.None,
-            tracker.Observe(NetworkConnectivityState.Offline));
-        Assert.Equal(
-            NetworkConnectivityTransition.None,
-            tracker.Observe(NetworkConnectivityState.Offline));
-        Assert.Equal(
-            NetworkConnectivityTransition.Disconnected,
-            tracker.Observe(NetworkConnectivityState.Offline));
-        Assert.Equal(
-            NetworkConnectivityTransition.Restored,
-            tracker.Observe(NetworkConnectivityState.Online));
-    }
 }

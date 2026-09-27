@@ -8,39 +8,6 @@ public sealed class OverlaySchedulerTests
         new(2026, 7, 30, 12, 0, 0, TimeSpan.Zero);
 
     [Fact]
-    public void SameAudioHudEvent_UpdatesInPlaceAndExpiresFromTheLastChange()
-    {
-        var scheduler = new OverlayScheduler();
-        scheduler.Publish(
-            AudioHudProjection.Create(22, isMuted: false),
-            Now);
-        var original = Assert.Single(scheduler.GetFrame(
-            Now,
-            maxVisibleCards: 6,
-            maxVisibleNotifications: 3).VisibleCards);
-
-        scheduler.Publish(
-            AudioHudProjection.Create(100, isMuted: false),
-            Now.AddSeconds(2));
-        var updated = Assert.Single(scheduler.GetFrame(
-            Now.AddSeconds(2),
-            maxVisibleCards: 6,
-            maxVisibleNotifications: 3).VisibleCards);
-
-        Assert.Equal("100%", updated.Request.Title);
-        Assert.Equal(original.PublishedAt, updated.PublishedAt);
-        Assert.Equal(original.PublishSequence, updated.PublishSequence);
-        Assert.Single(scheduler.GetFrame(
-            Now.AddSeconds(7.9),
-            maxVisibleCards: 6,
-            maxVisibleNotifications: 3).VisibleCards);
-        Assert.Empty(scheduler.GetFrame(
-            Now.AddSeconds(8.1),
-            maxVisibleCards: 6,
-            maxVisibleNotifications: 3).VisibleCards);
-    }
-
-    [Fact]
     public void ReversedDeviceState_ReplacesOldCardAndGetsFreshVisibleTime()
     {
         var scheduler = new OverlayScheduler();
@@ -287,17 +254,17 @@ public sealed class OverlaySchedulerTests
             OverlaySource.NetEase,
             "Night Current"), Now);
         scheduler.Publish(OverlayRequest.Timed(
-            "volume",
-            OverlayKind.SystemOperation,
+            "audio-device",
+            OverlayKind.DeviceOrNetwork,
             OverlaySource.System,
-            "音量 42%"), Now.AddSeconds(1));
+            "耳机已连接"), Now.AddSeconds(1));
 
         Assert.Equal(
-            OverlayKind.SystemOperation,
+            OverlayKind.DeviceOrNetwork,
             scheduler.GetFrame(Now.AddSeconds(2)).PrimaryCard?.Request.Kind);
         Assert.Equal(
             OverlayKind.MediaActive,
-            scheduler.GetFrame(Now.AddSeconds(8)).PrimaryCard?.Request.Kind);
+            scheduler.GetFrame(Now.AddSeconds(15)).PrimaryCard?.Request.Kind);
     }
 
     [Fact]
@@ -713,18 +680,16 @@ public sealed class OverlaySchedulerTests
     }
 
     [Theory]
-    [InlineData(OverlayKind.ImportantTaskComplete, 15)]
     [InlineData(OverlayKind.DeviceOrNetwork, 12)]
-    [InlineData(OverlayKind.HardwareResolved, 10)]
     public void DeferredStatusCard_ReceivesFullVisibleTimeAfterPressureClears(
         OverlayKind kind,
         int visibleSeconds)
     {
         var scheduler = new OverlayScheduler();
         scheduler.Publish(OverlayRequest.Active(
-            "alert-1", OverlayKind.HardwareAlert, OverlaySource.Hardware, "告警 1"), Now);
+            "media", OverlayKind.MediaActive, OverlaySource.NetEase, "歌曲"), Now);
         scheduler.Publish(OverlayRequest.Active(
-            "alert-2", OverlayKind.HardwareAlert, OverlaySource.Hardware, "告警 2"), Now);
+            "game", OverlayKind.GameActive, OverlaySource.Steam, "游戏"), Now);
         scheduler.Publish(OverlayRequest.Active(
             "call-1", OverlayKind.PhoneCall, OverlaySource.PhoneLink, "来电 1"), Now);
         scheduler.Publish(OverlayRequest.Active(
@@ -737,11 +702,7 @@ public sealed class OverlaySchedulerTests
         scheduler.Publish(OverlayRequest.Timed(
             "deferred-status",
             kind,
-            kind == OverlayKind.ImportantTaskComplete
-                ? OverlaySource.Task
-                : kind == OverlayKind.HardwareResolved
-                    ? OverlaySource.Hardware
-                    : OverlaySource.System,
+            OverlaySource.System,
             "状态提示"), Now);
 
         Assert.DoesNotContain(
@@ -749,7 +710,7 @@ public sealed class OverlaySchedulerTests
             item => item.Request.EventId == "deferred-status");
 
         scheduler.Publish(OverlayRequest.End(
-            "alert-1", OverlayKind.HardwareAlert, OverlaySource.Hardware),
+            "media", OverlayKind.MediaActive, OverlaySource.NetEase),
             Now.AddSeconds(10));
         Assert.Contains(
             scheduler.GetFrame(Now.AddSeconds(10), 6, 3).VisibleCards,
@@ -773,18 +734,14 @@ public sealed class OverlaySchedulerTests
         scheduler.Publish(OverlayRequest.Active(
             "game", OverlayKind.GameActive, OverlaySource.Steam, "游戏"), Now);
         scheduler.Publish(OverlayRequest.Active(
-            "task", OverlayKind.ImportantTask, OverlaySource.Task, "传输任务"), Now);
-        scheduler.Publish(OverlayRequest.Active(
             "call", OverlayKind.PhoneCall, OverlaySource.PhoneLink, "妈妈来电"), Now);
         scheduler.Publish(OverlayRequest.Active(
             "transfer", OverlayKind.PhoneTransfer, OverlaySource.PhoneLink, "文件传输"), Now);
-        scheduler.Publish(OverlayRequest.Active(
-            "alert", OverlayKind.HardwareAlert, OverlaySource.Hardware, "温度告警"), Now);
         scheduler.Publish(OverlayRequest.Timed(
             "phone", OverlayKind.PhoneNotification, OverlaySource.PhoneLink,
             "微信", "午饭见"), Now);
         scheduler.Publish(OverlayRequest.Timed(
-            "volume", OverlayKind.SystemOperation, OverlaySource.System, "音量 42%"), Now);
+            "audio-device", OverlayKind.DeviceOrNetwork, OverlaySource.System, "耳机已连接"), Now);
         scheduler.Publish(OverlayRequest.Timed(
             "summary", OverlayKind.GameSummary, OverlaySource.Steam, "游戏总结"), Now);
 
@@ -798,12 +755,10 @@ public sealed class OverlaySchedulerTests
             .ToArray();
         Assert.Contains(OverlayKind.MediaActive, remainingKinds);
         Assert.Contains(OverlayKind.GameActive, remainingKinds);
-        Assert.Contains(OverlayKind.ImportantTask, remainingKinds);
-        Assert.Contains(OverlayKind.PhoneCall, remainingKinds);
         Assert.Contains(OverlayKind.PhoneTransfer, remainingKinds);
-        Assert.Contains(OverlayKind.HardwareAlert, remainingKinds);
+        Assert.Contains(OverlayKind.PhoneCall, remainingKinds);
         Assert.DoesNotContain(OverlayKind.PhoneNotification, remainingKinds);
-        Assert.DoesNotContain(OverlayKind.SystemOperation, remainingKinds);
+        Assert.DoesNotContain(OverlayKind.DeviceOrNetwork, remainingKinds);
         Assert.DoesNotContain(OverlayKind.GameSummary, remainingKinds);
 
         Assert.False(scheduler.Publish(OverlayRequest.Timed(
@@ -845,51 +800,6 @@ public sealed class OverlaySchedulerTests
             dedupKey: "network-restored"), Now.AddSeconds(3)));
     }
 
-    [Fact]
-    public void HardwareAlert_OutranksPhoneCall()
-    {
-        var scheduler = new OverlayScheduler();
-        scheduler.Publish(OverlayRequest.Active(
-            "call",
-            OverlayKind.PhoneCall,
-            OverlaySource.XiaomiHyperConnect,
-            "来电：张三"), Now);
-        scheduler.Publish(OverlayRequest.Active(
-            "pump",
-            OverlayKind.HardwareAlert,
-            OverlaySource.Hardware,
-            "水泵转速异常"), Now);
-
-        Assert.Equal(
-            OverlayKind.HardwareAlert,
-            scheduler.GetFrame(Now).PrimaryCard?.Request.Kind);
-    }
-
-    [Fact]
-    public void HardwareRecoveryCanReplaceSameEventAfterEarlierRecoveryWasDismissed()
-    {
-        var scheduler = new OverlayScheduler();
-        var recovered = OverlayRequest.Timed(
-            "hardware-alert",
-            OverlayKind.HardwareResolved,
-            OverlaySource.Hardware,
-            "硬件状态已恢复",
-            dedupKey: "resolved:pump-stopped");
-        Assert.True(scheduler.Publish(recovered, Now));
-        Assert.Equal(1, scheduler.ClearDismissible(Now.AddSeconds(1)));
-        Assert.True(scheduler.Publish(OverlayRequest.Active(
-            "hardware-alert",
-            OverlayKind.HardwareAlert,
-            OverlaySource.Hardware,
-            "水泵转速异常",
-            dedupKey: "pump-stopped"), Now.AddSeconds(2)));
-
-        Assert.True(scheduler.Publish(recovered, Now.AddSeconds(3)));
-        Assert.Equal(
-            OverlayKind.HardwareResolved,
-            scheduler.GetFrame(Now.AddSeconds(3))
-                .PrimaryCard?.Request.Kind);
-    }
 
     private static OverlayRequest VerificationCode(
         string code,

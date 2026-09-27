@@ -6,14 +6,8 @@ public enum OverlayKind
     MediaActive,
     MediaTrackChange,
     GameActive,
-    GameAchievement,
     GameSummary,
-    SystemOperation,
     DeviceOrNetwork,
-    ImportantTask,
-    ImportantTaskComplete,
-    HardwareAlert,
-    HardwareResolved,
     PhoneBattery,
     PhoneConnection,
     PhoneNotification,
@@ -28,9 +22,6 @@ public enum OverlaySource
     System,
     NetEase,
     Steam,
-    Game,
-    Task,
-    Hardware,
     XiaomiHyperConnect,
     PhoneLink,
 }
@@ -49,15 +40,6 @@ public enum OverlayLifetime
     WhileActive,
 }
 
-public enum AudioHudIcon
-{
-    Muted,
-    Silent,
-    Low,
-    Medium,
-    High,
-}
-
 public sealed record TypographyScale(
     double TitlePx,
     double BodyPx,
@@ -69,21 +51,16 @@ public sealed record OverlayPresentationPolicy(
     OverlayLifetime Lifetime,
     TimeSpan? Duration,
     int Priority,
-    TypographyScale Typography,
-    bool CanPin = false);
+    TypographyScale Typography);
 
 public sealed record OverlayVisualData(
     string? Eyebrow = null,
     string? Subtitle = null,
     string? Meta = null,
-    double? Progress = null,
     string? ArtworkPath = null,
     string? AccentHex = null,
     bool? IsCharging = null,
-    double? MarqueeProgress = null,
     string? TranslatedTitle = null,
-    string? SecondaryBody = null,
-    AudioHudIcon? AudioIcon = null,
     string? VerificationCode = null);
 
 public sealed record OverlayRequest(

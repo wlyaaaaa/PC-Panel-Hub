@@ -381,25 +381,18 @@ internal sealed class OverlayController : IOverlayPublisher, IDisposable
             OverlayKind.MediaActive or
             OverlayKind.MediaTrackChange => OverlayCardKind.Media,
             OverlayKind.GameActive or
-            OverlayKind.GameAchievement or
             OverlayKind.GameSummary => OverlayCardKind.Activity,
-            OverlayKind.ImportantTask or
-            OverlayKind.ImportantTaskComplete => OverlayCardKind.Progress,
-            OverlayKind.SystemOperation or
-            OverlayKind.DeviceOrNetwork or
-            OverlayKind.HardwareResolved => OverlayCardKind.Transient,
+            OverlayKind.DeviceOrNetwork => OverlayCardKind.Transient,
             OverlayKind.PhoneVerificationCode =>
                 OverlayCardKind.Verification,
             OverlayKind.PhoneCall or
-            OverlayKind.PhoneTransfer or
-            OverlayKind.HardwareAlert => OverlayCardKind.Alert,
+            OverlayKind.PhoneTransfer => OverlayCardKind.Alert,
             _ => OverlayCardKind.Generic,
         };
         var width = kind switch
         {
             OverlayCardKind.Media or
             OverlayCardKind.Activity or
-            OverlayCardKind.Progress or
             OverlayCardKind.Alert => OverlayCardWidthPreference.Wide,
             OverlayCardKind.Transient => OverlayCardWidthPreference.Compact,
             OverlayCardKind.Verification =>
@@ -410,7 +403,6 @@ internal sealed class OverlayController : IOverlayPublisher, IDisposable
                         OverlayVisualTier.StackedNotification
             ? OverlayCardPlacementPreference.BottomStack
             : item.Request.Kind is
-                OverlayKind.SystemOperation or
                 OverlayKind.PhoneVerificationCode
                 ? OverlayCardPlacementPreference.BottomLeft
                 : OverlayCardPlacementPreference.Auto;

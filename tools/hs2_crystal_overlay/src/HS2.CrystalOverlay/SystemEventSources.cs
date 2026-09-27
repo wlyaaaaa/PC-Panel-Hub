@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using HS2.CrystalOverlay.Core;
 using NAudio.CoreAudioApi;
@@ -6,400 +5,119 @@ using NAudio.CoreAudioApi.Interfaces;
 
 namespace HS2_CrystalOverlay;
 
-internal sealed class AudioOperationSourceCoordinator : IDisposable
+internal sealed class AudioDeviceSourceCoordinator : IDisposable
 {
-    private static readonly TimeSpan RecoveryInterval =
-        TimeSpan.FromSeconds(2);
-
     private readonly IOverlayPublisher publisher;
-    private readonly BlockingCollection<AudioCommand> commands = new();
-    private readonly DefaultEndpointNotificationClient deviceNotifications;
+    private readonly AutoResetEvent changed = new(false);
     private readonly Thread worker;
     private int disposeState;
 
-    internal AudioOperationSourceCoordinator(IOverlayPublisher publisher)
+    internal AudioDeviceSourceCoordinator(IOverlayPublisher publisher)
     {
         this.publisher = publisher;
-        deviceNotifications = new DefaultEndpointNotificationClient(
-            () => Enqueue(RebindAudioCommand.Instance));
-        worker = new Thread(Run)
-        {
-            IsBackground = true,
-            Name = "HS2 audio endpoint worker",
-        };
+        worker = new Thread(Run) { IsBackground = true, Name = "HS2 audio device worker" };
         worker.Start();
     }
 
     private void Run()
     {
-        MMDeviceEnumerator? devices = null;
-        MMDevice? currentDevice = null;
-        AudioEndpointVolume? endpointVolume = null;
-        AudioEndpointVolumeNotificationDelegate? volumeHandler = null;
-        var notificationsRegistered = false;
-        var tracker = new AudioHudStateTracker();
-        long activeGeneration = 0;
+        try { RunCore(); }
+        catch (Exception exception) when (exception is COMException or InvalidOperationException)
+        {
+            RuntimeLog.Write($"Audio device worker failed: {exception.GetType().Name}");
+        }
+    }
 
+    private void RunCore()
+    {
+        var tracker = new AudioDeviceStateTracker();
+        using var devices = new MMDeviceEnumerator();
+        var notifications = new DefaultEndpointNotificationClient(() =>
+        {
+            if (Volatile.Read(ref disposeState) != 0) { return; }
+            try { changed.Set(); }
+            catch (ObjectDisposedException) { }
+        });
+        var registered = false;
         try
         {
-            devices = new MMDeviceEnumerator();
             try
             {
-                devices.RegisterEndpointNotificationCallback(
-                    deviceNotifications);
-                notificationsRegistered = true;
+                devices.RegisterEndpointNotificationCallback(notifications);
+                registered = true;
             }
             catch (COMException exception)
             {
-                RuntimeLog.Write(
-                    $"Audio endpoint notifications unavailable: " +
-                    exception.GetType().Name);
+                RuntimeLog.Write($"Audio device notifications unavailable: {exception.GetType().Name}");
             }
 
-            BindDefaultEndpoint();
             while (Volatile.Read(ref disposeState) == 0)
             {
-                if (commands.TryTake(
-                        out var command,
-                        RecoveryInterval))
+                try
                 {
-                    if (Volatile.Read(ref disposeState) != 0)
+                    using var device = devices.GetDefaultAudioEndpoint(DataFlow.Render, Role.Console);
+                    var request = tracker.Observe(device.ID, device.FriendlyName);
+                    if (request is not null && Volatile.Read(ref disposeState) == 0)
                     {
-                        break;
+                        _ = publisher.Publish(request);
                     }
+                }
+                catch (Exception exception) when (exception is COMException or InvalidOperationException)
+                {
+                    RuntimeLog.Write($"Audio device probe failed: {exception.GetType().Name}");
+                }
 
-                    switch (command)
-                    {
-                        case RebindAudioCommand:
-                            BindDefaultEndpoint();
-                            break;
-                        case VolumeChangedAudioCommand changed
-                            when changed.Generation == activeGeneration:
-                            Publish(tracker.Observe(
-                                changed.VolumePercent,
-                                changed.IsMuted));
-                            break;
-                    }
-                }
-                else if (Volatile.Read(ref disposeState) == 0)
-                {
-                    Reconcile();
-                }
+                // Recover a missed endpoint callback without volume polling.
+                changed.WaitOne(TimeSpan.FromSeconds(2));
             }
-        }
-        catch (Exception exception) when (
-            exception is COMException or InvalidOperationException)
-        {
-            RuntimeLog.Write(
-                $"Audio endpoint worker failed: " +
-                exception.GetType().Name);
         }
         finally
         {
-            activeGeneration++;
-            DetachEndpoint();
-            if (notificationsRegistered && devices is not null)
+            if (registered)
             {
-                try
+                try { devices.UnregisterEndpointNotificationCallback(notifications); }
+                catch (COMException exception)
                 {
-                    devices.UnregisterEndpointNotificationCallback(
-                        deviceNotifications);
-                }
-                catch (Exception exception) when (
-                    exception is COMException or InvalidOperationException)
-                {
-                    RuntimeLog.Write(
-                        $"Audio endpoint notification cleanup failed: " +
-                        exception.GetType().Name);
+                    RuntimeLog.Write($"Audio device cleanup failed: {exception.GetType().Name}");
                 }
             }
-
-            if (devices is not null)
-            {
-                try
-                {
-                    devices.Dispose();
-                }
-                catch (Exception exception) when (
-                    exception is COMException or InvalidOperationException)
-                {
-                    RuntimeLog.Write(
-                        $"Audio enumerator cleanup failed: " +
-                        exception.GetType().Name);
-                }
-            }
-        }
-
-        void BindDefaultEndpoint()
-        {
-            if (devices is null || Volatile.Read(ref disposeState) != 0)
-            {
-                return;
-            }
-
-            activeGeneration++;
-            DetachEndpoint();
-            MMDevice? replacementDevice = null;
-            AudioEndpointVolume? replacementVolume = null;
-            AudioEndpointVolumeNotificationDelegate? replacementHandler =
-                null;
-            try
-            {
-                replacementDevice = devices.GetDefaultAudioEndpoint(
-                    DataFlow.Render,
-                    Role.Console);
-                replacementVolume = replacementDevice.AudioEndpointVolume;
-                var generation = activeGeneration;
-                replacementHandler =
-                    notification => Enqueue(
-                        new VolumeChangedAudioCommand(
-                            generation,
-                            AudioHudProjection.ToPercent(
-                                notification.MasterVolume),
-                            notification.Muted));
-                replacementVolume.OnVolumeNotification +=
-                    replacementHandler;
-                var initialPercent = AudioHudProjection.ToPercent(
-                    replacementVolume.MasterVolumeLevelScalar);
-                var initialMute = replacementVolume.Mute;
-                currentDevice = replacementDevice;
-                endpointVolume = replacementVolume;
-                volumeHandler = replacementHandler;
-                replacementDevice = null;
-                replacementVolume = null;
-                replacementHandler = null;
-                Publish(tracker.Observe(
-                    initialPercent,
-                    initialMute));
-            }
-            catch (Exception exception) when (
-                exception is COMException or InvalidOperationException)
-            {
-                RuntimeLog.Write(
-                    $"Audio endpoint bind failed: " +
-                    exception.GetType().Name);
-            }
-            finally
-            {
-                ReleaseEndpoint(
-                    replacementVolume,
-                    replacementHandler,
-                    replacementDevice);
-            }
-        }
-
-        void Reconcile()
-        {
-            if (devices is null || Volatile.Read(ref disposeState) != 0)
-            {
-                return;
-            }
-
-            try
-            {
-                using var defaultDevice =
-                    devices.GetDefaultAudioEndpoint(
-                        DataFlow.Render,
-                        Role.Console);
-                if (endpointVolume is null ||
-                    !string.Equals(
-                        currentDevice?.ID,
-                        defaultDevice.ID,
-                        StringComparison.Ordinal))
-                {
-                    BindDefaultEndpoint();
-                    return;
-                }
-
-                Publish(tracker.Observe(
-                    AudioHudProjection.ToPercent(
-                        endpointVolume.MasterVolumeLevelScalar),
-                    endpointVolume.Mute));
-            }
-            catch (Exception exception) when (
-                exception is COMException or InvalidOperationException)
-            {
-                RuntimeLog.Write(
-                    $"Audio endpoint recovery failed: " +
-                    exception.GetType().Name);
-            }
-        }
-
-        void DetachEndpoint()
-        {
-            var detachedVolume = endpointVolume;
-            var detachedHandler = volumeHandler;
-            var detachedDevice = currentDevice;
-            endpointVolume = null;
-            volumeHandler = null;
-            currentDevice = null;
-            ReleaseEndpoint(
-                detachedVolume,
-                detachedHandler,
-                detachedDevice);
-        }
-
-        void ReleaseEndpoint(
-            AudioEndpointVolume? volume,
-            AudioEndpointVolumeNotificationDelegate? handler,
-            MMDevice? device)
-        {
-            if (volume is not null && handler is not null)
-            {
-                try
-                {
-                    volume.OnVolumeNotification -= handler;
-                }
-                catch (Exception exception) when (
-                    exception is COMException or InvalidOperationException)
-                {
-                    RuntimeLog.Write(
-                        $"Audio endpoint unsubscribe failed: " +
-                        exception.GetType().Name);
-                }
-            }
-
-            if (volume is not null)
-            {
-                try
-                {
-                    volume.Dispose();
-                }
-                catch (Exception exception) when (
-                    exception is COMException or InvalidOperationException)
-                {
-                    RuntimeLog.Write(
-                        $"Audio endpoint cleanup failed: " +
-                        exception.GetType().Name);
-                }
-            }
-
-            if (device is not null)
-            {
-                try
-                {
-                    device.Dispose();
-                }
-                catch (Exception exception) when (
-                    exception is COMException or InvalidOperationException)
-                {
-                    RuntimeLog.Write(
-                        $"Audio device cleanup failed: " +
-                        exception.GetType().Name);
-                }
-            }
-        }
-    }
-
-    private void Publish(OverlayRequest? request)
-    {
-        if (request is not null &&
-            Volatile.Read(ref disposeState) == 0)
-        {
-            _ = publisher.Publish(request);
-        }
-    }
-
-    private void Enqueue(AudioCommand command)
-    {
-        if (Volatile.Read(ref disposeState) != 0)
-        {
-            return;
-        }
-
-        try
-        {
-            _ = commands.TryAdd(command);
-        }
-        catch (InvalidOperationException)
-        {
         }
     }
 
     public void Dispose()
     {
-        if (Interlocked.Exchange(ref disposeState, 1) != 0)
-        {
-            return;
-        }
-
-        commands.CompleteAdding();
-        if (Thread.CurrentThread != worker)
-        {
-            worker.Join();
-        }
-
-        commands.Dispose();
+        if (Interlocked.Exchange(ref disposeState, 1) != 0) { return; }
+        changed.Set();
+        worker.Join();
+        changed.Dispose();
     }
 
-    private sealed class DefaultEndpointNotificationClient(
-        Action onDefaultDeviceChanged) : IMMNotificationClient
+    private sealed class DefaultEndpointNotificationClient(Action onChanged) : IMMNotificationClient
     {
-        public void OnDeviceStateChanged(
-            string deviceId,
-            DeviceState newState)
+        public void OnDeviceStateChanged(string deviceId, DeviceState newState) { }
+        public void OnDeviceAdded(string deviceId) { }
+        public void OnDeviceRemoved(string deviceId) { }
+        public void OnPropertyValueChanged(string deviceId, PropertyKey key) { }
+        public void OnDefaultDeviceChanged(DataFlow flow, Role role, string deviceId)
         {
-        }
-
-        public void OnDeviceAdded(string pwstrDeviceId)
-        {
-        }
-
-        public void OnDeviceRemoved(string deviceId)
-        {
-        }
-
-        public void OnDefaultDeviceChanged(
-            DataFlow flow,
-            Role role,
-            string defaultDeviceId)
-        {
-            if (flow == DataFlow.Render && role == Role.Console)
-            {
-                onDefaultDeviceChanged();
-            }
-        }
-
-        public void OnPropertyValueChanged(
-            string pwstrDeviceId,
-            PropertyKey key)
-        {
+            if (flow == DataFlow.Render && role == Role.Console) { onChanged(); }
         }
     }
-
-    private abstract record AudioCommand;
-
-    private sealed record RebindAudioCommand : AudioCommand
-    {
-        internal static RebindAudioCommand Instance { get; } = new();
-    }
-
-    private sealed record VolumeChangedAudioCommand(
-        long Generation,
-        int VolumePercent,
-        bool IsMuted) : AudioCommand;
 }
 
-internal sealed class DeviceNetworkSourceCoordinator : IDisposable
+internal sealed class NetworkSourceCoordinator : IDisposable
 {
-    private static readonly Uri SnapshotUri =
-        new("http://127.0.0.1:18765/snapshot");
     private static readonly TimeSpan PollInterval =
         TimeSpan.FromSeconds(1);
 
     private readonly IOverlayPublisher publisher;
     private readonly LifetimePublicationGate publicationGate = new();
-    private readonly HttpClient client = new()
-    {
-        Timeout = TimeSpan.FromSeconds(2),
-    };
     private readonly CancellationTokenSource cancellation = new();
     private readonly PeriodicTimer timer;
     private readonly Task loop;
     private readonly NetworkConnectivityTracker networkTracker = new();
-    private IReadOnlyDictionary<string, UsbStorageDevice>? previousUsb;
 
-    internal DeviceNetworkSourceCoordinator(IOverlayPublisher publisher)
+    internal NetworkSourceCoordinator(IOverlayPublisher publisher)
     {
         this.publisher = publisher;
         timer = new PeriodicTimer(PollInterval);
@@ -410,10 +128,10 @@ internal sealed class DeviceNetworkSourceCoordinator : IDisposable
     {
         try
         {
-            await PollOnceAsync();
+            PollOnce();
             while (await timer.WaitForNextTickAsync(cancellation.Token))
             {
-                await PollOnceAsync();
+                PollOnce();
             }
         }
         catch (OperationCanceledException)
@@ -421,80 +139,12 @@ internal sealed class DeviceNetworkSourceCoordinator : IDisposable
         }
     }
 
-    private async Task PollOnceAsync()
+    private void PollOnce()
     {
-        if (publicationGate.IsClosed)
+        if (!publicationGate.IsClosed)
         {
-            return;
+            PublishNetworkChange(NetworkConnectivityProbe.Classify());
         }
-
-        try
-        {
-            var json = await client.GetStringAsync(
-                SnapshotUri,
-                cancellation.Token);
-            if (publicationGate.IsClosed)
-            {
-                return;
-            }
-
-            PublishUsbChanges(
-                SideScreenSnapshotParser.ParseUsbDevices(json));
-            PublishNetworkChange(
-                NetworkConnectivityProbe.Classify(
-                    SideScreenSnapshotParser.ParseNetworkLatencyStatus(
-                        json)));
-        }
-        catch (OperationCanceledException)
-        {
-        }
-        catch (HttpRequestException)
-        {
-            // A missing local telemetry service is not proof of a network
-            // outage, so it must not create a false user-facing event.
-        }
-        catch (Exception exception)
-        {
-            RuntimeLog.Write(
-                $"Device/network probe failed: {exception.GetType().Name}");
-        }
-    }
-
-    private void PublishUsbChanges(
-        IReadOnlyList<UsbStorageDevice> devices)
-    {
-        var current = devices.ToDictionary(
-            device => device.Key,
-            StringComparer.OrdinalIgnoreCase);
-        if (previousUsb is null)
-        {
-            previousUsb = current;
-            return;
-        }
-
-        foreach (var device in current.Values.Where(device =>
-                     !previousUsb.ContainsKey(device.Key)))
-        {
-            PublishDevice(
-                $"usb-state:{device.Key}",
-                $"usb-connected:{device.Key}",
-                "USB 存储已接入",
-                DeviceText(device),
-                "#8EF2C8");
-        }
-
-        foreach (var device in previousUsb.Values.Where(device =>
-                     !current.ContainsKey(device.Key)))
-        {
-            PublishDevice(
-                $"usb-state:{device.Key}",
-                $"usb-disconnected:{device.Key}",
-                "USB 存储已断开",
-                DeviceText(device),
-                "#FFD08A");
-        }
-
-        previousUsb = current;
     }
 
     private void PublishNetworkChange(NetworkConnectivityState state)
@@ -538,19 +188,6 @@ internal sealed class DeviceNetworkSourceCoordinator : IDisposable
                 AccentHex: accent))));
     }
 
-    private static string DeviceText(UsbStorageDevice device)
-    {
-        var volumes = device.VolumeDrives.Count == 0
-            ? null
-            : string.Join(
-                " / ",
-                device.VolumeDrives.Select(volume =>
-                    volume.TrimEnd('\\')));
-        return string.IsNullOrWhiteSpace(volumes)
-            ? device.DisplayName
-            : $"{device.DisplayName}  ·  {volumes}";
-    }
-
     public void Dispose()
     {
         if (!publicationGate.Close())
@@ -571,7 +208,6 @@ internal sealed class DeviceNetworkSourceCoordinator : IDisposable
 
         if (completed)
         {
-            client.Dispose();
             cancellation.Dispose();
             return;
         }
@@ -580,7 +216,6 @@ internal sealed class DeviceNetworkSourceCoordinator : IDisposable
             completedLoop =>
             {
                 _ = completedLoop.Exception;
-                client.Dispose();
                 cancellation.Dispose();
             },
             CancellationToken.None,
@@ -591,8 +226,7 @@ internal sealed class DeviceNetworkSourceCoordinator : IDisposable
 
 internal static class NetworkConnectivityProbe
 {
-    internal static NetworkConnectivityState Classify(
-        string? latencyStatus)
+    internal static NetworkConnectivityState Classify()
     {
         bool? hasInternetAccess = null;
         bool? hasNetworkInterface = null;
@@ -629,7 +263,6 @@ internal static class NetworkConnectivityProbe
         }
 
         return NetworkConnectivityClassifier.Classify(
-            latencyStatus,
             hasInternetAccess,
             hasNetworkInterface);
     }

@@ -5,7 +5,6 @@ public enum OverlayCardKind
     Notification,
     Media,
     Activity,
-    Progress,
     Transient,
     Verification,
     Alert,
@@ -359,7 +358,6 @@ public static class CompositionPlanner
             {
                 OverlayCardKind.Media => 0,
                 OverlayCardKind.Activity => Math.Min(1, rowCount - 1),
-                OverlayCardKind.Progress => Math.Min(1, rowCount - 1),
                 OverlayCardKind.Transient => 0,
                 OverlayCardKind.Notification
                     when slot.Kind == SlotKind.Side =>
@@ -375,7 +373,6 @@ public static class CompositionPlanner
             {
                 OverlayCardKind.Media => 100,
                 OverlayCardKind.Activity => 80,
-                OverlayCardKind.Progress => 70,
                 OverlayCardKind.Notification => 90,
                 OverlayCardKind.Transient => 40,
                 OverlayCardKind.Alert => 70,
@@ -418,12 +415,6 @@ public static class CompositionPlanner
                 SlotKind.FrontWide => 360,
                 SlotKind.Side => -1600,
                 _ => 170,
-            },
-            OverlayCardKind.Progress => slot switch
-            {
-                SlotKind.FrontWide => 340,
-                SlotKind.Side => -1400,
-                _ => 180,
             },
             OverlayCardKind.Notification => slot switch
             {
@@ -558,7 +549,6 @@ public static class CompositionPlanner
         {
             OverlayCardKind.Media => 190,
             OverlayCardKind.Activity => 240,
-            OverlayCardKind.Progress => 240,
             OverlayCardKind.Notification => 260,
             OverlayCardKind.Transient => 190,
             OverlayCardKind.Verification => 190,

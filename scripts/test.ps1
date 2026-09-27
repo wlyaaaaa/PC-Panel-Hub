@@ -82,6 +82,9 @@ if ($LASTEXITCODE -ne 0) { throw "TestProtocolEncoding.ps1 failed" }
 & dotnet test $hs2Tests --nologo --verbosity quiet
 if ($LASTEXITCODE -ne 0) { throw "HS2.CrystalOverlay.Tests failed" }
 
+pwsh -NoProfile -File (Join-Path $Root 'scripts\TestHS2Installation.ps1') -Root $Root
+if ($LASTEXITCODE -ne 0) { throw 'TestHS2Installation.ps1 failed' }
+
 powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $side "TestRenderer.ps1")
 if ($LASTEXITCODE -ne 0) { throw "TestRenderer.ps1 failed" }
 

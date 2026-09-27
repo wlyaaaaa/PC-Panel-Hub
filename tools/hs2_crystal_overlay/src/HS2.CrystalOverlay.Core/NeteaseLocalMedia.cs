@@ -1,4 +1,3 @@
-using System.Buffers.Binary;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -234,48 +233,5 @@ public sealed class NeteasePlayingList
             JsonValueKind.Number => property.GetRawText(),
             _ => null,
         };
-    }
-}
-
-public static class NeteasePlaybackPositionDecoder
-{
-    public const int SnapshotSize = 32;
-
-    public static bool TryDecode(
-        ReadOnlySpan<byte> snapshot,
-        out TimeSpan position)
-    {
-        position = TimeSpan.Zero;
-        if (snapshot.Length < SnapshotSize)
-        {
-            return false;
-        }
-
-        var sampleRate = BinaryPrimitives.ReadInt32LittleEndian(
-            snapshot[..sizeof(int)]);
-        var channels = snapshot[4];
-        var bytesPerSample = BinaryPrimitives.ReadUInt16LittleEndian(
-            snapshot.Slice(8, sizeof(ushort)));
-        var decodedBytes = BinaryPrimitives.ReadUInt64LittleEndian(
-            snapshot.Slice(24, sizeof(ulong)));
-        if (sampleRate is < 8_000 or > 768_000 ||
-            channels is < 1 or > 16 ||
-            bytesPerSample is < 1 or > 16)
-        {
-            return false;
-        }
-
-        var bytesPerSecond =
-            (double)sampleRate * channels * bytesPerSample;
-        var seconds = decodedBytes / bytesPerSecond;
-        if (!double.IsFinite(seconds) ||
-            seconds < 0 ||
-            seconds > TimeSpan.FromDays(1).TotalSeconds)
-        {
-            return false;
-        }
-
-        position = TimeSpan.FromSeconds(seconds);
-        return true;
     }
 }

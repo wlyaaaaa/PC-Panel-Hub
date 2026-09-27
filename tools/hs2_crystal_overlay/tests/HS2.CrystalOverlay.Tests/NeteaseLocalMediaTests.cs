@@ -225,45 +225,5 @@ public sealed class NeteaseLocalMediaTests
             "Signal - Example Artist"));
     }
 
-    [Fact]
-    public void DecodedAudioSnapshot_ProducesLivePlaybackPosition()
-    {
-        var snapshot = new byte[
-            NeteasePlaybackPositionDecoder.SnapshotSize];
-        BitConverter.TryWriteBytes(
-            snapshot.AsSpan(0, sizeof(int)),
-            96_000);
-        snapshot[4] = 2;
-        BitConverter.TryWriteBytes(
-            snapshot.AsSpan(8, sizeof(ushort)),
-            (ushort)4);
-        BitConverter.TryWriteBytes(
-            snapshot.AsSpan(24, sizeof(ulong)),
-            111_546_640UL);
 
-        var decoded = NeteasePlaybackPositionDecoder.TryDecode(
-            snapshot,
-            out var position);
-
-        Assert.True(decoded);
-        Assert.Equal(145.243, position.TotalSeconds, 3);
-    }
-
-    [Fact]
-    public void DecodedAudioSnapshot_RejectsImplausibleFormat()
-    {
-        var snapshot = new byte[
-            NeteasePlaybackPositionDecoder.SnapshotSize];
-        BitConverter.TryWriteBytes(
-            snapshot.AsSpan(0, sizeof(int)),
-            96_000);
-        snapshot[4] = 0;
-        BitConverter.TryWriteBytes(
-            snapshot.AsSpan(8, sizeof(ushort)),
-            (ushort)4);
-
-        Assert.False(NeteasePlaybackPositionDecoder.TryDecode(
-            snapshot,
-            out _));
-    }
 }

@@ -180,62 +180,6 @@ public sealed class OverlayDeckLayoutTests
     }
 
     [Fact]
-    public void AudioHud_DefaultsToTheBottomLeftWithoutUsingAFixedPosition()
-    {
-        var plan = CompositionPlanner.Plan(
-            Hs2Display,
-            [
-                new(
-                    "audio-hud",
-                    OverlayCardKind.Transient,
-                    0,
-                    OverlayCardWidthPreference.Compact,
-                    OverlayCardPlacementPreference.BottomLeft),
-            ]);
-
-        var audio = Assert.Single(plan.Cards);
-        AssertPlacement(
-            audio,
-            new PixelRect(44, 814, 706, 190),
-            OverlayDeckRegion.Front,
-            0);
-    }
-
-    [Fact]
-    public void LatestPhoneOwnsTheBottomFrontAndAudioAdaptsToTheSide()
-    {
-        var plan = CompositionPlanner.Plan(
-            Hs2Display,
-            [
-                new(
-                    "phone-latest",
-                    OverlayCardKind.Notification,
-                    0,
-                    OverlayCardWidthPreference.Auto,
-                    OverlayCardPlacementPreference.BottomStack,
-                    0),
-                new(
-                    "audio-hud",
-                    OverlayCardKind.Transient,
-                    1,
-                    OverlayCardWidthPreference.Compact,
-                    OverlayCardPlacementPreference.BottomLeft),
-            ]);
-        var cards = plan.Cards.ToDictionary(card => card.EventId);
-
-        AssertPlacement(
-            cards["phone-latest"],
-            new PixelRect(44, 744, 1437, 260),
-            OverlayDeckRegion.Front,
-            0);
-        AssertPlacement(
-            cards["audio-hud"],
-            new PixelRect(1505, 744, 675, 260),
-            OverlayDeckRegion.Side,
-            0);
-    }
-
-    [Fact]
     public void PhoneNotifications_StackLatestAtTheBottomAndOlderOnesAbove()
     {
         var plan = CompositionPlanner.Plan(
@@ -258,33 +202,6 @@ public sealed class OverlayDeckLayoutTests
         Assert.True(
             cards["phone-second"].Bounds.Top >
             cards["phone-third"].Bounds.Top);
-    }
-
-    [Fact]
-    public void AudioWithWideCardAndNoPhone_KeepsBottomLeftAndMovesWideCardUp()
-    {
-        var plan = CompositionPlanner.Plan(
-            Hs2Display,
-            [
-                new(
-                    "audio-hud",
-                    OverlayCardKind.Transient,
-                    0,
-                    OverlayCardWidthPreference.Compact,
-                    OverlayCardPlacementPreference.BottomLeft),
-                new(
-                    "media",
-                    OverlayCardKind.Media,
-                    1,
-                    OverlayCardWidthPreference.Wide),
-            ]);
-        var cards = plan.Cards.ToDictionary(card => card.EventId);
-
-        Assert.Equal(0, cards["audio-hud"].Row);
-        Assert.Equal(44, cards["audio-hud"].Bounds.Left);
-        Assert.Equal(706, cards["audio-hud"].Bounds.Width);
-        Assert.Equal(1, cards["media"].Row);
-        Assert.Equal(OverlayDeckRegion.Front, cards["media"].Region);
     }
 
     [Fact]
@@ -350,11 +267,10 @@ public sealed class OverlayDeckLayoutTests
             [
                 code,
                 new(
-                    "audio-hud",
+                    "network",
                     OverlayCardKind.Transient,
                     1,
-                    OverlayCardWidthPreference.Compact,
-                    OverlayCardPlacementPreference.BottomLeft),
+                    OverlayCardWidthPreference.Compact),
             ],
             [
                 code,
@@ -411,10 +327,9 @@ public sealed class OverlayDeckLayoutTests
             "phone-latest",
             "phone-second",
             "phone-third",
-            "audio-hud",
+            "network",
             "game",
             "media",
-            "task",
         };
 
         for (var mask = 0; mask < 1 << source.Length; mask++)
@@ -428,14 +343,13 @@ public sealed class OverlayDeckLayoutTests
             var requests = new List<OverlayCardLayoutRequest>();
             requests.AddRange(phones.Select((id, stackOrder) =>
                 Phone(id, stackOrder)));
-            if (included.Contains("audio-hud"))
+            if (included.Contains("network"))
             {
                 requests.Add(new(
-                    "audio-hud",
+                    "network",
                     OverlayCardKind.Transient,
                     requests.Count,
-                    OverlayCardWidthPreference.Compact,
-                    OverlayCardPlacementPreference.BottomLeft));
+                    OverlayCardWidthPreference.Compact));
             }
 
             if (included.Contains("game"))
@@ -456,14 +370,6 @@ public sealed class OverlayDeckLayoutTests
                     OverlayCardWidthPreference.Wide));
             }
 
-            if (included.Contains("task"))
-            {
-                requests.Add(new(
-                    "task",
-                    OverlayCardKind.Progress,
-                    requests.Count,
-                    OverlayCardWidthPreference.Wide));
-            }
 
             var plan = CompositionPlanner.Plan(Hs2Display, requests);
             AssertPlanInvariants(plan, Hs2Display);
@@ -473,26 +379,7 @@ public sealed class OverlayDeckLayoutTests
                 Assert.Equal(index, cards[phones[index]].Row);
             }
 
-            if (cards.TryGetValue("audio-hud", out var audio))
-            {
-                Assert.Equal(0, audio.Row);
-                var wideFrontCards = included.Count(id =>
-                    id is "game" or "media" or "task");
-                if (phones.Length == 0 && wideFrontCards < 3)
-                {
-                    Assert.True(
-                        audio.Bounds.Left == 44,
-                        $"Audio was not bottom-left for: {string.Join(", ", included)}");
-                    Assert.Equal(OverlayDeckRegion.Front, audio.Region);
-                }
-                else if (phones.Length > 0)
-                {
-                    Assert.Equal(0, cards[phones[0]].Row);
-                    Assert.Equal(
-                        OverlayDeckRegion.Front,
-                        cards[phones[0]].Region);
-                }
-            }
+
         }
     }
 

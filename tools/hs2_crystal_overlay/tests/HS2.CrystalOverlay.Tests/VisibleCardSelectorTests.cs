@@ -16,11 +16,11 @@ public sealed class VisibleCardSelectorTests
         scheduler.Publish(OverlayRequest.Active(
             "game", OverlayKind.GameActive, OverlaySource.Steam, "游戏"), Now);
         scheduler.Publish(OverlayRequest.Active(
-            "alert", OverlayKind.HardwareAlert, OverlaySource.Hardware, "硬件告警"), Now);
+            "incoming-call", OverlayKind.PhoneCall, OverlaySource.PhoneLink, "手机来电"), Now);
         scheduler.Publish(OverlayRequest.Active(
-            "task", OverlayKind.ImportantTask, OverlaySource.Task, "文件处理"), Now);
+            "active-transfer", OverlayKind.PhoneTransfer, OverlaySource.PhoneLink, "手机传输"), Now);
         scheduler.Publish(OverlayRequest.Timed(
-            "volume", OverlayKind.SystemOperation, OverlaySource.System, "音量 42%"), Now);
+            "network-state", OverlayKind.DeviceOrNetwork, OverlaySource.System, "网络已断开"), Now);
         for (var index = 1; index <= 3; index++)
         {
             scheduler.Publish(OverlayRequest.Timed(
@@ -38,7 +38,7 @@ public sealed class VisibleCardSelectorTests
         Assert.Equal(6, frame.VisibleCards.Count);
         Assert.Contains(frame.VisibleCards, item => item.Request.EventId == "media");
         Assert.Contains(frame.VisibleCards, item => item.Request.EventId == "game");
-        Assert.Contains(frame.VisibleCards, item => item.Request.EventId == "alert");
+        Assert.Contains(frame.VisibleCards, item => item.Request.EventId == "incoming-call");
         Assert.Contains(frame.VisibleCards, item => item.Request.EventId == "phone-3");
         Assert.DoesNotContain(frame.VisibleCards, item => item.Request.EventId == "phone-1");
         Assert.Equal(
@@ -68,7 +68,7 @@ public sealed class VisibleCardSelectorTests
         scheduler.Publish(OverlayRequest.Timed(
             "summary", OverlayKind.GameSummary, OverlaySource.Steam, "游戏总结"), Now);
         scheduler.Publish(OverlayRequest.Active(
-            "alert", OverlayKind.HardwareAlert, OverlaySource.Hardware, "硬件告警"), Now);
+            "incoming-call", OverlayKind.PhoneCall, OverlaySource.PhoneLink, "手机来电"), Now);
         scheduler.Publish(OverlayRequest.Active(
             "call", OverlayKind.PhoneCall, OverlaySource.PhoneLink, "来电"), Now);
         scheduler.Publish(OverlayRequest.Active(
@@ -95,51 +95,17 @@ public sealed class VisibleCardSelectorTests
     }
 
     [Fact]
-    public void ActiveImportantTask_DisplacesPassiveMediaUnderMaximumPressure()
-    {
-        var scheduler = new OverlayScheduler();
-        scheduler.Publish(OverlayRequest.Active(
-            "media", OverlayKind.MediaActive, OverlaySource.NetEase, "歌曲"), Now);
-        scheduler.Publish(OverlayRequest.Active(
-            "game", OverlayKind.GameActive, OverlaySource.Steam, "游戏"), Now);
-        scheduler.Publish(OverlayRequest.Active(
-            "alert", OverlayKind.HardwareAlert, OverlaySource.Hardware, "硬件告警"), Now);
-        scheduler.Publish(OverlayRequest.Active(
-            "call", OverlayKind.PhoneCall, OverlaySource.PhoneLink, "来电"), Now);
-        scheduler.Publish(OverlayRequest.Active(
-            "transfer", OverlayKind.PhoneTransfer, OverlaySource.PhoneLink, "手机传输"), Now);
-        scheduler.Publish(OverlayRequest.Active(
-            "task", OverlayKind.ImportantTask, OverlaySource.Task, "文件复制"), Now);
-        scheduler.Publish(OverlayRequest.Timed(
-            "latest-phone",
-            OverlayKind.PhoneNotification,
-            OverlaySource.XiaomiHyperConnect,
-            "最新通知"), Now.AddSeconds(1));
-
-        var visible = scheduler.GetFrame(
-                Now.AddSeconds(1),
-                maxVisibleCards: 6,
-                maxVisibleNotifications: 3)
-            .VisibleCards;
-
-        Assert.Contains(visible, item =>
-            item.Request.Kind == OverlayKind.ImportantTask);
-        Assert.DoesNotContain(visible, item =>
-            item.Request.Kind == OverlayKind.MediaActive);
-    }
-
-    [Fact]
     public void IndependentOperationalCards_CompeteAsSeparateEventIds()
     {
         var scheduler = new OverlayScheduler();
         scheduler.Publish(OverlayRequest.Active(
-            "task-copy", OverlayKind.ImportantTask, OverlaySource.Task, "复制文件"), Now);
+            "active-transfer", OverlayKind.PhoneTransfer, OverlaySource.PhoneLink, "手机传输"), Now);
         scheduler.Publish(OverlayRequest.Active(
             "phone-transfer", OverlayKind.PhoneTransfer, OverlaySource.PhoneLink, "手机文件传输"), Now);
         scheduler.Publish(OverlayRequest.Timed(
-            "volume", OverlayKind.SystemOperation, OverlaySource.System, "音量 42%"), Now);
+            "network-state", OverlayKind.DeviceOrNetwork, OverlaySource.System, "网络已断开"), Now);
         scheduler.Publish(OverlayRequest.Timed(
-            "usb", OverlayKind.DeviceOrNetwork, OverlaySource.System, "U 盘已连接"), Now);
+            "audio-device", OverlayKind.DeviceOrNetwork, OverlaySource.System, "音频输出已切换"), Now);
         scheduler.Publish(OverlayRequest.Timed(
             "network", OverlayKind.DeviceOrNetwork, OverlaySource.System, "网络已恢复"), Now);
 
@@ -152,10 +118,10 @@ public sealed class VisibleCardSelectorTests
             .ToArray();
 
         Assert.Equal(5, ids.Length);
-        Assert.Contains("task-copy", ids);
+        Assert.Contains("active-transfer", ids);
         Assert.Contains("phone-transfer", ids);
-        Assert.Contains("volume", ids);
-        Assert.Contains("usb", ids);
+        Assert.Contains("network-state", ids);
+        Assert.Contains("audio-device", ids);
         Assert.Contains("network", ids);
     }
 
@@ -168,9 +134,9 @@ public sealed class VisibleCardSelectorTests
         scheduler.Publish(OverlayRequest.Active(
             "game", OverlayKind.GameActive, OverlaySource.Steam, "游戏"), Now);
         scheduler.Publish(OverlayRequest.Active(
-            "alert", OverlayKind.HardwareAlert, OverlaySource.Hardware, "硬件告警"), Now);
+            "incoming-call", OverlayKind.PhoneCall, OverlaySource.PhoneLink, "手机来电"), Now);
         scheduler.Publish(OverlayRequest.Active(
-            "task", OverlayKind.ImportantTask, OverlaySource.Task, "文件处理"), Now);
+            "active-transfer", OverlayKind.PhoneTransfer, OverlaySource.PhoneLink, "手机传输"), Now);
         scheduler.Publish(OverlayRequest.Timed(
             "verification",
             OverlayKind.PhoneVerificationCode,
