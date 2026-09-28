@@ -51,8 +51,8 @@ The weather shim intentionally has no built-in location. Copy
 `tools\turzx_side_screen\config.example.json` to the ignored
 `config.json` and fill the private `weather.latitude` and
 `weather.longitude`; the weather launcher uses that file automatically.
-Alternatively set `TURZX_WEATHER_CONFIG` to another private JSON file, or
-inject both `TURZX_WEATHER_LATITUDE` and
+If `config.json` is absent, alternatively set `TURZX_WEATHER_CONFIG` to another
+private JSON file, or inject both `TURZX_WEATHER_LATITUDE` and
 `TURZX_WEATHER_LONGITUDE`. Optional display fields are `id`,
 `name`, `adm2`, `adm1`, `country`,
 `timezone`, and `utc_offset`.

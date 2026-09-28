@@ -214,10 +214,23 @@ Write-StackLog ("python selected path={0} timeauditModulesRequired={1}" -f $pyth
 ))
 $weatherShim = Join-Path $Root "tools\turzx_weather_shim\turzx_weather_shim.py"
 $weatherDir = Split-Path -Parent $weatherShim
-Start-HiddenProcess -FilePath $python `
-    -ArgumentList @($weatherShim, "--host", "127.0.0.1", "--port", "18080") `
-    -WorkingDirectory $weatherDir | Out-Null
-Write-StackLog "weather shim launched"
+$weatherConfig = Join-Path $Root 'tools\turzx_side_screen\config.json'
+$weatherStdout = Join-Path $outDir 'weather-shim.stdout.log'
+$weatherStderr = Join-Path $outDir 'weather-shim.stderr.log'
+$weatherArgs = @('-u', $weatherShim, '--host', '127.0.0.1', '--port', '18080')
+if (Test-Path -LiteralPath $weatherConfig -PathType Leaf) {
+    $weatherArgs += @('--config', $weatherConfig)
+}
+$weatherProcess = Start-HiddenProcess -FilePath $python `
+    -ArgumentList $weatherArgs -WorkingDirectory $weatherDir `
+    -RedirectStandardOutput $weatherStdout -RedirectStandardError $weatherStderr
+if ($weatherProcess.WaitForExit(1000)) {
+    $reason = @(Get-Content -LiteralPath $weatherStderr -Tail 2 -ErrorAction SilentlyContinue) -join ' '
+    if ([string]::IsNullOrWhiteSpace($reason)) { $reason = "exit code $($weatherProcess.ExitCode)" }
+    Write-StackLog "weather shim exited during startup: $reason"
+} else {
+    Write-StackLog ("weather shim started pid={0}" -f $weatherProcess.Id)
+}
 
 Start-HiddenProcess -FilePath $python `
     -ArgumentList @((Join-Path $scriptDir "top_processes_helper.py"), "--cache-path", (Join-Path $outDir "top-processes.json"), "--interval-seconds", "3", "--limit", "5") `

@@ -6,7 +6,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import patch_turzx_weather_urls as patcher
 import turzx_weather_shim as shim
 
 
@@ -105,36 +104,6 @@ class QWeatherShimTests(unittest.TestCase):
             location = shim.load_location_config(config_path)
 
         self.assertEqual(location["id"], "test-location")
-
-
-class UrlPatchTests(unittest.TestCase):
-    def test_patcher_uses_external_urls(self):
-        config = {
-            "old_geo": "geo-old-url",
-            "new_geo": "geo-new-url",
-            "old_now": "now-old-url",
-            "new_now": "now-new-url",
-        }
-        original = (
-            b"prefix"
-            + patcher.encoded_bytes(config["old_geo"])
-            + b"middle"
-            + patcher.encoded_bytes(config["old_now"])
-            + b"suffix"
-        )
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            source = Path(temp_dir) / "source.exe"
-            output = Path(temp_dir) / "patched.exe"
-            source.write_bytes(original)
-
-            patcher.patch_exe(source, output, config)
-            patched = output.read_bytes()
-
-        self.assertIn(patcher.encoded_bytes(config["new_geo"]), patched)
-        self.assertIn(patcher.encoded_bytes(config["new_now"]), patched)
-        self.assertNotIn(patcher.encoded_bytes(config["old_geo"]), patched)
-        self.assertNotIn(patcher.encoded_bytes(config["old_now"]), patched)
 
 
 if __name__ == "__main__":

@@ -15,7 +15,6 @@ $defaultFiles = @(
     "tools\turzx_side_screen\StartSideScreenStack.ps1",
     "tools\turzx_side_screen\StartSideScreenWatchdog.ps1",
     "tools\turzx_side_screen\InstallStartupTask-Admin.ps1",
-    "tools\turzx_side_screen\RestartSideScreenAfterResume.ps1",
     "tools\turzx_side_screen\StartVideoStreamBackground.ps1"
 )
 
@@ -87,8 +86,7 @@ if ($watchdogText -match [regex]::Escape('-EnableSecondaryScreen:$false')) {
 }
 
 $hiddenLaunchers = @(
-    "tools\turzx_side_screen\StartSideScreenWatchdog-Hidden.vbs",
-    "tools\turzx_side_screen\RestartSideScreenAfterResume-Hidden.vbs"
+    "tools\turzx_side_screen\StartSideScreenWatchdog-Hidden.vbs"
 )
 
 foreach ($relative in $hiddenLaunchers) {
@@ -107,22 +105,6 @@ foreach ($relative in $hiddenLaunchers) {
             throw "Hidden launcher must preserve and explicitly propagate false mode overrides; missing '$pattern' in $relative"
         }
     }
-}
-
-$resumeHidden = Get-Content -Raw -LiteralPath (Join-Path $Root "tools\turzx_side_screen\RestartSideScreenAfterResume-Hidden.vbs")
-foreach ($pattern in @(
-    'If hybridRefresh Then',
-    'If altHelper Then'
-)) {
-    if ($resumeHidden -notmatch [regex]::Escape($pattern)) {
-        throw "Resume hidden launcher must explicitly pass both true and false modes; missing '$pattern'"
-    }
-}
-
-$resumeText = Get-Content -Raw -LiteralPath (Join-Path $Root "tools\turzx_side_screen\RestartSideScreenAfterResume.ps1")
-if ($resumeText -notmatch [regex]::Escape('[switch]$HybridRefresh,') -or
-    $resumeText -match [regex]::Escape('[switch]$HybridRefresh = $true')) {
-    throw "Resume PowerShell worker must retain an explicit false override so the task action remains the mode owner."
 }
 
 $explicitEntries = @(

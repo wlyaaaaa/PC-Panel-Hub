@@ -80,7 +80,6 @@ try {
         "tools/turzx_side_screen/requirements.txt",
         "tools/turzx_side_screen/config.example.json",
         "tools/turzx_weather_shim/turzx_weather_shim.py",
-        "tools/turzx_weather_shim/start_turzx_weatherfix.ps1",
         "tools/hs2_crystal_overlay/HS2.CrystalOverlay.slnx",
         "tools/hs2_crystal_overlay/Publish-HS2Overlay.ps1",
         "tools/hs2_crystal_overlay/Install-HS2Overlay.ps1",
@@ -104,9 +103,9 @@ try {
     if (-not [string]::IsNullOrWhiteSpace([string]$exampleConfig.network.publicInterface)) {
         throw "Public config example must not carry a machine interface name."
     }
-    $weatherStart = Get-Content -LiteralPath (Join-Path $expanded "tools\turzx_weather_shim\start_turzx_weatherfix.ps1") -Raw
-    if ($weatherStart -notmatch "TURZX_WEATHER_CONFIG" -or $weatherStart -notmatch '"--config"') {
-        throw "Weather launcher must pass the private config to the fail-closed shim."
+    $weatherStart = Get-Content -LiteralPath (Join-Path $expanded "tools\turzx_side_screen\StartSideScreenStack.ps1") -Raw
+    if ($weatherStart -notmatch 'weatherConfig' -or $weatherStart -notmatch "'--config'") {
+        throw "Stack launcher must pass the private config to the fail-closed shim."
     }
 
     $forbiddenEntries = @(

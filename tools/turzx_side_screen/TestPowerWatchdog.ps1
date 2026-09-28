@@ -19,8 +19,6 @@ $startupWindowGuard = Join-Path $side "Invoke-HS2StartupWindowGuard.ps1"
 $overlayWatchdogPolicy = Join-Path $side "HS2OverlayWatchdogPolicy.ps1"
 $brightness = Join-Path $side "SetTurzxBrightness.ps1"
 $powerProgram = Join-Path $side "TURZX.SideScreen.Power.cs"
-$resume = Join-Path $side "RestartSideScreenAfterResume.ps1"
-$resumeLauncher = Join-Path $side "RestartSideScreenAfterResume-Hidden.vbs"
 $installer = Join-Path $Root "scripts\install-startup-admin.ps1"
 $installerCmd = Join-Path $Root "scripts\install-startup-admin.cmd"
 $start = Join-Path $Root "scripts\start.ps1"
@@ -3011,46 +3009,6 @@ if ($installerText -match [regex]::Escape('-Execute "powershell.exe"')) {
 }
 if ($installerText -match '(?i)/SC\s+ONEVENT|resumeEventQuery|RestartSideScreenAfterResume-Hidden\.vbs') {
     throw "The installer must not register a second resume recovery owner."
-}
-
-if (!(Test-Path -LiteralPath $resume)) {
-    throw "Missing resume recovery script: $resume"
-}
-if (!(Test-Path -LiteralPath $resumeLauncher)) {
-    throw "Missing resume recovery hidden launcher: $resumeLauncher"
-}
-
-$resumeText = Get-Content -Raw -LiteralPath $resume
-foreach ($pattern in @(
-    "DelaySeconds",
-    "Get-ScheduledTask",
-    "Test-ScheduledTaskActionMode",
-    "main watchdog owns resume",
-    "schtasks.exe",
-    "/Run"
-)) {
-    if ($resumeText -notmatch [regex]::Escape($pattern)) {
-        throw "Resume recovery script missing expected pattern: $pattern"
-    }
-}
-foreach ($forbiddenPattern in @(
-        "StopSideScreenStack.ps1",
-        "pnputil.exe",
-        "/restart-device",
-        "/End",
-        "Restart-TurzxUsbDevice",
-        "IncludeWatchdog"
-    )) {
-    if ($resumeText -match [regex]::Escape($forbiddenPattern)) {
-        throw "Deprecated resume compatibility script must be non-destructive; found: $forbiddenPattern"
-    }
-}
-
-$resumeLauncherText = Get-Content -Raw -LiteralPath $resumeLauncher
-foreach ($pattern in @("RestartSideScreenAfterResume.ps1", "shell.Run(command, 0, True)", "DelaySeconds")) {
-    if ($resumeLauncherText -notmatch [regex]::Escape($pattern)) {
-        throw "Resume hidden launcher missing expected pattern: $pattern"
-    }
 }
 
 $watchdogLauncherText = Get-Content -Raw -LiteralPath $watchdogLauncher

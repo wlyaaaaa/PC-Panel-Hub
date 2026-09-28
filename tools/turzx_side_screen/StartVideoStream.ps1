@@ -47,6 +47,19 @@ $metricsEndpoint = Get-TurzxMetricsEndpoint
 $metricsHost = $metricsEndpoint.HostName
 $metricsPort = $metricsEndpoint.Port
 $metricsUrl = $metricsEndpoint.Url
+# Keep the newest 32 launches (stdout and stderr together). A restart storm
+# must not leave thousands of permanent diagnostic files behind.
+$oldMetricsLogs = @(Get-ChildItem -LiteralPath $outDir -File -Filter 'metrics-agent.*.log' -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -match '^metrics-agent\.(\d{8}-\d{9}-\d+)\.(stdout|stderr)\.log$' })
+$keepTags = @($oldMetricsLogs |
+    ForEach-Object { [regex]::Match($_.Name, '^metrics-agent\.(\d{8}-\d{9}-\d+)\.').Groups[1].Value } |
+    Sort-Object -Descending -Unique | Select-Object -First 31)
+foreach ($oldLog in $oldMetricsLogs) {
+    $tag = [regex]::Match($oldLog.Name, '^metrics-agent\.(\d{8}-\d{9}-\d+)\.').Groups[1].Value
+    if ($tag -notin $keepTags) {
+        Remove-Item -LiteralPath $oldLog.FullName -Force -ErrorAction SilentlyContinue
+    }
+}
 $metricsLaunchTag = "{0}-{1}" -f `
     [DateTime]::UtcNow.ToString("yyyyMMdd-HHmmssfff"), `
     $PID
