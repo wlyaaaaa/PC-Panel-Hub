@@ -491,6 +491,34 @@ $overlapHs2 = [pscustomobject]@{
     Left = 2880; Top = 0; Right = 5168; Bottom = 1048
     WorkLeft = 2880; WorkTop = 0; WorkRight = 5168; WorkBottom = 1048
 }
+$offscreenOverlay = New-GuardWindow -Hwnd 800 -ProcessId 900 -ProcessName 'HS2.CrystalOverlay' `
+    -ClassName 'Static' -MonitorDevice 'hs2'
+# MonitorFromWindow can return the nearest HS2 device even when the old
+# absolute coordinates are completely outside its current desktop rectangle.
+foreach ($bounds in @(
+        @(6800, 40, 8200, 240),
+        @(2870, 44, 4307, 242),
+        @(2924, -10, 4361, 188),
+        @(4000, 44, 5437, 242),
+        @(2924, 900, 4361, 1098))) {
+    $offscreenOverlay.PlacementLeft = $bounds[0]
+    $offscreenOverlay.PlacementTop = $bounds[1]
+    $offscreenOverlay.PlacementRight = $bounds[2]
+    $offscreenOverlay.PlacementBottom = $bounds[3]
+    $offscreenPlan = Get-HS2ExclusiveWindowGuardPlan -Monitors @($overlapMain, $overlapHs2) `
+        -Windows @($offscreenOverlay) -OverlayProcessIds @(900)
+    if ($offscreenPlan.OverlayPlacementStatus -cne 'drifted' -or
+        $offscreenPlan.MisplacedOverlayWindows.Count -ne 1 -or $offscreenPlan.Actions.Count -ne 0) {
+        throw 'An offscreen HS2 overlay must request its own display rebind, without moving protected windows.'
+    }
+}
+$offscreenOverlay.PlacementLeft = 2924; $offscreenOverlay.PlacementTop = 44
+$offscreenOverlay.PlacementRight = 4361; $offscreenOverlay.PlacementBottom = 242
+$onscreenPlan = Get-HS2ExclusiveWindowGuardPlan -Monitors @($overlapMain, $overlapHs2) `
+    -Windows @($offscreenOverlay) -OverlayProcessIds @(900)
+if ($onscreenPlan.OverlayPlacementStatus -cne 'healthy') {
+    throw 'An HS2 overlay inside the current target geometry must remain healthy.'
+}
 $overlapExplorer = New-GuardWindow -Hwnd 801 -ProcessId 801 -ProcessName 'explorer' `
     -ClassName 'CabinetWClass' -MonitorDevice 'main'
 $overlapExplorer.PlacementLeft = 1104; $overlapExplorer.PlacementTop = 638

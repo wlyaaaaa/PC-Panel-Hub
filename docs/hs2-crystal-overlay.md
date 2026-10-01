@@ -164,6 +164,9 @@ pwsh -NoProfile -File tools/hs2_crystal_overlay/Install-HS2Overlay.ps1 `
   就由独立的 250 ms 保护循环按几何与唯一主屏归属开始搬移；生产模式下该循环
   跟随父 watchdog 全程运行，状态文件保留最近 20 次实际动作的进程和窗口句柄，
   完整浮层仍服从后续 Secondary 双样本门。
+  浮层健康同时核对窗口坐标是否完整落在当前目标屏范围内；Windows 返回的最近
+  显示器身份不能代替坐标核验。目标屏移动后，旧坐标越界会请求既有浮层重绑，
+  仅重新激活浮层，不改显示器布局或重启 TURZX 推流。
   鼠标边界仍保持 Windows 原生行为。
 - 背景降级由 Windows/Wallpaper Engine 负责，本程序不修改壁纸设置。
 

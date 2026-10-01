@@ -764,7 +764,9 @@ function Get-HS2ExclusiveWindowGuardPlan {
     # Windows can silently remap an already-running top-level overlay window
     # to the primary monitor when the display topology changes.  Process
     # liveness alone is therefore not proof that the overlay is healthy.  Only
-    # meaningful visible overlay windows participate: hidden helper, IME and
+    # MonitorFromWindow also returns the nearest device for offscreen windows;
+    # matching the target identity does not prove the coordinates are inside it.
+    # Meaningful visible overlay windows participate: hidden helper, IME and
     # one-pixel staging windows must not cause a recycle loop.
     $visibleOverlayWindows = @(
         $overlayWindows |
@@ -783,7 +785,11 @@ function Get-HS2ExclusiveWindowGuardPlan {
         $visibleOverlayWindows |
             Where-Object {
                 [bool]$_.IsMinimized -or
-                    [string]$_.MonitorDevice -cne $targetDevice
+                    [string]$_.MonitorDevice -cne $targetDevice -or
+                    [int]$_.PlacementLeft -lt [int]$targetMonitor.Left -or
+                    [int]$_.PlacementTop -lt [int]$targetMonitor.Top -or
+                    [int]$_.PlacementRight -gt [int]$targetMonitor.Right -or
+                    [int]$_.PlacementBottom -gt [int]$targetMonitor.Bottom
             }
     )
     $overlayPlacementStatus = if ($visibleOverlayWindows.Count -eq 0) {
