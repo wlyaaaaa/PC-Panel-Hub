@@ -45,14 +45,12 @@ public sealed class PhoneBatteryProbeReadingCacheTests
         Assert.Equal(confirmed, afterFault);
         Assert.Equal(
             PhoneBatteryProvider.XiaomiHyperConnect,
-            PhoneBatteryArbitration.Select(
+            PhoneBatterySelection.Select(
                 afterFault,
-                null,
                 completedAt.AddSeconds(14),
                 TimeSpan.FromSeconds(15))?.Provider);
-        Assert.Null(PhoneBatteryArbitration.Select(
+        Assert.Null(PhoneBatterySelection.Select(
             afterFault,
-            null,
             completedAt.AddSeconds(16),
             TimeSpan.FromSeconds(15)));
     }
@@ -66,12 +64,12 @@ public sealed class PhoneBatteryProbeReadingCacheTests
             PhoneBatteryReading?>(
             PhoneBatteryProbeAttemptStatus.Succeeded,
             new PhoneBatteryReading(
-                PhoneBatteryProvider.PhoneLink,
+                PhoneBatteryProvider.XiaomiHyperConnect,
                 80,
                 false,
                 true,
                 completedAt,
-                "phone-link-ui"),
+                "xiaomi-ui"),
             completedAt));
 
         var disconnected = cache.Apply(new PhoneBatteryProbeAttempt<
@@ -92,24 +90,24 @@ public sealed class PhoneBatteryProbeReadingCacheTests
             PhoneBatteryReading?>(
             PhoneBatteryProbeAttemptStatus.Succeeded,
             new PhoneBatteryReading(
-                PhoneBatteryProvider.PhoneLink,
+                PhoneBatteryProvider.XiaomiHyperConnect,
                 80,
                 null,
                 true,
                 completedAt,
-                "phone-link-ui"),
+                "xiaomi-ui"),
             completedAt));
 
         var replacement = cache.Apply(new PhoneBatteryProbeAttempt<
             PhoneBatteryReading?>(
             PhoneBatteryProbeAttemptStatus.Succeeded,
             new PhoneBatteryReading(
-                PhoneBatteryProvider.PhoneLink,
+                PhoneBatteryProvider.XiaomiHyperConnect,
                 81,
                 null,
                 true,
                 completedAt.AddMinutes(-1),
-                "phone-link-ui")));
+                "xiaomi-ui")));
 
         Assert.NotEqual(confirmed, replacement);
         Assert.Equal(81, replacement?.Percentage);
@@ -119,7 +117,7 @@ public sealed class PhoneBatteryProbeReadingCacheTests
     }
 
     [Fact]
-    public void FreshConfirmationKeepsBackgroundFallbackUsableWithoutRewritingEvidenceTime()
+    public void FreshConfirmationKeepsReadingUsableWithoutRewritingEvidenceTime()
     {
         var cache = new PhoneBatteryProbeReadingCache();
         var now = DateTimeOffset.UtcNow;
@@ -128,20 +126,19 @@ public sealed class PhoneBatteryProbeReadingCacheTests
             PhoneBatteryReading?>(
             PhoneBatteryProbeAttemptStatus.Succeeded,
             new PhoneBatteryReading(
-                PhoneBatteryProvider.PhoneLink,
+                PhoneBatteryProvider.XiaomiHyperConnect,
                 92,
                 true,
                 true,
                 evidenceAt,
-                "phone-link-companion"),
+                "xiaomi-log"),
             now));
 
         Assert.Equal(evidenceAt, confirmed?.ObservedAt);
         Assert.Equal(now, confirmed?.ConfirmedAt);
         Assert.Equal(
-            PhoneBatteryProvider.PhoneLink,
-            PhoneBatteryArbitration.Select(
-                null,
+            PhoneBatteryProvider.XiaomiHyperConnect,
+            PhoneBatterySelection.Select(
                 confirmed,
                 now.AddSeconds(14),
                 TimeSpan.FromSeconds(15))?.Provider);

@@ -1172,7 +1172,7 @@ internal sealed class CrystalCardWindow : IDisposable
         OverlaySource.NetEase => "网易云音乐",
         OverlaySource.Steam => "STEAM",
         OverlaySource.XiaomiHyperConnect => "小米妙享",
-        OverlaySource.PhoneLink => "手机连接",
+        OverlaySource.VivoOfficeSuite => "vivo办公套件",
         _ => "WINDOWS",
     };
 

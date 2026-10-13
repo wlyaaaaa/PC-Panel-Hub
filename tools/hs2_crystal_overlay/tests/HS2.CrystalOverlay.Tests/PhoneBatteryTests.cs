@@ -8,118 +8,7 @@ public sealed class PhoneBatteryTests
         new(2026, 7, 30, 16, 30, 0, TimeSpan.FromHours(8));
 
     [Fact]
-    public void XiaomiReading_WinsWhenBothProvidersAreCurrent()
-    {
-        var xiaomi = new PhoneBatteryReading(
-            PhoneBatteryProvider.XiaomiHyperConnect,
-            97,
-            true,
-            true,
-            Now);
-        var phoneLink = new PhoneBatteryReading(
-            PhoneBatteryProvider.PhoneLink,
-            93,
-            false,
-            true,
-            Now);
-
-        var selected = PhoneBatteryArbitration.Select(
-            xiaomi,
-            phoneLink,
-            Now,
-            TimeSpan.FromSeconds(15));
-
-        Assert.Same(xiaomi, selected);
-    }
-
-    [Fact]
-    public void PhoneLink_IsUsedOnlyAsConnectedCurrentFallback()
-    {
-        var disconnectedXiaomi = new PhoneBatteryReading(
-            PhoneBatteryProvider.XiaomiHyperConnect,
-            97,
-            true,
-            false,
-            Now);
-        var phoneLink = new PhoneBatteryReading(
-            PhoneBatteryProvider.PhoneLink,
-            93,
-            false,
-            true,
-            Now);
-
-        var selected = PhoneBatteryArbitration.Select(
-            disconnectedXiaomi,
-            phoneLink,
-            Now,
-            TimeSpan.FromSeconds(15));
-
-        Assert.Same(phoneLink, selected);
-    }
-
-    [Fact]
-    public void PhoneLinkCompanion_ProvidesBackgroundBatteryAndConnection()
-    {
-        const string json = """
-            {
-              "speak": "Android 手机 - 已连接到你的电脑",
-              "body": [
-                {
-                  "tooltip": "电池电量剩余 82%，正在充电",
-                  "altText": "你的移动设备正在充电，当前电池电量为 82%"
-                }
-              ]
-            }
-            """;
-
-        var snapshot = PhoneLinkCompanionParser.Parse(json);
-
-        Assert.NotNull(snapshot);
-        Assert.True(snapshot.IsConnected);
-        Assert.Equal(82, snapshot.Percentage);
-        Assert.True(snapshot.IsCharging);
-    }
-
-    [Fact]
-    public void PhoneLinkCompanion_DoesNotTreatDisconnectedCacheAsLive()
-    {
-        const string json = """
-            {
-              "speak": "Android 手机 - 未连接",
-              "body": [
-                { "tooltip": "电池电量剩余 74%" }
-              ]
-            }
-            """;
-
-        var snapshot = PhoneLinkCompanionParser.Parse(json);
-
-        Assert.NotNull(snapshot);
-        Assert.False(snapshot.IsConnected);
-        Assert.Equal(74, snapshot.Percentage);
-    }
-
-    [Fact]
-    public void PhoneLinkCompanion_LeavesUnrecognizedConnectionTextUnknown()
-    {
-        const string json = """
-            {
-              "speak": "Android 手机",
-              "body": [
-                { "tooltip": "电池电量剩余 74%" }
-              ]
-            }
-            """;
-
-        var snapshot = PhoneLinkCompanionParser.Parse(json);
-
-        Assert.NotNull(snapshot);
-        Assert.Null(snapshot.IsConnected);
-        Assert.Equal(74, snapshot.Percentage);
-    }
-
-    [Fact]
-    public void MissingDisconnectedOrStaleProviders_HideBattery()
+    public void DisconnectedOrStaleReading_HidesBattery()
     {
         var stale = new PhoneBatteryReading(
             PhoneBatteryProvider.XiaomiHyperConnect,
@@ -128,19 +17,20 @@ public sealed class PhoneBatteryTests
             true,
             Now - TimeSpan.FromMinutes(2));
         var disconnected = new PhoneBatteryReading(
-            PhoneBatteryProvider.PhoneLink,
+            PhoneBatteryProvider.XiaomiHyperConnect,
             93,
             false,
             false,
             Now);
 
-        var selected = PhoneBatteryArbitration.Select(
+        Assert.Null(PhoneBatterySelection.Select(
             stale,
+            Now,
+            TimeSpan.FromSeconds(15)));
+        Assert.Null(PhoneBatterySelection.Select(
             disconnected,
             Now,
-            TimeSpan.FromSeconds(15));
-
-        Assert.Null(selected);
+            TimeSpan.FromSeconds(15)));
     }
 
     [Fact]

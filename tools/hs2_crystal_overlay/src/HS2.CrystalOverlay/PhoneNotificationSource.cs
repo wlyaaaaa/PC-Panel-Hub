@@ -108,7 +108,7 @@ internal sealed class PhoneNotificationSourceCoordinator : IDisposable
 
             var snapshot = new List<PhoneNotificationSnapshotItem>();
             var xiaomiCount = 0;
-            var phoneLinkCount = 0;
+            var vivoCount = 0;
             foreach (var notification in notifications
                          .OrderBy(notification => notification.CreationTime)
                          .ThenBy(notification => notification.Id))
@@ -127,11 +127,10 @@ internal sealed class PhoneNotificationSourceCoordinator : IDisposable
                 {
                     xiaomiCount++;
                 }
-                else if (source == OverlaySource.PhoneLink)
+                else if (source == OverlaySource.VivoOfficeSuite)
                 {
-                    phoneLinkCount++;
+                    vivoCount++;
                 }
-
                 snapshot.Add(new PhoneNotificationSnapshotItem(
                     notification.Id,
                     notification.CreationTime,
@@ -141,7 +140,7 @@ internal sealed class PhoneNotificationSourceCoordinator : IDisposable
                     source));
             }
 
-            LogInventory(xiaomiCount, phoneLinkCount);
+            LogInventory(xiaomiCount, vivoCount);
             PublishRequests(reconciler.Reconcile(snapshot, now));
         }
         catch (OperationCanceledException)
@@ -199,7 +198,8 @@ internal sealed class PhoneNotificationSourceCoordinator : IDisposable
         appName =
             notification.AppInfo.DisplayInfo.DisplayName?.Trim() ??
             string.Empty;
-        source = PhoneNotificationClassifier.SourceForRelayApp(appName);
+        source = PhoneNotificationClassifier.SourceForRelayApp(
+            appName, notification.AppInfo.AppUserModelId);
         if (source == OverlaySource.System)
         {
             title = string.Empty;
@@ -236,9 +236,9 @@ internal sealed class PhoneNotificationSourceCoordinator : IDisposable
         return true;
     }
 
-    private void LogInventory(int xiaomiCount, int phoneLinkCount)
+    private void LogInventory(int xiaomiCount, int vivoCount)
     {
-        var state = $"xiaomi={xiaomiCount}; phone-link={phoneLinkCount}";
+        var state = $"xiaomi={xiaomiCount}; vivo={vivoCount}";
         if (string.Equals(
                 state,
                 lastInventoryState,
@@ -254,7 +254,7 @@ internal sealed class PhoneNotificationSourceCoordinator : IDisposable
     private static string SourceLabel(OverlaySource source) => source switch
     {
         OverlaySource.XiaomiHyperConnect => "xiaomi",
-        OverlaySource.PhoneLink => "phone-link",
+        OverlaySource.VivoOfficeSuite => "vivo",
         _ => "unknown",
     };
 

@@ -23,7 +23,7 @@ public enum OverlaySource
     NetEase,
     Steam,
     XiaomiHyperConnect,
-    PhoneLink,
+    VivoOfficeSuite,
 }
 
 public enum OverlayVisualTier

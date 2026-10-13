@@ -52,8 +52,7 @@ internal sealed partial class XiaomiHyperConnectBatteryProbe :
             .FirstOrDefault();
         if (process is null)
         {
-            throw new InvalidOperationException(
-                "Xiaomi source process is unavailable.");
+            return null;
         }
 
         var currentUiReading =
@@ -243,280 +242,6 @@ internal sealed partial class XiaomiHyperConnectBatteryProbe :
         DateTimeOffset ObservedAt);
 }
 
-internal sealed partial class PhoneLinkBatteryProbe :
-    IPhoneBatteryProbe
-{
-    private const int MaximumCompanionBytes = 2 * 1024 * 1024;
-    private static readonly TimeSpan CompanionMaximumAge =
-        TimeSpan.FromMinutes(5);
-
-    private readonly string companionPath = Path.Combine(
-        Environment.GetFolderPath(
-            Environment.SpecialFolder.LocalApplicationData),
-        "Packages",
-        "Microsoft.YourPhone_8wekyb3d8bbwe",
-        "LocalState",
-        "StartMenu",
-        "StartMenuCompanion.json");
-
-    public Task<PhoneBatteryReading?> ReadAsync(
-        DateTimeOffset now,
-        CancellationToken cancellationToken) =>
-        Task.Run(() => Read(now, cancellationToken), cancellationToken);
-
-    private PhoneBatteryReading? Read(
-        DateTimeOffset now,
-        CancellationToken cancellationToken)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        PhoneLinkCompanionReadResult? companion = null;
-        Exception? companionFailure = null;
-        try
-        {
-            companion = TryReadCompanion(now);
-        }
-        catch (Exception exception) when (
-            exception is IOException or
-                UnauthorizedAccessException or
-                InvalidDataException or
-                FormatException or
-                InvalidOperationException)
-        {
-            companionFailure = exception;
-        }
-
-        using var process = Process
-            .GetProcessesByName("PhoneExperienceHost")
-            .OrderByDescending(candidate => candidate.StartTime)
-            .FirstOrDefault();
-        if (process is null)
-        {
-            var resolution = PhoneBatteryProbeEvidence.ResolvePhoneLink(
-                liveUi: null,
-                companion?.Reading,
-                companion?.IsExplicitDisconnect == true);
-            if (resolution.Reading is not null)
-            {
-                return resolution.Reading;
-            }
-
-            if (resolution.IsExplicitDisconnect)
-            {
-                return null;
-            }
-
-            if (companionFailure is not null)
-            {
-                throw new InvalidOperationException(
-                    "Phone Link companion source could not be read.",
-                    companionFailure);
-            }
-
-            throw new InvalidOperationException(
-                "Phone Link source process is unavailable.");
-        }
-
-        try
-        {
-            var windows = AutomationElement.RootElement.FindAll(
-                TreeScope.Children,
-                new PropertyCondition(
-                    AutomationElement.ProcessIdProperty,
-                    process.Id));
-            foreach (AutomationElement window in windows)
-            {
-                var textElements = window.FindAll(
-                    TreeScope.Descendants,
-                    new PropertyCondition(
-                        AutomationElement.ControlTypeProperty,
-                        ControlType.Text));
-                int? percentage = null;
-                var charging = false;
-                foreach (AutomationElement element in textElements)
-                {
-                    var name = element.Current.Name;
-                    var match = PercentAnywhere().Match(name);
-                    if (match.Success &&
-                        int.TryParse(
-                            match.Groups["value"].Value,
-                            out var value) &&
-                        value is >= 0 and <= 100)
-                    {
-                        percentage = value;
-                    }
-
-                    charging |= ChargingText().IsMatch(name);
-                }
-
-                if (percentage is not null)
-                {
-                    return new PhoneBatteryReading(
-                        PhoneBatteryProvider.PhoneLink,
-                        percentage.Value,
-                        charging ? true : null,
-                        true,
-                        DateTimeOffset.Now,
-                        "phone-link-ui");
-                }
-            }
-        }
-        catch (ElementNotAvailableException exception)
-        {
-            var resolution = PhoneBatteryProbeEvidence.ResolvePhoneLink(
-                liveUi: null,
-                companion?.Reading,
-                companion?.IsExplicitDisconnect == true);
-            if (resolution.Reading is not null)
-            {
-                return resolution.Reading;
-            }
-
-            if (resolution.IsExplicitDisconnect)
-            {
-                return null;
-            }
-
-            throw new InvalidOperationException(
-                "Phone Link rebuilt its visual tree while it was being sampled.",
-                exception);
-        }
-        catch (InvalidOperationException exception)
-        {
-            var resolution = PhoneBatteryProbeEvidence.ResolvePhoneLink(
-                liveUi: null,
-                companion?.Reading,
-                companion?.IsExplicitDisconnect == true);
-            if (resolution.Reading is not null)
-            {
-                return resolution.Reading;
-            }
-
-            if (resolution.IsExplicitDisconnect)
-            {
-                return null;
-            }
-
-            throw new InvalidOperationException(
-                "Phone Link visual tree could not be read.",
-                exception);
-        }
-
-        var finalResolution = PhoneBatteryProbeEvidence.ResolvePhoneLink(
-            liveUi: null,
-            companion?.Reading,
-            companion?.IsExplicitDisconnect == true);
-        if (finalResolution.Reading is not null)
-        {
-            return finalResolution.Reading;
-        }
-
-        if (finalResolution.IsExplicitDisconnect)
-        {
-            return null;
-        }
-
-        if (companionFailure is not null)
-        {
-            throw new InvalidOperationException(
-                "Phone Link companion source could not be read.",
-                companionFailure);
-        }
-
-        throw new InvalidDataException(
-            "Phone Link source has no current battery evidence.");
-    }
-
-    private PhoneLinkCompanionReadResult? TryReadCompanion(
-        DateTimeOffset now)
-    {
-        try
-        {
-            _ = File.GetAttributes(companionPath);
-        }
-        catch (FileNotFoundException)
-        {
-            return null;
-        }
-        catch (DirectoryNotFoundException)
-        {
-            return null;
-        }
-
-        var info = new FileInfo(companionPath);
-        if (info.Length <= 0)
-        {
-            throw new InvalidDataException(
-                "Phone Link companion file is empty.");
-        }
-
-        if (info.Length > MaximumCompanionBytes)
-        {
-            throw new InvalidDataException(
-                "Phone Link companion file exceeds the size limit.");
-        }
-
-        var observedAt = new DateTimeOffset(
-            info.LastWriteTimeUtc,
-            TimeSpan.Zero);
-        var age = now.ToUniversalTime() - observedAt;
-        if (age < TimeSpan.FromMinutes(-1) ||
-            age > CompanionMaximumAge)
-        {
-            throw new InvalidOperationException(
-                "Phone Link companion file is stale.");
-        }
-
-        using var stream = new FileStream(
-            companionPath,
-            FileMode.Open,
-            FileAccess.Read,
-            FileShare.ReadWrite | FileShare.Delete);
-        using var reader = new StreamReader(
-            stream,
-            Encoding.UTF8,
-            detectEncodingFromByteOrderMarks: true);
-        var snapshot = PhoneLinkCompanionParser.Parse(reader.ReadToEnd());
-        if (snapshot is null)
-        {
-            throw new FormatException(
-                "Phone Link companion file has no valid battery payload.");
-        }
-
-        if (snapshot.IsConnected == false)
-        {
-            return new PhoneLinkCompanionReadResult(
-                Reading: null,
-                IsExplicitDisconnect: true);
-        }
-
-        if (snapshot.IsConnected != true)
-        {
-            throw new InvalidDataException(
-                "Phone Link companion connection state is unknown.");
-        }
-
-        return new PhoneLinkCompanionReadResult(
-            new PhoneBatteryReading(
-                PhoneBatteryProvider.PhoneLink,
-                snapshot.Percentage,
-                snapshot.IsCharging,
-                true,
-                observedAt,
-                "phone-link-companion"),
-            IsExplicitDisconnect: false);
-    }
-
-    [GeneratedRegex(@"\b(?<value>\d{1,3})%\b")]
-    private static partial Regex PercentAnywhere();
-
-    [GeneratedRegex(@"charging|充电", RegexOptions.IgnoreCase)]
-    private static partial Regex ChargingText();
-
-    private sealed record PhoneLinkCompanionReadResult(
-        PhoneBatteryReading? Reading,
-        bool IsExplicitDisconnect);
-}
-
 internal sealed class PhoneBatterySourceCoordinator : IDisposable
 {
     private static readonly TimeSpan PollInterval =
@@ -529,14 +254,9 @@ internal sealed class PhoneBatterySourceCoordinator : IDisposable
     private readonly IOverlayPublisher publisher;
     private readonly LifetimePublicationGate publicationGate = new();
     private readonly IPhoneBatteryProbe xiaomi;
-    private readonly IPhoneBatteryProbe phoneLink;
     private readonly PhoneBatteryProbeSingleFlight<
         PhoneBatteryReading?> xiaomiFlight = new();
-    private readonly PhoneBatteryProbeSingleFlight<
-        PhoneBatteryReading?> phoneLinkFlight = new();
     private readonly PhoneBatteryProbeReadingCache xiaomiReadingCache =
-        new();
-    private readonly PhoneBatteryProbeReadingCache phoneLinkReadingCache =
         new();
     private readonly CancellationTokenSource cancellation = new();
     private readonly PeriodicTimer timer;
@@ -548,19 +268,16 @@ internal sealed class PhoneBatterySourceCoordinator : IDisposable
     internal PhoneBatterySourceCoordinator(IOverlayPublisher publisher)
         : this(
             publisher,
-            new XiaomiHyperConnectBatteryProbe(),
-            new PhoneLinkBatteryProbe())
+            new XiaomiHyperConnectBatteryProbe())
     {
     }
 
     internal PhoneBatterySourceCoordinator(
         IOverlayPublisher publisher,
-        IPhoneBatteryProbe xiaomi,
-        IPhoneBatteryProbe phoneLink)
+        IPhoneBatteryProbe xiaomi)
     {
         this.publisher = publisher;
         this.xiaomi = xiaomi;
-        this.phoneLink = phoneLink;
         timer = new PeriodicTimer(PollInterval);
         loop = Task.Run(PollLoopAsync);
     }
@@ -594,24 +311,13 @@ internal sealed class PhoneBatterySourceCoordinator : IDisposable
         }
 
         var token = cancellation.Token;
-        // Start both probes before observing either one. Each source owns its
-        // own timeout and single-flight, so a stuck Xiaomi/Phone Link call
-        // cannot block a healthy fallback forever or spawn one worker per tick.
         var xiaomiAttemptTask = xiaomiFlight.ObserveAsync(
             sourceToken => xiaomi.ReadAsync(
                 DateTimeOffset.Now,
                 sourceToken),
             SourceTimeout,
             token);
-        var phoneLinkAttemptTask = phoneLinkFlight.ObserveAsync(
-            sourceToken => phoneLink.ReadAsync(
-                DateTimeOffset.Now,
-                sourceToken),
-            SourceTimeout,
-            token);
-
         var xiaomiAttempt = await xiaomiAttemptTask;
-        var phoneLinkAttempt = await phoneLinkAttemptTask;
         if (publicationGate.IsClosed)
         {
             return;
@@ -621,32 +327,25 @@ internal sealed class PhoneBatterySourceCoordinator : IDisposable
         // a recent confirmed value through timeout/fault jitter and only clears
         // it when a completed successful probe explicitly returns no phone.
         var xiaomiReading = xiaomiReadingCache.Apply(xiaomiAttempt);
-        var phoneLinkReading = phoneLinkReadingCache.Apply(phoneLinkAttempt);
         var now = DateTimeOffset.Now;
-        var selected = PhoneBatteryArbitration.Select(
+        var selected = PhoneBatterySelection.Select(
             xiaomiReading,
-            phoneLinkReading,
             now,
             MaximumReadingAge);
         LogSourceState(
             xiaomiAttempt,
-            phoneLinkAttempt,
             xiaomiReading,
-            phoneLinkReading,
             selected);
         PublishSelection(selected);
     }
 
     private void LogSourceState(
         PhoneBatteryProbeAttempt<PhoneBatteryReading?> xiaomiAttempt,
-        PhoneBatteryProbeAttempt<PhoneBatteryReading?> phoneLinkAttempt,
         PhoneBatteryReading? xiaomiReading,
-        PhoneBatteryReading? phoneLinkReading,
         PhoneBatteryReading? selected)
     {
         var state =
             $"xiaomi={DescribeAttempt(xiaomiAttempt, xiaomiReading)}; " +
-            $"phone-link={DescribeAttempt(phoneLinkAttempt, phoneLinkReading)}; " +
             $"selected={selected?.Provider.ToString() ?? "none"}";
         if (string.Equals(
                 state,
@@ -736,7 +435,6 @@ internal sealed class PhoneBatterySourceCoordinator : IDisposable
         var sourceName = provider switch
         {
             PhoneBatteryProvider.XiaomiHyperConnect => "小米妙享",
-            PhoneBatteryProvider.PhoneLink => "手机连接",
             _ => "手机",
         };
         _ = PublishIfActive(OverlayRequest.Timed(
@@ -762,7 +460,6 @@ internal sealed class PhoneBatterySourceCoordinator : IDisposable
         {
             PhoneBatteryProvider.XiaomiHyperConnect =>
                 OverlaySource.XiaomiHyperConnect,
-            PhoneBatteryProvider.PhoneLink => OverlaySource.PhoneLink,
             _ => OverlaySource.System,
         };
 
@@ -776,8 +473,7 @@ internal sealed class PhoneBatterySourceCoordinator : IDisposable
         cancellation.Cancel();
         timer.Dispose();
         var termination = WaitForTerminationAsync(
-            xiaomiFlight.StopAsync(),
-            phoneLinkFlight.StopAsync());
+            xiaomiFlight.StopAsync());
         var completed = false;
         try
         {
@@ -804,9 +500,7 @@ internal sealed class PhoneBatterySourceCoordinator : IDisposable
             TaskScheduler.Default);
     }
 
-    private async Task WaitForTerminationAsync(
-        Task xiaomiStop,
-        Task phoneLinkStop)
+    private async Task WaitForTerminationAsync(Task xiaomiStop)
     {
         try
         {
@@ -824,12 +518,5 @@ internal sealed class PhoneBatterySourceCoordinator : IDisposable
         {
         }
 
-        try
-        {
-            await phoneLinkStop;
-        }
-        catch
-        {
-        }
     }
 }

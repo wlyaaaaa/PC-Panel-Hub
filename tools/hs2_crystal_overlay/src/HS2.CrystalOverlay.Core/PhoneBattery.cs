@@ -1,5 +1,4 @@
 using System.Globalization;
-using System.Text.Json;
 using System.Text.RegularExpressions;
 
 namespace HS2.CrystalOverlay.Core;
@@ -7,7 +6,6 @@ namespace HS2.CrystalOverlay.Core;
 public enum PhoneBatteryProvider
 {
     XiaomiHyperConnect,
-    PhoneLink,
 }
 
 public sealed record PhoneBatteryReading(
@@ -27,10 +25,6 @@ public sealed record XiaomiBatteryLogSnapshot(
 public sealed record XiaomiConnectionLogSnapshot(
     bool IsConnected,
     DateTimeOffset ObservedAt);
-
-public sealed record PhoneBatteryProbeResolution(
-    PhoneBatteryReading? Reading,
-    bool IsExplicitDisconnect);
 
 public static class PhoneBatteryProbeEvidence
 {
@@ -61,54 +55,15 @@ public static class PhoneBatteryProbeEvidence
             "xiaomi-ui");
     }
 
-    public static PhoneBatteryProbeResolution ResolvePhoneLink(
-        PhoneBatteryReading? liveUi,
-        PhoneBatteryReading? companion,
-        bool companionExplicitDisconnect)
-    {
-        if (liveUi is not null)
-        {
-            return new PhoneBatteryProbeResolution(liveUi, false);
-        }
-
-        if (companion is not null)
-        {
-            return new PhoneBatteryProbeResolution(companion, false);
-        }
-
-        return new PhoneBatteryProbeResolution(
-            null,
-            companionExplicitDisconnect);
-    }
 }
 
-public static class PhoneBatteryArbitration
+public static class PhoneBatterySelection
 {
     public static PhoneBatteryReading? Select(
-        PhoneBatteryReading? xiaomi,
-        PhoneBatteryReading? phoneLink,
+        PhoneBatteryReading? reading,
         DateTimeOffset now,
-        TimeSpan maximumAge)
-    {
-        var xiaomiUsable = IsUsable(xiaomi, now, maximumAge);
-        var phoneLinkUsable = IsUsable(phoneLink, now, maximumAge);
-        if (!xiaomiUsable)
-        {
-            return phoneLinkUsable ? phoneLink : null;
-        }
-
-        if (!phoneLinkUsable)
-        {
-            return xiaomi;
-        }
-
-        // Xiaomi is the preferred source when both samples describe roughly
-        // the same moment. A materially newer Phone Link sample must still
-        // beat an old Xiaomi log line that was merely re-confirmed this poll.
-        return xiaomi!.ObservedAt >= phoneLink!.ObservedAt.AddSeconds(-15)
-            ? xiaomi
-            : phoneLink;
-    }
+        TimeSpan maximumAge) =>
+        IsUsable(reading, now, maximumAge) ? reading : null;
 
     private static bool IsUsable(
         PhoneBatteryReading? reading,
@@ -126,144 +81,6 @@ public static class PhoneBatteryArbitration
         var age = now - freshnessAt;
         return age >= TimeSpan.FromSeconds(-5) && age <= maximumAge;
     }
-}
-
-public sealed record PhoneLinkCompanionSnapshot(
-    int Percentage,
-    bool? IsCharging,
-    bool? IsConnected);
-
-public static partial class PhoneLinkCompanionParser
-{
-    public static PhoneLinkCompanionSnapshot? Parse(string json)
-    {
-        if (string.IsNullOrWhiteSpace(json))
-        {
-            return null;
-        }
-
-        try
-        {
-            using var document = JsonDocument.Parse(json);
-            var strings = EnumerateStrings(document.RootElement).ToArray();
-            var connectionText = document.RootElement.ValueKind ==
-                                 JsonValueKind.Object &&
-                                 document.RootElement.TryGetProperty(
-                                     "speak",
-                                     out var speak) &&
-                                 speak.ValueKind == JsonValueKind.String
-                ? speak.GetString() ?? string.Empty
-                : string.Join(' ', strings);
-            bool? connected = DisconnectedText().IsMatch(connectionText)
-                ? false
-                : ConnectedText().IsMatch(connectionText)
-                    ? true
-                    : null;
-
-            int? percentage = null;
-            bool? charging = null;
-            foreach (var text in strings.Where(candidate =>
-                         BatteryContextText().IsMatch(candidate)))
-            {
-                var match = PercentText().Match(text);
-                if (match.Success &&
-                    int.TryParse(
-                        match.Groups["value"].Value,
-                        NumberStyles.None,
-                        CultureInfo.InvariantCulture,
-                        out var value) &&
-                    value is >= 0 and <= 100)
-                {
-                    percentage = value;
-                }
-
-                if (NotChargingText().IsMatch(text))
-                {
-                    charging = false;
-                }
-                else if (ChargingText().IsMatch(text))
-                {
-                    charging = true;
-                }
-            }
-
-            return percentage is null
-                ? null
-                : new PhoneLinkCompanionSnapshot(
-                    percentage.Value,
-                    charging,
-                    connected);
-        }
-        catch (JsonException)
-        {
-            return null;
-        }
-    }
-
-    private static IEnumerable<string> EnumerateStrings(JsonElement element)
-    {
-        switch (element.ValueKind)
-        {
-            case JsonValueKind.String:
-                var value = element.GetString();
-                if (!string.IsNullOrWhiteSpace(value))
-                {
-                    yield return value;
-                }
-
-                break;
-            case JsonValueKind.Object:
-                foreach (var property in element.EnumerateObject())
-                {
-                    foreach (var child in EnumerateStrings(property.Value))
-                    {
-                        yield return child;
-                    }
-                }
-
-                break;
-            case JsonValueKind.Array:
-                foreach (var item in element.EnumerateArray())
-                {
-                    foreach (var child in EnumerateStrings(item))
-                    {
-                        yield return child;
-                    }
-                }
-
-                break;
-        }
-    }
-
-    [GeneratedRegex(
-        @"(?:未连接|已断开|断开连接|not\s+connected|disconnected)",
-        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
-    private static partial Regex DisconnectedText();
-
-    [GeneratedRegex(
-        @"(?:已连接|连接到你的电脑|connected(?:\s+to)?(?:\s+your)?\s+(?:pc|computer))",
-        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
-    private static partial Regex ConnectedText();
-
-    [GeneratedRegex(
-        @"(?:电池|电量|battery)",
-        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
-    private static partial Regex BatteryContextText();
-
-    [GeneratedRegex(
-        @"(?<value>\d{1,3})\s*%",
-        RegexOptions.CultureInvariant)]
-    private static partial Regex PercentText();
-
-    [GeneratedRegex(
-        @"(?:未充电|没有充电|not\s+charging)",
-        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
-    private static partial Regex NotChargingText();
-
-    [GeneratedRegex(
-        @"(?:正在充电|充电中|charging)",
-        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
-    private static partial Regex ChargingText();
 }
 
 public static partial class XiaomiBatteryLogParser

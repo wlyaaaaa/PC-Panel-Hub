@@ -5,60 +5,6 @@ namespace HS2.CrystalOverlay.Tests;
 public sealed class PhoneBatteryProbeEvidenceTests
 {
     [Fact]
-    public void RepeatedOldXiaomiLogDoesNotOutrankNewPhoneLinkReading()
-    {
-        var xiaomiCache = new PhoneBatteryProbeReadingCache();
-        var phoneLinkCache = new PhoneBatteryProbeReadingCache();
-        var now = new DateTimeOffset(
-            2026,
-            8,
-            6,
-            12,
-            0,
-            0,
-            TimeSpan.Zero);
-        var oldLogObservedAt = now.AddSeconds(-16);
-
-        var firstXiaomi = xiaomiCache.Apply(new PhoneBatteryProbeAttempt<
-            PhoneBatteryReading?>(
-            PhoneBatteryProbeAttemptStatus.Succeeded,
-            new PhoneBatteryReading(
-                PhoneBatteryProvider.XiaomiHyperConnect,
-                97,
-                null,
-                true,
-                oldLogObservedAt,
-                "xiaomi-log"),
-            now));
-        var repeatedXiaomi = xiaomiCache.Apply(new PhoneBatteryProbeAttempt<
-            PhoneBatteryReading?>(
-            PhoneBatteryProbeAttemptStatus.Succeeded,
-            firstXiaomi,
-            now.AddSeconds(5)));
-        var phoneLink = phoneLinkCache.Apply(new PhoneBatteryProbeAttempt<
-            PhoneBatteryReading?>(
-            PhoneBatteryProbeAttemptStatus.Succeeded,
-            new PhoneBatteryReading(
-                PhoneBatteryProvider.PhoneLink,
-                62,
-                false,
-                true,
-                now.AddSeconds(5),
-                "phone-link-companion"),
-            now.AddSeconds(5)));
-
-        Assert.NotNull(repeatedXiaomi);
-        Assert.Equal(oldLogObservedAt, repeatedXiaomi.ObservedAt);
-        Assert.Equal(
-            PhoneBatteryProvider.PhoneLink,
-            PhoneBatteryArbitration.Select(
-                repeatedXiaomi,
-                phoneLink,
-                now.AddSeconds(5),
-                TimeSpan.FromSeconds(15))?.Provider);
-    }
-
-    [Fact]
     public void TemporaryFileLockFaultDoesNotClearConfirmedReading()
     {
         var cache = new PhoneBatteryProbeReadingCache();
@@ -152,36 +98,4 @@ public sealed class PhoneBatteryProbeEvidenceTests
         Assert.Null(reading.IsCharging);
     }
 
-    [Fact]
-    public void LivePhoneLinkUiOutranksCompanionDisconnect()
-    {
-        var now = DateTimeOffset.UtcNow;
-        var liveUi = new PhoneBatteryReading(
-            PhoneBatteryProvider.PhoneLink,
-            83,
-            true,
-            true,
-            now,
-            "phone-link-ui");
-
-        var resolution = PhoneBatteryProbeEvidence.ResolvePhoneLink(
-            liveUi,
-            companion: null,
-            companionExplicitDisconnect: true);
-
-        Assert.Equal(liveUi, resolution.Reading);
-        Assert.False(resolution.IsExplicitDisconnect);
-    }
-
-    [Fact]
-    public void CompanionDisconnectIsUsedOnlyWhenNoLiveUiExists()
-    {
-        var resolution = PhoneBatteryProbeEvidence.ResolvePhoneLink(
-            liveUi: null,
-            companion: null,
-            companionExplicitDisconnect: true);
-
-        Assert.Null(resolution.Reading);
-        Assert.True(resolution.IsExplicitDisconnect);
-    }
 }

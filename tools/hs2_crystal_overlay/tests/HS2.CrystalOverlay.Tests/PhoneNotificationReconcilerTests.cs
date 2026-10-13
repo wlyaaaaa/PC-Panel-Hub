@@ -15,8 +15,8 @@ public sealed class PhoneNotificationReconcilerTests
 
         var requests = reconciler.Reconcile(
             [
-                Item(1, "妈妈来电", "正在通话", OverlaySource.PhoneLink),
-                Item(2, "微信", "普通旧消息", OverlaySource.PhoneLink),
+                Item(1, "妈妈来电", "正在通话", OverlaySource.XiaomiHyperConnect),
+                Item(2, "微信", "普通旧消息", OverlaySource.XiaomiHyperConnect),
             ],
             Start);
 
@@ -31,14 +31,14 @@ public sealed class PhoneNotificationReconcilerTests
         var reconciler = new PhoneNotificationSnapshotReconciler(
             TimeSpan.FromMinutes(5));
         _ = reconciler.Reconcile(
-            [Item(1, "微信", "旧消息", OverlaySource.PhoneLink)],
+            [Item(1, "微信", "旧消息", OverlaySource.XiaomiHyperConnect)],
             Start);
 
         var requests = reconciler.Reconcile(
             [
-                Item(2, "微信", "新消息", OverlaySource.PhoneLink),
-                Item(3, "Messages", "You have a new message", OverlaySource.PhoneLink),
-                Item(4, "微信", "会议改到三点", OverlaySource.PhoneLink),
+                Item(2, "微信", "新消息", OverlaySource.XiaomiHyperConnect),
+                Item(3, "Messages", "You have a new message", OverlaySource.XiaomiHyperConnect),
+                Item(4, "微信", "会议改到三点", OverlaySource.XiaomiHyperConnect),
             ],
             Start + TimeSpan.FromSeconds(1));
 
@@ -53,15 +53,15 @@ public sealed class PhoneNotificationReconcilerTests
         var reconciler = new PhoneNotificationSnapshotReconciler(
             TimeSpan.FromMinutes(5));
         _ = reconciler.Reconcile(
-            [Item(5, "微信", "旧消息", OverlaySource.PhoneLink)],
+            [Item(5, "微信", "旧消息", OverlaySource.XiaomiHyperConnect)],
             Start);
 
         var first = Assert.Single(reconciler.Reconcile(
-            [Item(5, "微信", "会议改到三点", OverlaySource.PhoneLink)],
+            [Item(5, "微信", "会议改到三点", OverlaySource.XiaomiHyperConnect)],
             Start + TimeSpan.FromSeconds(1)));
 
         var ended = Assert.Single(reconciler.Reconcile(
-            [Item(5, "微信", "新消息", OverlaySource.PhoneLink)],
+            [Item(5, "微信", "新消息", OverlaySource.XiaomiHyperConnect)],
             Start + TimeSpan.FromSeconds(2)));
 
         Assert.False(ended.IsActive);
@@ -113,7 +113,7 @@ public sealed class PhoneNotificationReconcilerTests
                     11,
                     "文件传输",
                     "Fight for the Future · KOSA theater is a gift to Big Tech",
-                    OverlaySource.PhoneLink),
+                    OverlaySource.XiaomiHyperConnect),
             ],
             Start);
 
@@ -126,7 +126,7 @@ public sealed class PhoneNotificationReconcilerTests
                     11,
                     "文件传输",
                     "Fight for the Future · KOSA theater is a gift to Big Tech",
-                    OverlaySource.PhoneLink),
+                    OverlaySource.XiaomiHyperConnect),
             ],
             Start + TimeSpan.FromSeconds(1));
 
@@ -139,11 +139,11 @@ public sealed class PhoneNotificationReconcilerTests
         var reconciler = new PhoneNotificationSnapshotReconciler(
             TimeSpan.FromMinutes(5));
         _ = reconciler.Reconcile(
-            [Item(20, "下载", "23%", OverlaySource.PhoneLink)],
+            [Item(20, "下载", "23%", OverlaySource.XiaomiHyperConnect)],
             Start);
 
         var requests = reconciler.Reconcile(
-            [Item(20, "下载", "24%", OverlaySource.PhoneLink)],
+            [Item(20, "下载", "24%", OverlaySource.XiaomiHyperConnect)],
             Start + TimeSpan.FromSeconds(1));
 
         var request = Assert.Single(requests);
@@ -157,12 +157,12 @@ public sealed class PhoneNotificationReconcilerTests
         var reconciler = new PhoneNotificationSnapshotReconciler(
             TimeSpan.FromMinutes(5));
         _ = reconciler.Reconcile(
-            [Item(30, "腾讯科技", "普通旧消息", OverlaySource.PhoneLink)],
+            [Item(30, "腾讯科技", "普通旧消息", OverlaySource.XiaomiHyperConnect)],
             Start);
 
         var first = Assert.Single(reconciler.Reconcile(
             [
-                Item(30, "腾讯科技", "普通旧消息", OverlaySource.PhoneLink),
+                Item(30, "腾讯科技", "普通旧消息", OverlaySource.XiaomiHyperConnect),
                 Item(
                     31,
                     "腾讯科技",
@@ -181,7 +181,7 @@ public sealed class PhoneNotificationReconcilerTests
 
         var next = Assert.Single(reconciler.Reconcile(
             [
-                Item(30, "腾讯科技", "普通旧消息", OverlaySource.PhoneLink),
+                Item(30, "腾讯科技", "普通旧消息", OverlaySource.XiaomiHyperConnect),
                 Item(
                     31,
                     "腾讯科技",
@@ -205,7 +205,7 @@ public sealed class PhoneNotificationReconcilerTests
                 40,
                 "账户安全",
                 "验证码 482731",
-                OverlaySource.PhoneLink)],
+                OverlaySource.XiaomiHyperConnect)],
             Start);
 
         Assert.Empty(requests);
@@ -217,7 +217,7 @@ public sealed class PhoneNotificationReconcilerTests
         var reconciler = new PhoneNotificationSnapshotReconciler(
             TimeSpan.FromMinutes(5));
         _ = reconciler.Reconcile(
-            [Item(50, "微信", "基线消息", OverlaySource.PhoneLink)],
+            [Item(50, "微信", "基线消息", OverlaySource.XiaomiHyperConnect)],
             Start);
 
         var first = Assert.Single(reconciler.Reconcile(
@@ -226,7 +226,7 @@ public sealed class PhoneNotificationReconcilerTests
                     51,
                     "账户安全",
                     "验证码 111111",
-                    OverlaySource.PhoneLink,
+                    OverlaySource.XiaomiHyperConnect,
                     Start + TimeSpan.FromSeconds(1)),
                 Item(
                     52,
@@ -244,7 +244,7 @@ public sealed class PhoneNotificationReconcilerTests
                     51,
                     "账户安全",
                     "验证码 333333",
-                    OverlaySource.PhoneLink,
+                    OverlaySource.XiaomiHyperConnect,
                     Start + TimeSpan.FromSeconds(1)),
                 Item(
                     52,
@@ -264,7 +264,7 @@ public sealed class PhoneNotificationReconcilerTests
         var reconciler = new PhoneNotificationSnapshotReconciler(
             TimeSpan.FromMinutes(5));
         _ = reconciler.Reconcile(
-            [Item(60, "微信", "基线消息", OverlaySource.PhoneLink)],
+            [Item(60, "微信", "基线消息", OverlaySource.XiaomiHyperConnect)],
             Start);
 
         var request = Assert.Single(reconciler.Reconcile(
@@ -272,12 +272,12 @@ public sealed class PhoneNotificationReconcilerTests
                 61,
                 "G-123456 is your Google verification code",
                 null,
-                OverlaySource.PhoneLink,
+                OverlaySource.XiaomiHyperConnect,
                 Start + TimeSpan.FromSeconds(1))],
             Start + TimeSpan.FromSeconds(2)));
 
         Assert.Equal("123456", request.Visual?.VerificationCode);
-        Assert.Equal("手机连接", request.Visual?.Subtitle);
+        Assert.Equal("小米妙享", request.Visual?.Subtitle);
         Assert.Null(request.Visual?.Meta);
         Assert.DoesNotContain(
             "123456",
@@ -291,7 +291,7 @@ public sealed class PhoneNotificationReconcilerTests
         var reconciler = new PhoneNotificationSnapshotReconciler(
             TimeSpan.FromMinutes(5));
         _ = reconciler.Reconcile(
-            [Item(70, "微信", "基线消息", OverlaySource.PhoneLink)],
+            [Item(70, "微信", "基线消息", OverlaySource.XiaomiHyperConnect)],
             Start);
 
         var request = Assert.Single(reconciler.Reconcile(
@@ -299,7 +299,7 @@ public sealed class PhoneNotificationReconcilerTests
                 71,
                 "账户安全",
                 "...提醒：验证码725816，5分钟有效，勿泄露防诈骗。非本人操作请忽略。",
-                OverlaySource.PhoneLink,
+                OverlaySource.XiaomiHyperConnect,
                 Start + TimeSpan.FromSeconds(1))],
             Start + TimeSpan.FromSeconds(2)));
 
@@ -317,9 +317,7 @@ public sealed class PhoneNotificationReconcilerTests
         new(
             id,
             creationTime ?? Start,
-            source == OverlaySource.PhoneLink
-                ? "手机连接"
-                : "小米妙享",
+            "小米妙享",
             title,
             body,
             source);

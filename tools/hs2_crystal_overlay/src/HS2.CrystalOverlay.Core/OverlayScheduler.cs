@@ -494,7 +494,7 @@ public sealed class OverlayScheduler
     private static bool IsPhoneRelaySource(OverlaySource source) =>
         source is
             OverlaySource.XiaomiHyperConnect or
-            OverlaySource.PhoneLink;
+            OverlaySource.VivoOfficeSuite;
 
     private static string? NormalizeDedupKey(string? value)
     {

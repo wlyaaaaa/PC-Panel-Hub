@@ -188,26 +188,15 @@ public static partial class PhoneNotificationClassifier
         bool isActiveTracked) =>
         !known || changed || !isActiveTracked;
 
-    public static OverlaySource SourceForRelayApp(string? appName)
+    public static OverlaySource SourceForRelayApp(
+        string? appName,
+        string? appUserModelId = null)
     {
         var value = appName ?? string.Empty;
-        if (value.Contains(
-                "Phone Link",
-                StringComparison.OrdinalIgnoreCase) ||
-            value.Contains(
-                "手机连接",
-                StringComparison.OrdinalIgnoreCase) ||
-            value.Contains(
-                "Link to Windows",
-                StringComparison.OrdinalIgnoreCase) ||
-            value.Contains(
-                "Cross Device Experience Host",
-                StringComparison.OrdinalIgnoreCase) ||
-            value.Contains(
-                "跨设备体验主机",
-                StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(value, "vivo办公套件", StringComparison.Ordinal) &&
+            string.Equals(appUserModelId, "com.vivo.pcsuite", StringComparison.Ordinal))
         {
-            return OverlaySource.PhoneLink;
+            return OverlaySource.VivoOfficeSuite;
         }
 
         if (value.Contains(
