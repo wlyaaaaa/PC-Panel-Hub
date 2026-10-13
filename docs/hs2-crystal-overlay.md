@@ -124,7 +124,7 @@ pwsh -NoProfile -File tools/hs2_crystal_overlay/Install-HS2Overlay.ps1 `
 发布脚本按 SDK 生成的包文件清单复制资源和依赖，并逐文件核对哈希；拒绝覆盖已有
 目录。每次更新换一个新目录名，不能把 `dotnet clean` 会清理的位置用于安装。
 安装沿用原包身份、通知权限及本地设置，采用未签名应用布局注册；不是生成签名 MSIX。
-此次包版本为 `1.0.0.3`；后续发布继续递增 `Package.appxmanifest` 的版本号。
+此次包版本为 `1.0.0.4`；后续发布继续递增 `Package.appxmanifest` 的版本号。
 构建时沿主机配置将 NuGet 包、HTTP、Scratch 和 CLI Home 缓存放在 E 盘短路径；过长路径会导致 .NET Framework XAML 编译器无法加载 interop DLL。
 布局注册采用微软的 [Add-AppxPackage -Register](https://learn.microsoft.com/en-us/powershell/module/appx/add-appxpackage)；不先卸载旧包，以免清除其应用数据。
 目标机器需已有 .NET 10 桌面运行时、Windows App Runtime 2.3 和应用开发注册支持。
