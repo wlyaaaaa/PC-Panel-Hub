@@ -24,6 +24,7 @@ public enum OverlaySource
     Steam,
     XiaomiHyperConnect,
     VivoOfficeSuite,
+    AndroidAdb,
 }
 
 public enum OverlayVisualTier

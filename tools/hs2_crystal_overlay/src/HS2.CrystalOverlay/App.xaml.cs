@@ -64,7 +64,10 @@ public partial class App : Application
             window.DispatcherQueue,
             controller.ClearDismissible,
             glance.Toggle);
-        phoneBattery = new PhoneBatterySourceCoordinator(controller);
+        phoneBattery = new PhoneBatterySourceCoordinator(
+            controller,
+            (IPhoneBatteryProbe?)AndroidAdbBatteryProbe.FromUserEnvironment() ??
+            new XiaomiHyperConnectBatteryProbe());
         media = new MediaSessionSource(controller);
         steamGames = new SteamGameSourceCoordinator(controller);
         audioDevices = new AudioDeviceSourceCoordinator(controller);

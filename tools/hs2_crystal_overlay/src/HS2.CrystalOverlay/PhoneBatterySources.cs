@@ -253,10 +253,10 @@ internal sealed class PhoneBatterySourceCoordinator : IDisposable
 
     private readonly IOverlayPublisher publisher;
     private readonly LifetimePublicationGate publicationGate = new();
-    private readonly IPhoneBatteryProbe xiaomi;
+    private readonly IPhoneBatteryProbe probe;
     private readonly PhoneBatteryProbeSingleFlight<
-        PhoneBatteryReading?> xiaomiFlight = new();
-    private readonly PhoneBatteryProbeReadingCache xiaomiReadingCache =
+        PhoneBatteryReading?> probeFlight = new();
+    private readonly PhoneBatteryProbeReadingCache probeReadingCache =
         new();
     private readonly CancellationTokenSource cancellation = new();
     private readonly PeriodicTimer timer;
@@ -274,10 +274,10 @@ internal sealed class PhoneBatterySourceCoordinator : IDisposable
 
     internal PhoneBatterySourceCoordinator(
         IOverlayPublisher publisher,
-        IPhoneBatteryProbe xiaomi)
+        IPhoneBatteryProbe probe)
     {
         this.publisher = publisher;
-        this.xiaomi = xiaomi;
+        this.probe = probe;
         timer = new PeriodicTimer(PollInterval);
         loop = Task.Run(PollLoopAsync);
     }
@@ -311,13 +311,13 @@ internal sealed class PhoneBatterySourceCoordinator : IDisposable
         }
 
         var token = cancellation.Token;
-        var xiaomiAttemptTask = xiaomiFlight.ObserveAsync(
-            sourceToken => xiaomi.ReadAsync(
+        var probeAttemptTask = probeFlight.ObserveAsync(
+            sourceToken => probe.ReadAsync(
                 DateTimeOffset.Now,
                 sourceToken),
             SourceTimeout,
             token);
-        var xiaomiAttempt = await xiaomiAttemptTask;
+        var probeAttempt = await probeAttemptTask;
         if (publicationGate.IsClosed)
         {
             return;
@@ -326,26 +326,26 @@ internal sealed class PhoneBatterySourceCoordinator : IDisposable
         // The cache preserves each source's own evidence timestamp. It retains
         // a recent confirmed value through timeout/fault jitter and only clears
         // it when a completed successful probe explicitly returns no phone.
-        var xiaomiReading = xiaomiReadingCache.Apply(xiaomiAttempt);
+        var probeReading = probeReadingCache.Apply(probeAttempt);
         var now = DateTimeOffset.Now;
         var selected = PhoneBatterySelection.Select(
-            xiaomiReading,
+            probeReading,
             now,
             MaximumReadingAge);
         LogSourceState(
-            xiaomiAttempt,
-            xiaomiReading,
+            probeAttempt,
+            probeReading,
             selected);
         PublishSelection(selected);
     }
 
     private void LogSourceState(
-        PhoneBatteryProbeAttempt<PhoneBatteryReading?> xiaomiAttempt,
-        PhoneBatteryReading? xiaomiReading,
+        PhoneBatteryProbeAttempt<PhoneBatteryReading?> probeAttempt,
+        PhoneBatteryReading? probeReading,
         PhoneBatteryReading? selected)
     {
         var state =
-            $"xiaomi={DescribeAttempt(xiaomiAttempt, xiaomiReading)}; " +
+            $"probe={DescribeAttempt(probeAttempt, probeReading)}; " +
             $"selected={selected?.Provider.ToString() ?? "none"}";
         if (string.Equals(
                 state,
@@ -435,6 +435,7 @@ internal sealed class PhoneBatterySourceCoordinator : IDisposable
         var sourceName = provider switch
         {
             PhoneBatteryProvider.XiaomiHyperConnect => "小米妙享",
+            PhoneBatteryProvider.AndroidAdb => "Android ADB",
             _ => "手机",
         };
         _ = PublishIfActive(OverlayRequest.Timed(
@@ -460,6 +461,7 @@ internal sealed class PhoneBatterySourceCoordinator : IDisposable
         {
             PhoneBatteryProvider.XiaomiHyperConnect =>
                 OverlaySource.XiaomiHyperConnect,
+            PhoneBatteryProvider.AndroidAdb => OverlaySource.AndroidAdb,
             _ => OverlaySource.System,
         };
 
@@ -473,7 +475,7 @@ internal sealed class PhoneBatterySourceCoordinator : IDisposable
         cancellation.Cancel();
         timer.Dispose();
         var termination = WaitForTerminationAsync(
-            xiaomiFlight.StopAsync());
+            probeFlight.StopAsync());
         var completed = false;
         try
         {
@@ -500,7 +502,7 @@ internal sealed class PhoneBatterySourceCoordinator : IDisposable
             TaskScheduler.Default);
     }
 
-    private async Task WaitForTerminationAsync(Task xiaomiStop)
+    private async Task WaitForTerminationAsync(Task probeStop)
     {
         try
         {
@@ -512,7 +514,7 @@ internal sealed class PhoneBatterySourceCoordinator : IDisposable
 
         try
         {
-            await xiaomiStop;
+            await probeStop;
         }
         catch
         {

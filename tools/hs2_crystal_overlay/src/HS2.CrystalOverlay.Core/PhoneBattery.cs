@@ -6,6 +6,7 @@ namespace HS2.CrystalOverlay.Core;
 public enum PhoneBatteryProvider
 {
     XiaomiHyperConnect,
+    AndroidAdb,
 }
 
 public sealed record PhoneBatteryReading(
