@@ -145,6 +145,8 @@ namespace TURZX.SideScreen
                 stripParts.Add("更新 " + update);
             }
             string warning = SnapshotWarning(snapshotStatus);
+            if (warning == null && alert != null && alert.Level == "warn")
+                warning = Safe(alert.Message, "数据暂不可用");
             string strip = warning ?? String.Join("  ·  ", stripParts.ToArray());
 
             DrawText(g, clock, fonts.Mono42Bold, Dark, x + 12, y + 18);

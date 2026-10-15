@@ -443,6 +443,13 @@ def _build_snapshot_unlocked(*, nonblocking_gpu: bool = False) -> dict[str, Any]
         "items": [str(item.get("component")) for item in errors],
     }
     snapshot["trust"] = build_trust_snapshot(snapshot)
+    stale_hardware = [
+        item["label"] for item in snapshot["trust"]["items"]
+        if item["component"] in {"cpu", "gpu"} and item["status"] == "stale"
+    ]
+    if stale_hardware and not errors:
+        snapshot["alert"]["level"] = "warn"
+        snapshot["alert"]["message"] = "/".join(stale_hardware) + "部分指标为上次数据"
     _maybe_write_data_trust_log(snapshot)
     return snapshot
 
@@ -3940,6 +3947,7 @@ def make_handler(snapshot_provider: Callable[[], dict[str, Any]],
                 payload = snapshot_provider()
             except Exception as exc:
                 payload = empty_snapshot()
+                payload["alert"].update(level="warn", message="数据暂不可用")
                 now = utc_now_iso()
                 payload["time"] = now
                 payload["health"] = {

@@ -291,6 +291,22 @@ public static class TestStreamCadenceProgram
             for (int y = 160; y < SideScreenRenderer.Height; y += 13)
                 for (int x = 0; x < SideScreenRenderer.Width; x += 13)
                     Equal("cached metrics remain visible", normal.GetPixel(x, y), warning.GetPixel(x, y));
+            Snapshot collectorWarning = new Snapshot {
+                Alert = new AlertSnapshot { Level = "warn", Message = "CPU/GPU部分指标为上次数据" },
+                ForegroundApp = cached.ForegroundApp, Health = cached.Health
+            };
+            using (Bitmap alerted = SideScreenRenderer.Render(collectorWarning, "fresh"))
+            using (Bitmap alertOnly = SideScreenRenderer.Render(new Snapshot { Alert = collectorWarning.Alert }))
+            using (Bitmap transportFirst = SideScreenRenderer.Render(collectorWarning, "stale:TimeoutException"))
+            {
+                Equal("fresh transport preserves collector amber warning", ColorTranslator.FromHtml("#fef3c7").ToArgb(), alerted.GetPixel(52, 123).ToArgb());
+                for (int y = 119; y < 139; y++)
+                    for (int x = 48; x < 432; x++)
+                    {
+                        Equal("collector warning excludes foreground/update and works with original API", alertOnly.GetPixel(x, y), alerted.GetPixel(x, y));
+                        Equal("transport interruption retains warning priority", warning.GetPixel(x, y), transportFirst.GetPixel(x, y));
+                    }
+            }
         }
         Snapshot empty = SideScreenStreamApp.SelectSnapshotAfterFetchFailureForTest(null, new TimeoutException("synthetic"), out status);
         Equal("empty warning is explicit", "数据暂不可用", SideScreenRenderer.SnapshotWarning(status));

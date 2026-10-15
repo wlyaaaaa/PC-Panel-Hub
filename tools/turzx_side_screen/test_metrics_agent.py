@@ -1,4 +1,5 @@
 import json
+from contextlib import ExitStack
 from pathlib import Path
 import subprocess
 import sys
@@ -273,6 +274,42 @@ class MetricsAgentTests(unittest.TestCase):
 
         self.assertEqual(["stale", "stale", "stale"], [item["status"] for item in items])
         self.assertEqual([85, 85, 85], [item["score"] for item in items])
+
+    def test_build_snapshot_warns_for_stale_hardware(self):
+        collectors = {
+            "weather": "read_weather_snapshot", "foreground_app": "read_foreground_app",
+            "cpu": "read_cpu_snapshot", "gpu": "read_gpu_snapshot", "fps": "read_fps_snapshot",
+            "memory": "read_memory_snapshot", "disks": "enumerate_disks",
+            "physical_disks": "read_physical_disks", "network": "read_network_snapshot",
+            "top_processes": "read_top_processes",
+        }
+        for cpu_stale, gpu_stale, fps_error in ((True, False, False), (False, True, False), (True, True, False), (False, False, False), (True, True, True)):
+            with self.subTest(cpu=cpu_stale, gpu=gpu_stale, fps_error=fps_error), ExitStack() as stack:
+                fake = metrics_agent.empty_snapshot()
+                fake["cpu"].update(source="windows_api", status="ok", usage_percent=20.0)
+                fake["gpu"].update(source="nvml", status="stale" if gpu_stale else "ok", usage_percent=15.0, temperature_celsius=50.0)
+                fake["physical_disks"] = [{"source": "win32_cim+lhm_stale", "used_percent": 50.0}]
+                fake["fps"].update(status="error" if fps_error else "idle", detail="synthetic FPS failure")
+                for key, function in collectors.items():
+                    stack.enter_context(patch.object(metrics_agent, function, return_value=fake[key]))
+                lhm = {"status": "stale", "cpu_temperature_celsius": 60.0, "cpu_power_watts": 100.0} if cpu_stale else {}
+                stack.enter_context(patch.object(metrics_agent, "read_lhm_sensor_snapshot", return_value=lhm))
+                stack.enter_context(patch.object(metrics_agent, "_DPC_TIME_SAMPLER", SimpleNamespace(sample=lambda: None)))
+                stack.enter_context(patch.object(metrics_agent, "_configured_refresh_interval_seconds", return_value=1.0))
+                snapshot = metrics_agent.build_snapshot()
+                stale = [item["label"] for item in snapshot["trust"]["items"] if item["component"] in {"cpu", "gpu"} and item["status"] == "stale"]
+                self.assertEqual((["CPU"] if cpu_stale else []) + (["GPU"] if gpu_stale else []), stale)
+                message = "采集异常 1 项" if fps_error else "/".join(stale) + "部分指标为上次数据" if stale else "系统正常"
+                self.assertEqual("warn" if stale or fps_error else "ok", snapshot["alert"]["level"])
+                self.assertEqual(message, snapshot["alert"]["message"])
+                self.assertEqual("degraded" if fps_error else "ok", snapshot["health"]["status"])
+                self.assertEqual([{"component": "fps", "error": "synthetic FPS failure"}] if fps_error else [], snapshot["health"]["errors"])
+                self.assertEqual(20.0, snapshot["cpu"]["usage_percent"])
+                self.assertEqual("ok", snapshot["cpu"]["status"])
+                self.assertEqual(60.0 if cpu_stale else None, snapshot["cpu"]["temperature_celsius"])
+                self.assertEqual(15.0, snapshot["gpu"]["usage_percent"])
+                self.assertEqual(50.0, snapshot["gpu"]["temperature_celsius"])
+                self.assertEqual(metrics_agent.build_trust_snapshot(snapshot), snapshot["trust"])
 
     def test_data_trust_log_writes_jsonl_summary(self):
         trust = {
@@ -638,10 +675,16 @@ class MetricsAgentTests(unittest.TestCase):
             }
         ]
 
+        responses = iter((expected, RuntimeError("synthetic provider failure"), expected))
+        def provider():
+            result = next(responses)
+            if isinstance(result, Exception):
+                raise result
+            return result
         server = metrics_agent.create_server(
             "127.0.0.1",
             0,
-            snapshot_provider=lambda: expected,
+            snapshot_provider=provider,
         )
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -658,6 +701,17 @@ class MetricsAgentTests(unittest.TestCase):
             self.assertEqual(200, response.status)
             self.assertEqual("application/json", response.headers["Content-Type"])
             self.assertEqual(expected, payload)
+            for failed in (True, False):
+                with urllib.request.urlopen(f"http://{host}:{port}/snapshot", timeout=2) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                    self.assertEqual(200, response.status)
+                if failed:
+                    self.assertEqual(REQUIRED_SNAPSHOT_KEYS, set(payload))
+                    self.assertEqual({"level": "warn", "message": "数据暂不可用", "items": []}, payload["alert"])
+                    self.assertEqual("degraded", payload["health"]["status"])
+                    self.assertEqual([{"component": "snapshot", "error": "RuntimeError: synthetic provider failure"}], payload["health"]["errors"])
+                else:
+                    self.assertEqual(expected, payload)
         finally:
             server.shutdown()
             server.server_close()
