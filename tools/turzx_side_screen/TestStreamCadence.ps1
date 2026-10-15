@@ -1,4 +1,4 @@
-Set-StrictMode -Version Latest
+﻿Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -14,6 +14,7 @@ $exePath = Join-Path $outDir ("TestStreamCadenceProgram.{0}.exe" -f $PID)
 $program = @'
 using System;
 using System.Diagnostics;
+using System.Drawing;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -86,6 +87,7 @@ public static class TestStreamCadenceProgram
             out fallbackStatus);
         Equal("missing cache returns empty snapshot sequence", 0L, empty.Sequence.Value);
         StartsWith("missing cache status marks empty data", "empty:TimeoutException", fallbackStatus);
+        VerifySnapshotStatusDisplay();
         Equal("default metrics deadline covers the observed tail without consuming the full frame", 750,
             SideScreenStreamApp.DefaultHttpTimeoutMillisecondsForTest());
 
@@ -258,6 +260,52 @@ public static class TestStreamCadenceProgram
                 new InvalidOperationException("inner device detail")));
         Contains("target invocation description names wrapper", "TargetInvocationException:", described);
         Contains("target invocation description unwraps inner exception", "InvalidOperationException: inner device detail", described);
+    }
+
+    private static void VerifySnapshotStatusDisplay()
+    {
+        Snapshot cached = new Snapshot {
+            Sequence = 42, Alert = new AlertSnapshot { Level = "ok", Message = "系统正常" },
+            ForegroundApp = new ForegroundAppSnapshot { Name = "synthetic.exe" },
+            Health = new HealthSnapshot { RefreshIntervalSeconds = 1 },
+            Cpu = new CpuSnapshot { UsagePercent = 32 }, Gpu = new GpuSnapshot { UsagePercent = 17 },
+            Memory = new MemorySnapshot { RamUsagePercent = 34 }
+        };
+        string before = SerializeSnapshot(cached);
+        string status;
+        Snapshot stale = SideScreenStreamApp.SelectSnapshotAfterFetchFailureForTest(cached, new TimeoutException("synthetic"), out status);
+        Equal("fallback preserves cached object", true, Object.ReferenceEquals(cached, stale));
+        Equal("stale warning replaces normal/foreground/update copy", "采集已中断 · 显示上次数据", SideScreenRenderer.SnapshotWarning(status));
+        using (Bitmap normal = SideScreenRenderer.Render(cached))
+        using (Bitmap warning = SideScreenRenderer.Render(stale, status))
+        {
+            Equal("stale strip uses amber", ColorTranslator.FromHtml("#fef3c7").ToArgb(), warning.GetPixel(52, 123).ToArgb());
+            foreach (string recovered in new string[] { "fresh", "sample" })
+            {
+                Equal("successful status clears warning", null, SideScreenRenderer.SnapshotWarning(recovered));
+                using (Bitmap restored = SideScreenRenderer.Render(cached, recovered))
+                    for (int y = 119; y < 139; y++)
+                        for (int x = 48; x < 432; x++)
+                            Equal("successful strip matches original API", normal.GetPixel(x, y), restored.GetPixel(x, y));
+            }
+            for (int y = 160; y < SideScreenRenderer.Height; y += 13)
+                for (int x = 0; x < SideScreenRenderer.Width; x += 13)
+                    Equal("cached metrics remain visible", normal.GetPixel(x, y), warning.GetPixel(x, y));
+        }
+        Snapshot empty = SideScreenStreamApp.SelectSnapshotAfterFetchFailureForTest(null, new TimeoutException("synthetic"), out status);
+        Equal("empty warning is explicit", "数据暂不可用", SideScreenRenderer.SnapshotWarning(status));
+        using (Bitmap unavailable = SideScreenRenderer.Render(empty, status))
+            Equal("empty strip uses amber", ColorTranslator.FromHtml("#fef3c7").ToArgb(), unavailable.GetPixel(52, 123).ToArgb());
+        Equal("rendering never contaminates cached snapshot", before, SerializeSnapshot(cached));
+    }
+
+    private static string SerializeSnapshot(Snapshot snapshot)
+    {
+        using (System.IO.MemoryStream stream = new System.IO.MemoryStream())
+        {
+            new System.Runtime.Serialization.Json.DataContractJsonSerializer(typeof(Snapshot)).WriteObject(stream, snapshot);
+            return Encoding.UTF8.GetString(stream.ToArray());
+        }
     }
 
     private static void VerifyBoundedDifferentialSendTimeout()

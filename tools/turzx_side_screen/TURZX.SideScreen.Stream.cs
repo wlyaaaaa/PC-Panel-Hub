@@ -108,7 +108,7 @@ namespace TURZX.SideScreen
                         fetchMs = fetchWatch.ElapsedMilliseconds;
                         ApplyStreamInterval(snapshot, options.IntervalMs);
                         Stopwatch renderWatch = Stopwatch.StartNew();
-                        using (Bitmap bitmap = SideScreenRenderer.Render(snapshot))
+                        using (Bitmap bitmap = SideScreenRenderer.Render(snapshot, snapshotStatus))
                         {
                             renderWatch.Stop();
                             renderMs = renderWatch.ElapsedMilliseconds;

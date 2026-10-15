@@ -39,6 +39,11 @@ namespace TURZX.SideScreen
 
         public static Bitmap Render(Snapshot snapshot)
         {
+            return Render(snapshot, null);
+        }
+
+        public static Bitmap Render(Snapshot snapshot, string snapshotStatus)
+        {
             if (snapshot == null)
             {
                 snapshot = new Snapshot();
@@ -56,7 +61,7 @@ namespace TURZX.SideScreen
                 TimeSnapshot renderTime = CoerceTime(snapshot.Time);
 
                 DrawBackground(g);
-                DrawHeader(g, fonts, snapshot, renderTime);
+                DrawHeader(g, fonts, snapshot, renderTime, snapshotStatus);
                 DrawHardwareCard(g, fonts, 24, 160, "CPU 处理器", Safe(snapshot.Cpu == null ? null : snapshot.Cpu.Model, "CPU"),
                     snapshot.Cpu == null ? null : snapshot.Cpu.UsagePercent,
                     FormatTemperature(snapshot.Cpu == null ? null : snapshot.Cpu.TemperatureCelsius),
@@ -101,7 +106,16 @@ namespace TURZX.SideScreen
             }
         }
 
-        private static void DrawHeader(Graphics g, FontSet fonts, Snapshot snapshot, TimeSnapshot time)
+        internal static string SnapshotWarning(string snapshotStatus)
+        {
+            if (snapshotStatus != null && snapshotStatus.StartsWith("stale:", StringComparison.Ordinal))
+                return "采集已中断 · 显示上次数据";
+            if (snapshotStatus != null && snapshotStatus.StartsWith("empty:", StringComparison.Ordinal))
+                return "数据暂不可用";
+            return null;
+        }
+
+        private static void DrawHeader(Graphics g, FontSet fonts, Snapshot snapshot, TimeSnapshot time, string snapshotStatus)
         {
             const float x = 24;
             const float y = 16;
@@ -130,7 +144,8 @@ namespace TURZX.SideScreen
             {
                 stripParts.Add("更新 " + update);
             }
-            string strip = String.Join("  ·  ", stripParts.ToArray());
+            string warning = SnapshotWarning(snapshotStatus);
+            string strip = warning ?? String.Join("  ·  ", stripParts.ToArray());
 
             DrawText(g, clock, fonts.Mono42Bold, Dark, x + 12, y + 18);
             DrawText(g, date + " " + weekday, fonts.Sans14Bold, Muted, x + 14, y + 72);
@@ -138,8 +153,8 @@ namespace TURZX.SideScreen
             DrawRightText(g, environmentLine, fonts.Sans12Bold, Muted, x + 188, y + 58, 220, 18);
 
             DrawLine(g, x + 24, y + 102, x + 408, y + 102, GreenLine, 1.2f);
-            FillRoundRect(g, x + 24, y + 103, 384, 20, 4, GreenSoft);
-            DrawCenteredText(g, FitText(g, strip, fonts.Sans12Bold, 366), fonts.Sans12Bold, Hex("#116631"), x + 24, y + 106, 384, 16);
+            FillRoundRect(g, x + 24, y + 103, 384, 20, 4, warning == null ? GreenSoft : Hex("#fef3c7"));
+            DrawCenteredText(g, FitText(g, strip, fonts.Sans12Bold, 366), fonts.Sans12Bold, Hex(warning == null ? "#116631" : "#92400e"), x + 24, y + 106, 384, 16);
         }
 
         private static void DrawHardwareCard(Graphics g, FontSet fonts, float x, float y, string title, string model,
