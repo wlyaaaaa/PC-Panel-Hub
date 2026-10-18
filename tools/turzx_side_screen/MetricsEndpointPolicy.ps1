@@ -7,13 +7,19 @@ using System.Runtime.InteropServices;
 namespace TURZX {
  public static class MetricsProcessState {
   [DllImport("kernel32.dll",SetLastError=true)] static extern IntPtr OpenProcess(uint access,bool inherit,int id);
-  [DllImport("kernel32.dll",SetLastError=true)] static extern bool GetExitCodeProcess(IntPtr process,out uint code);
+  [DllImport("kernel32.dll",SetLastError=true)] static extern uint WaitForSingleObject(IntPtr handle,uint milliseconds);
   [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
   public static bool IsActive(int id) {
    if(id<=0) throw new ArgumentOutOfRangeException("id");
-   var handle=OpenProcess(0x1000,false,id);
+   var handle=OpenProcess(0x00100000,false,id); // SYNCHRONIZE
    if(handle==IntPtr.Zero) { int error=Marshal.GetLastWin32Error(); if(error==87) return false; throw new Win32Exception(error); }
-   try { uint exitCode; if(!GetExitCodeProcess(handle,out exitCode)) throw new Win32Exception(Marshal.GetLastWin32Error()); return exitCode==259; }
+   try {
+    uint result=WaitForSingleObject(handle,0);
+    if(result==0) return false; // WAIT_OBJECT_0: process completed
+    if(result==258) return true; // WAIT_TIMEOUT: process has not completed
+    if(result==0xFFFFFFFF) throw new Win32Exception(Marshal.GetLastWin32Error());
+    throw new InvalidOperationException("Unexpected process wait result: "+result);
+   }
    finally { CloseHandle(handle); }
   }
  }
@@ -31,7 +37,7 @@ function Test-MetricsEndpointBind {
  try {
   foreach($connection in @(Get-NetTCPConnection -State Listen -ErrorAction Stop | Where-Object { [int]$_.LocalPort -eq $Port })) {
    # Get-Process/CIM may retain an exiting process inconsistently. The kernel
-   # exit code, not row presence, decides whether user-mode service still runs.
+   # wait state, not an exit code or row presence, decides process completion.
    if(Test-MetricsProcessActive -ProcessId ([int]$connection.OwningProcess)) { return $false }
   }
   $listener=[Net.Sockets.TcpListener]::new([Net.IPAddress]::Parse($HostName),$Port)

@@ -96,10 +96,13 @@ function Wait-ManagedMetricsAgentExitAndPortRelease {
         Start-Sleep -Milliseconds 250
     } while ([DateTime]::UtcNow -lt $deadline)
 
+    $endpoint = Get-TurzxMetricsEndpoint
+    $probeErrorVariable = Get-Variable -Name metricsPortProbeError -Scope Script -ErrorAction SilentlyContinue
+    $portProbeError = if ($null -ne $probeErrorVariable) { [string]$probeErrorVariable.Value } else { 'unavailable' }
     $listenerOwners = 'unavailable'
     try {
         $ownerIds = @(
-            Get-NetTCPConnection -State Listen -LocalPort (Get-TurzxMetricsEndpoint).Port -ErrorAction Stop |
+            Get-NetTCPConnection -State Listen -LocalPort $endpoint.Port -ErrorAction Stop |
                 Select-Object -ExpandProperty OwningProcess -Unique |
                 Sort-Object
         )
@@ -109,8 +112,10 @@ function Wait-ManagedMetricsAgentExitAndPortRelease {
         $listenerOwners = 'probe-failed: ' + $_.Exception.Message
     }
     $remainingText = if ($remaining.Count -eq 0) { 'none' } else { $remaining -join ',' }
-    Write-StopLog ("metrics stop proof failed remainingPids={0} port18765Owners={1}" -f $remainingText, $listenerOwners)
-    throw "Managed metrics agent did not exit or port 18765 did not release; remainingPids=$remainingText port18765Owners=$listenerOwners"
+    $evidence = "remainingPids={0} metricsPort={1} metricsPortOwners={2} metricsPortProbeError={3}" -f `
+        $remainingText, $endpoint.Port, $listenerOwners, $portProbeError
+    Write-StopLog ("metrics stop proof failed {0}" -f $evidence)
+    throw "Managed metrics agent did not exit or port $($endpoint.Port) did not release; $evidence"
 }
 
 function Wait-TurzxStreamProcessesExit {

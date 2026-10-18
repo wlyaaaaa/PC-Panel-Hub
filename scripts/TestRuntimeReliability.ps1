@@ -346,7 +346,7 @@ if ($stopSourceText -notmatch '(?s)Stop-MatchingProcess\s+-Reason\s+"metrics-age
     function Write-StopLog { param([string]$Message) }
     function Get-Process { param([int]$Id) return $null }
     function Test-MetricsProcessActive { param([int]$ProcessId) return $false }
-    function Get-TurzxMetricsEndpoint { [pscustomobject]@{Port=18765} }
+    function Get-TurzxMetricsEndpoint { [pscustomobject]@{Port=18766} }
     function Test-MetricsPortAvailable { return $true }
     . ([scriptblock]::Create($metricsStopProofFunction.Extent.Text))
     Wait-ManagedMetricsAgentExitAndPortRelease -ProcessIds @(62532) -TimeoutSeconds 1
@@ -362,11 +362,13 @@ if ($stopSourceText -notmatch '(?s)Stop-MatchingProcess\s+-Reason\s+"metrics-age
         }
     }
     function Test-MetricsProcessActive { param([int]$ProcessId) return $true }
-    function Get-TurzxMetricsEndpoint { [pscustomobject]@{Port=18765} }
+    function Get-TurzxMetricsEndpoint { [pscustomobject]@{Port=18766} }
+    $script:metricsPortProbeError = 'simulated exclusive bind denied'
     function Test-MetricsPortAvailable { return $false }
     function Get-NetTCPConnection {
         [CmdletBinding()]
         param([string]$State, [int]$LocalPort)
+        if ($LocalPort -ne 18766) { throw 'Port-owner evidence must use the configured metrics port.' }
         return [pscustomobject]@{ OwningProcess = 62532 }
     }
     . ([scriptblock]::Create($metricsStopProofFunction.Extent.Text))
@@ -378,7 +380,8 @@ if ($stopSourceText -notmatch '(?s)Stop-MatchingProcess\s+-Reason\s+"metrics-age
         $failure = $_.Exception.Message
     }
     if ($failure -notmatch 'remainingPids=62532' -or
-        $failure -notmatch 'port18765Owners=62532' -or
+        $failure -notmatch 'metricsPort=18766 metricsPortOwners=62532' -or
+        $failure -notmatch 'metricsPortProbeError=simulated exclusive bind denied' -or
         ($script:metricsStopProofLog -join "`n") -notmatch 'metrics stop proof failed') {
         throw "A persistent project metrics PID must fail closed with the exact PID and port-owner evidence."
     }

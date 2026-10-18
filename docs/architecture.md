@@ -9,7 +9,8 @@ PC Panel Hub is intentionally split into small local processes:
      machine-injected environment variables; the source has no built-in location.
 
 2. `metrics_agent.py`
-   - Serves `GET http://127.0.0.1:18765/snapshot`.
+   - Serves `GET /snapshot` on the loopback endpoint configured by `metrics.listenHost`
+     and `metrics.listenPort`; `metrics.url` must agree with that endpoint.
    - Collects hardware, network, disk, weather, FPS, foreground app, and health data.
    - Reads throughput from the configured physical public-egress interface only.
      Tunnel and virtualization adapters are excluded instead of being added to the
@@ -49,7 +50,7 @@ PC Panel Hub is intentionally split into small local processes:
    - Starts/stops the full stack.
    - Used by both manual launch and the Windows startup task.
    - Treats a real HTTP response as metrics health. A stale process-table entry
-     cannot suppress replacement; startup waits for port `18765` to release.
+     cannot suppress replacement; startup waits for the configured metrics port to release.
 
 ## Narrow telemetry interface
 
