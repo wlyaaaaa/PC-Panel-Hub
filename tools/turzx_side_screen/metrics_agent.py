@@ -84,6 +84,22 @@ def _configured_timeaudit_dsn(
     environ: Mapping[str, str] | None = None,
 ) -> str | None:
     source = environ if environ is not None else os.environ
+    if environ is None and os.name == "nt":
+        # A long-lived watchdog may still hold credentials from before rotation.
+        import winreg
+
+        source = dict(os.environ)
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as user_env:
+                for name in ("TIMEAUDIT_DB_PASSWORD", "TIMEAUDIT_DSN"):
+                    try:
+                        value, kind = winreg.QueryValueEx(user_env, name)
+                    except OSError:
+                        continue
+                    if kind in (winreg.REG_SZ, winreg.REG_EXPAND_SZ):
+                        source[name] = value
+        except OSError:
+            pass
     explicit = (source.get("TIMEAUDIT_DSN") or "").strip()
     host_port = _configured_timeaudit_host_port(source)
 
