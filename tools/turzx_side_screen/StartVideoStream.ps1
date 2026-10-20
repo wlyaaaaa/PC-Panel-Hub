@@ -14,6 +14,7 @@
     [string]$ExecutablePath,
     [switch]$Sample,
     [switch]$DryRun,
+    [switch]$KeepMetrics,
     [switch]$HybridRefresh,
     [switch]$Diff,
     [switch]$AllowUnverifiedDifferentialProtocol
@@ -132,7 +133,7 @@ try {
     }
 }
 finally {
-    if ($agentProcess -and !$agentProcess.HasExited) {
+    if (!$KeepMetrics -and $agentProcess -and !$agentProcess.HasExited) {
         Stop-Process -Id $agentProcess.Id -Force
     }
 }

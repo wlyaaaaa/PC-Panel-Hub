@@ -378,9 +378,21 @@ $stopSourceText = Get-Content -Raw -LiteralPath (Join-Path $side "StopSideScreen
         ($script:metricsStopProofLog -join "`n") -notmatch 'metrics stop proof failed') {
         throw "A persistent project metrics PID must report the exact PID and port-owner evidence."
     }
-    $stoppedMetricsProcessIds = @(62532); $ProcessSnapshotTimeoutSeconds = 1
+    $stoppedMetricsProcessIds = @(62532); $ProcessSnapshotTimeoutSeconds = 1; $KeepMetrics = $false
     . ([scriptblock]::Create($metricsCleanup.Extent.Text))
     if (($script:metricsStopProofLog -join ' ') -notmatch 'metrics cleanup deferred') { throw 'Collector failure must not block stream restart.' }
+}
+
+& {
+    $KeepMetrics=$true; $script:metricsStopCalls=0; $script:metricsWaitCalls=0; $sidePattern='*turzx_side_screen*'
+    $processSnapshot=@([pscustomobject]@{ProcessId=62532;Name='python.exe';CommandLine='E:\turzx_side_screen\metrics_agent.py'})
+    function Write-StopLog {param($Message)}
+    function Stop-Process { [CmdletBinding()]param($Id,[switch]$Force) $script:metricsStopCalls++ }
+    function Assert-ManagedMetricsAgentExitAndPortRelease {param($ProcessIds,$TimeoutSeconds) $script:metricsWaitCalls++}
+    . ([scriptblock]::Create($matchingStopFunction.Extent.Text))
+    $selection=$stopAst.EndBlock.Statements | Where-Object { $_ -is [Management.Automation.Language.AssignmentStatementAst] -and $_.Left.Extent.Text -eq '$stoppedMetricsProcessIds' }
+    . ([scriptblock]::Create($selection.Extent.Text)); . ([scriptblock]::Create($metricsCleanup.Extent.Text))
+    if ($script:metricsStopCalls -ne 0 -or $script:metricsWaitCalls -ne 0 -or $stoppedMetricsProcessIds.Count -ne 0) { throw 'Stream-only stop must preserve the collector and skip its exit proof.' }
 }
 
 $watchdogStopFunction = $restartAst.Find(
@@ -424,6 +436,7 @@ foreach ($pattern in @(
             [string]$FilePath,
             [object]$ArgumentList
         )
+        $script:lastStopArguments = $ArgumentList
         return $fakeStopProcess
     }
     function Stop-Process {
@@ -458,6 +471,29 @@ foreach ($pattern in @(
     if ($stopFailure -notmatch 'exitCode=1') { throw 'A failed stream-stop proof must block stack restart.' }
     $fakeStopProcess.ExitCode = 0
     Stop-Stack -Reason 'synthetic-stream-exited'
+    Stop-Stack -Reason 'synthetic-stream-exited' -KeepMetrics
+    if ($script:lastStopArguments -notcontains '-KeepMetrics') { throw 'Watchdog must forward collector preservation to the stop script.' }
+}
+
+& {
+    $startStack=$restartAst.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst]},$true) | Where-Object Name -eq 'Start-Stack'
+    $prepare=[scriptblock]::Create(($startStack.Body.EndBlock.Statements[0..1].Extent.Text -join "`n"))
+    function Stop-Stack {param($Reason,[switch]$KeepMetrics) $script:keptMetrics=$KeepMetrics.IsPresent}
+    foreach ($Reason in @('heartbeat-unhealthy','failure-circuit/heartbeat-stalls','restart-request','snapshot-stale-after-metrics-restarts','failure-circuit/snapshot-stale-after-metrics-restarts')) {
+        . $prepare
+        $expected=$Reason -in @('heartbeat-unhealthy','failure-circuit/heartbeat-stalls')
+        if ($script:keptMetrics -ne $expected) { throw "Incorrect collector stop mode for $Reason" }
+    }
+}
+& {
+    $cleanup=([scriptblock]::Create($streamStart).Ast.EndBlock.Statements | Where-Object { $_ -is [Management.Automation.Language.TryStatementAst] -and $null -ne $_.Finally }).Finally.Extent.Text
+    $cleanup=[scriptblock]::Create($cleanup.Substring(1,$cleanup.Length-2))
+    $agentProcess=[pscustomobject]@{Id=62532;HasExited=$false}; $script:collectorStops=0
+    function Stop-Process {param($Id,[switch]$Force) $script:collectorStops++}
+    $KeepMetrics=$true; . $cleanup
+    if ($script:collectorStops -ne 0) { throw 'A shared collector must survive stream exit.' }
+    $KeepMetrics=$false; . $cleanup
+    if ($script:collectorStops -ne 1) { throw 'Standalone stream cleanup must retain its original collector lifetime.' }
 }
 
 # A freshly launched child has one monotonic window to produce its first
@@ -958,21 +994,21 @@ foreach ($pattern in @(
         $script:maintenanceCalls++; if ($nextStatus -eq 'throw') { throw 'collector failed' }
         [pscustomobject]@{Status=$nextStatus}
     }
-    function Invoke-TurzxStackRestartAttempt {param($Reason, $DelaySeconds) $script:stackRestarts++; [pscustomobject]@{Child=[pscustomobject]@{Id=42}} }
+    function Invoke-TurzxStackRestartAttempt {param($Reason, $DelaySeconds) $script:stackRestarts++; $script:lastRecoveryReason=$Reason; [pscustomobject]@{Child=[pscustomobject]@{Id=42}} }
     $scriptDir='unused'; $script:metricsRecoveryStarts=0; $script:maintenanceCalls=0; $script:stackRestarts=0; $nextStatus='started pid=123'
     $script:metricsLastAttemptUtc=[DateTime]::UtcNow.AddSeconds(-31)
     if ((Invoke-TurzxMetricsRecovery) -or $script:metricsRecoveryStarts -ne 1) { throw 'First collector restart must allow recovery time.' }
     if ((Invoke-TurzxMetricsRecovery) -or $script:maintenanceCalls -ne 1) { throw 'Cooldown must not retry or escalate.' }
-    $nextStatus='blocked'; $script:metricsLastAttemptUtc=[DateTime]::UtcNow.AddSeconds(-31)
-    if ((Invoke-TurzxMetricsRecovery) -or $script:metricsRecoveryStarts -ne 0) { throw 'Blocked maintenance must break successful restart sequence.' }
+    $nextStatus='blocked'
+    foreach ($retry in 1..3) { $script:metricsLastAttemptUtc=[DateTime]::UtcNow.AddSeconds(-31); if ((Invoke-TurzxMetricsRecovery) -or $script:metricsRecoveryStarts -ne 0) { throw 'Blocked maintenance must stay collector-only across repeated retries.' } }
     $nextStatus='started pid=123'
     foreach ($attempt in 1..2) { $script:metricsLastAttemptUtc=[DateTime]::UtcNow.AddSeconds(-31); if (Invoke-TurzxMetricsRecovery) { throw 'New collector needs cooldown.' } }
-    if ((Invoke-TurzxMetricsRecovery) -or $script:maintenanceCalls -ne 4) { throw 'Second successful restart also needs cooldown.' }
+    if ((Invoke-TurzxMetricsRecovery) -or $script:maintenanceCalls -ne 6) { throw 'Second successful restart also needs cooldown.' }
     $HeartbeatStartupGraceSeconds=60; $MaxConsecutiveSnapshotStaleHeartbeats=5; $MaxConsecutiveHeartbeatFailures=3; $MaxConsecutiveFailures=3
     $snapshotStaleHeartbeats=5; $heartbeatFailures=0; $consecutiveFailures=1; $snapshotStatus='stale:TimeoutException'; . $healthStep
     if ($consecutiveFailures -ne 1) { throw 'Stale snapshots during collector cooldown must preserve previous stack failures for the circuit breaker.' }
     $heartbeatFailures=2; $script:metricsLastAttemptUtc=[DateTime]::UtcNow.AddSeconds(-31); . $healthStep
-    if ($script:stackRestarts -ne 1 -or $script:metricsRecoveryStarts -ne 0 -or $consecutiveFailures -ne 2) { throw 'Persistent stale snapshots must accumulate bounded stack failures and reset collector count.' }
+    if ($script:stackRestarts -ne 1 -or $script:metricsRecoveryStarts -ne 0 -or $consecutiveFailures -ne 2 -or $script:lastRecoveryReason -ne 'snapshot-stale-after-metrics-restarts') { throw 'Persistent stale snapshots must preserve the full-stack reason, failure count and collector reset.' }
     $script:metricsRecoveryStarts=1; $snapshotStatus='fresh'; . $healthStep
     if ($script:metricsRecoveryStarts -ne 0 -or $consecutiveFailures -ne 0 -or $script:stackRestarts -ne 1) { throw 'A fresh snapshot must clear collector and stack recovery history.' }
     $nextStatus='throw'; $script:metricsRecoveryStarts=1; $script:metricsLastAttemptUtc=[DateTime]::UtcNow.AddSeconds(-31)

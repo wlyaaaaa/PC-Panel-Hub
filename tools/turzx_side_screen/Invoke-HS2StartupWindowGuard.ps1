@@ -96,10 +96,20 @@ $wallpaperStatus = 'waiting-for-running-engine'
 $totalMoves = 0
 $recentActions = @()
 $wallpaperResumeCount = 0
+$script:hs2GuardArguments = @{}
+function Invoke-RememberedHS2WindowGuard {
+    $result = Invoke-HS2ExclusiveWindowGuard @script:hs2GuardArguments
+    foreach ($property in @('TargetMonitorDevice', 'SafeMonitorDevice')) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$result.$property)) {
+            $script:hs2GuardArguments["Preferred$property"] = [string]$result.$property
+        }
+    }
+    return $result
+}
 try {
     while ([DateTime]::UtcNow -lt $deadline -and (Test-ParentAlive)) {
         try {
-            $hs2 = Invoke-HS2ExclusiveWindowGuard
+            $hs2 = Invoke-RememberedHS2WindowGuard
             $vdd = Invoke-VddWindowReturnGuard
             $totalMoves += @($hs2.AppliedActions).Count + @($vdd.AppliedActions).Count
             foreach ($source in @(@{ Name='hs2'; Actions=@($hs2.AppliedActions)+@($hs2.BackoffEvents) },

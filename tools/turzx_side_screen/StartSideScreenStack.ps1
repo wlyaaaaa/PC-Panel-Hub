@@ -147,7 +147,6 @@ Write-StackLog ("starting stack root={0} port={1} interval={2} hybrid={3}" -f $R
 Get-Process "TURZX", "TURZX.weatherfix", "TURZX.weatherfix.metrics" -ErrorAction SilentlyContinue |
     Stop-Process -Force -ErrorAction SilentlyContinue
 
-Stop-ProcessByCommandLine -NamePattern "python*" -CommandPattern "*turzx_side_screen\metrics_agent.py*"
 Stop-ProcessByCommandLine -NamePattern "python*" -CommandPattern "*turzx_side_screen\top_processes_helper.py*"
 Stop-ProcessByCommandLine -NamePattern "python*" -CommandPattern "*turzx_weather_shim\turzx_weather_shim.py*"
 Stop-ProcessByCommandLine -NamePattern "TURZX.SideScreen.Stream.exe" -CommandPattern "*turzx_side_screen*"
@@ -188,7 +187,7 @@ $streamScript = Join-Path $scriptDir "StartVideoStream.ps1"
 try {
     # HybridRefresh is explicit and reversible: it uses a vendor-shaped command-200
     # baseline plus bounded command-204 deltas. The default remains full command 200.
-    & $streamScript -Root $Root -Port $Port -IntervalMs $IntervalMs -Frames 0 -SendTimeoutMs $SendTimeoutMs -DiffSendTimeoutMs $DiffSendTimeoutMs -MaxConsecutiveSendFailures $MaxConsecutiveSendFailures -FullResyncEveryFrames $FullResyncEveryFrames -BaselineBrightness $BaselineBrightness -PreviewIntervalSeconds $PreviewIntervalSeconds -PythonPath $python -HybridRefresh:$HybridRefresh *>&1 |
+    & $streamScript -Root $Root -Port $Port -IntervalMs $IntervalMs -Frames 0 -SendTimeoutMs $SendTimeoutMs -DiffSendTimeoutMs $DiffSendTimeoutMs -MaxConsecutiveSendFailures $MaxConsecutiveSendFailures -FullResyncEveryFrames $FullResyncEveryFrames -BaselineBrightness $BaselineBrightness -PreviewIntervalSeconds $PreviewIntervalSeconds -PythonPath $python -HybridRefresh:$HybridRefresh -KeepMetrics *>&1 |
         ForEach-Object {
             Write-BoundedLogLine -Path $stdoutPath -Message ([string]$_) -MaxBytes $MaxStreamLogBytes -BackupCount $LogBackupCount
         }

@@ -2717,6 +2717,16 @@ foreach ($pattern in @(
     }
 }
 $startupWindowGuardText = Get-Content -LiteralPath $startupWindowGuard -Raw
+& {
+    $script:hs2GuardArguments = @{}; $script:rememberedGuardCalls = 0
+    function Invoke-HS2ExclusiveWindowGuard { param($PreferredTargetMonitorDevice, $PreferredSafeMonitorDevice)
+        if ($script:rememberedGuardCalls++ -gt 0 -and ($PreferredTargetMonitorDevice -ne 'hs2' -or $PreferredSafeMonitorDevice -ne 'main')) { throw 'Worker must retain target/safe identities across missing monitor results.' }
+        if ($script:rememberedGuardCalls -eq 1) { [pscustomobject]@{TargetMonitorDevice='hs2';SafeMonitorDevice='main'} } else { [pscustomobject]@{TargetMonitorDevice=$null;SafeMonitorDevice=$null} }
+    }
+    $workerAst = [System.Management.Automation.Language.Parser]::ParseInput($startupWindowGuardText, [ref]$null, [ref]$null)
+    . ([scriptblock]::Create($workerAst.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Invoke-RememberedHS2WindowGuard' }, $true).Extent.Text))
+    1..3 | ForEach-Object { Invoke-RememberedHS2WindowGuard | Out-Null }
+}
 foreach ($pattern in @(
         "Invoke-HS2ExclusiveWindowGuard",
         "ParentStartTimeUtcTicks",

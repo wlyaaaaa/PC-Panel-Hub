@@ -423,7 +423,7 @@ function Invoke-WallpaperEngineDisplayRecovery {
 }
 
 function Stop-Stack {
-    param([string]$Reason)
+    param([string]$Reason, [switch]$KeepMetrics)
     Write-WatchdogLog ("stop stack reason={0}" -f $Reason)
     $trackedChild = $script:turzxStackChild
     if ($null -ne $trackedChild) {
@@ -449,6 +449,7 @@ function Stop-Stack {
         "-Quiet",
         "-ProcessSnapshotTimeoutSeconds", [string]$StopProcessSnapshotTimeoutSeconds
     )
+    if ($KeepMetrics) { $stopArguments += "-KeepMetrics" }
     $stopProcess = Start-HiddenProcess -FilePath "powershell.exe" -ArgumentList $stopArguments
     $completed = $false
     try {
@@ -611,7 +612,7 @@ function Invoke-TurzxFailureCircuitBreaker {
     Write-WatchdogLog ("failure circuit open reason={0} cooldownSeconds={1}" -f $Reason, $FailureCircuitBreakerSeconds)
     try {
         try {
-            Stop-Stack -Reason ("failure-circuit/{0}" -f $Reason)
+            Stop-Stack -Reason ("failure-circuit/{0}" -f $Reason) -KeepMetrics:($Reason -ne 'snapshot-stale-after-metrics-restarts')
         }
         catch {
             Write-WatchdogLog ("failure circuit stop proof deferred reason={0} type={1} error={2}" -f `
@@ -1730,7 +1731,8 @@ function Claim-TurzxRestartRequest {
 
 function Start-Stack {
     param([string]$Reason)
-    Stop-Stack -Reason ("pre-start/{0}" -f $Reason)
+    $keepMetrics = $Reason -notmatch '(^|/)(restart-request|snapshot-stale-after-metrics-restarts)$'
+    Stop-Stack -Reason ("pre-start/{0}" -f $Reason) -KeepMetrics:$keepMetrics
     if (-not (Set-TurzxPanelBrightness -Brightness $ActiveBrightness)) {
         Write-WatchdogLog ("TURZX brightness restore failed reason={0}; starting stream for recovery" -f $Reason)
     }
@@ -2331,14 +2333,16 @@ try {
                 if ($heartbeatFailures -ge $MaxConsecutiveHeartbeatFailures) {
                     $consecutiveFailures++
                     if ($consecutiveFailures -ge $MaxConsecutiveFailures) {
-                        $heartbeatAttempt = Invoke-TurzxFailureCircuitBreaker -Reason "heartbeat-stalls"
+                        $recoveryReason = if ($heartbeatHealth.Reason -eq 'snapshot-stale-after-metrics-restarts') { $heartbeatHealth.Reason } else { 'heartbeat-stalls' }
+                        $heartbeatAttempt = Invoke-TurzxFailureCircuitBreaker -Reason $recoveryReason
                         $child = Set-TurzxChildHeartbeatStartupWindow -Child $heartbeatAttempt.Child
                         $consecutiveFailures = 0
                         $heartbeatFailures = 0
                         $snapshotStaleHeartbeats = 0
                         continue
                     }
-                    $heartbeatAttempt = Invoke-TurzxStackRestartAttempt -Reason "heartbeat-unhealthy" -DelaySeconds 3
+                    $recoveryReason = if ($heartbeatHealth.Reason -eq 'snapshot-stale-after-metrics-restarts') { $heartbeatHealth.Reason } else { 'heartbeat-unhealthy' }
+                    $heartbeatAttempt = Invoke-TurzxStackRestartAttempt -Reason $recoveryReason -DelaySeconds 3
                     $child = Set-TurzxChildHeartbeatStartupWindow -Child $heartbeatAttempt.Child
                     $heartbeatFailures = 0
                     $snapshotStaleHeartbeats = 0

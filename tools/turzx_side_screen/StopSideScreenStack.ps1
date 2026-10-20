@@ -2,6 +2,7 @@
     [string]$Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path,
     [switch]$IncludeWatchdog,
     [switch]$SkipStackEntrypoint,
+    [switch]$KeepMetrics,
     [switch]$Quiet,
     [ValidateRange(1, 30)][int]$ProcessSnapshotTimeoutSeconds = 8
 )
@@ -233,7 +234,7 @@ if ($IncludeWatchdog) {
 
 $stoppedMetricsProcessIds = @(Stop-MatchingProcess -Reason "metrics-agent" -Predicate {
     param($p)
-    $p.Name -like "python*" -and $p.CommandLine -like "*turzx_side_screen\metrics_agent.py*" -and $p.CommandLine -like $sidePattern
+    -not $KeepMetrics -and $p.Name -like "python*" -and $p.CommandLine -like "*turzx_side_screen\metrics_agent.py*" -and $p.CommandLine -like $sidePattern
 })
 
 [void](Stop-MatchingProcess -Reason "top-processes-helper" -Predicate {
@@ -318,9 +319,11 @@ Wait-TurzxStreamProcessesExit
 # Metrics owns no serial handle. A stuck collector must not block a new stream;
 # its PID/port evidence remains available while the watchdog retries it separately.
 try {
-    Assert-ManagedMetricsAgentExitAndPortRelease `
-        -ProcessIds $stoppedMetricsProcessIds `
-        -TimeoutSeconds $ProcessSnapshotTimeoutSeconds
+    if (-not $KeepMetrics) {
+        Assert-ManagedMetricsAgentExitAndPortRelease `
+            -ProcessIds $stoppedMetricsProcessIds `
+            -TimeoutSeconds $ProcessSnapshotTimeoutSeconds
+    }
 }
 catch { Write-StopLog ("metrics cleanup deferred; stream exit proved: {0}" -f $_.Exception.Message) }
 
