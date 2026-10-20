@@ -59,6 +59,10 @@ public sealed class PhoneBridgeNotificationClient(
                             failures = 0;
                             SetConnected(message.Status == "connected");
                         }
+                        else if (helloReceived && message?.Kind == "status")
+                        {
+                            SetConnected(message.Status == "connected");
+                        }
                         else if (helloReceived && message?.Kind == "notification")
                         {
                             Accept(message);

@@ -9,6 +9,34 @@ namespace HS2.CrystalOverlay.Tests;
 public sealed class PhoneBridgeNotificationTests
 {
     [Fact]
+    public async Task StatusAfterConnectingHelloRemovesThenRestoresDisconnectedCard()
+    {
+        var name = "hs2-status-" + Guid.NewGuid().ToString("N");
+        var events = new ConcurrentQueue<OverlayRequest>();
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var server = new NamedPipeServerStream(name, PipeDirection.Out, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
+        var loop = new PhoneBridgeNotificationClient(events.Enqueue, name).RunAsync(stop.Token);
+        async Task Until(int count) { while (events.Count < count) await Task.Delay(10, stop.Token); }
+        try
+        {
+            await server.WaitForConnectionAsync(stop.Token);
+            using var writer = new StreamWriter(server, new UTF8Encoding(false), leaveOpen: true) { AutoFlush = true };
+            await writer.WriteLineAsync("{\"v\":1,\"kind\":\"hello\",\"status\":\"connecting\"}");
+            await Until(1);
+            Assert.True(events.Last().IsActive);
+            Assert.Equal("手机桥未连接", events.Last().Title);
+            await writer.WriteLineAsync("{\"v\":1,\"kind\":\"status\",\"status\":\"connected\",\"battery\":null}");
+            await Until(2);
+            Assert.False(events.Last().IsActive);
+            await writer.WriteLineAsync("{\"v\":1,\"kind\":\"status\",\"status\":\"disconnected\",\"battery\":null}");
+            await Until(3);
+            Assert.True(events.Last().IsActive);
+            Assert.Equal("手机桥未连接", events.Last().Title);
+        }
+        finally { stop.Cancel(); await loop.WaitAsync(TimeSpan.FromSeconds(3)); }
+    }
+
+    [Fact]
     public async Task PipeReplayLiveDedupCodesAndReconnectUseExistingCards()
     {
         var name = "hs2-test-" + Guid.NewGuid().ToString("N");
