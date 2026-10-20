@@ -133,6 +133,7 @@ New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 . $overlayWatchdogPolicy
 . (Join-Path $scriptDir 'MetricsEndpointPolicy.ps1')
 $script:metricsLastAttemptUtc = [DateTime]::MinValue
+$script:metricsRecoveryStarts = 0
 
 function Write-BoundedLogLine {
     param(
@@ -1686,6 +1687,7 @@ function Get-TurzxMonotonicMilliseconds {
 function Set-TurzxChildHeartbeatStartupWindow {
     param([AllowNull()][object]$Child)
 
+    $script:metricsRecoveryStarts = 0
     $script:turzxStackChild = $Child
     $script:childHeartbeatObserved = $false
     if ($null -eq $Child) {
@@ -1797,17 +1799,29 @@ function Invoke-TurzxStackRestartAttempt {
 
 function Invoke-TurzxMetricsRecovery {
     $now = [DateTime]::UtcNow
-    if (($now - $script:metricsLastAttemptUtc).TotalSeconds -lt 30) { return }
+    if (($now - $script:metricsLastAttemptUtc).TotalSeconds -lt 30) { return $false }
+    # Give each successful collector restart a full cooldown to refresh the
+    # snapshot before asking the existing heartbeat path to recycle the stack.
+    if ($script:metricsRecoveryStarts -ge 2) { return $true }
     $script:metricsLastAttemptUtc = $now
     try {
         $result = Invoke-TurzxMetricsAgentMaintenance -SideRoot $scriptDir -Restart
+        if ($result.Status -match '^started(?:\s|$)') {
+            $script:metricsRecoveryStarts++
+            $script:metricsLastAttemptUtc = [DateTime]::UtcNow
+        }
+        else { $script:metricsRecoveryStarts = 0 }
         Write-WatchdogLog ("metrics recovery {0}; stream remains running" -f $result.Status)
     }
-    catch { Write-WatchdogLog ("metrics recovery deferred; stream remains running: {0}" -f $_.Exception.Message) }
+    catch {
+        $script:metricsRecoveryStarts = 0
+        Write-WatchdogLog ("metrics recovery deferred; stream remains running: {0}" -f $_.Exception.Message)
+    }
+    return $false
 }
 
-# Sustained snapshot failures recover the collector independently. Serial
-# heartbeat failures still follow the existing bounded stack recovery path.
+# Sustained snapshot failures try collector recovery first, then rejoin the
+# bounded stack recovery path if successful restarts leave snapshots stale.
 function Get-TurzxSnapshotStaleDecision {
     param(
         [AllowEmptyString()][string]$SnapshotStatus,
@@ -2273,6 +2287,7 @@ try {
                     -ConsecutiveFailures $snapshotStaleHeartbeats `
                     -Threshold $MaxConsecutiveSnapshotStaleHeartbeats
                 $snapshotStaleHeartbeats = $snapshotDecision.ConsecutiveFailures
+                if (-not $snapshotDecision.IsStale) { $script:metricsRecoveryStarts = 0 }
                 if ($snapshotDecision.IsStale -and
                     $snapshotDecision.ConsecutiveFailures -eq 1) {
                     Write-WatchdogLog (
@@ -2283,18 +2298,21 @@ try {
                     Write-WatchdogLog (
                         "snapshot stale threshold reached reason={0}" -f $snapshotDecision.Reason)
                 }
-                if ($snapshotDecision.FailureThresholdReached) {
-                    Invoke-TurzxMetricsRecovery
+                if ($snapshotDecision.FailureThresholdReached -and (Invoke-TurzxMetricsRecovery)) {
+                    $heartbeatHealth.Healthy = $false
+                    $heartbeatHealth.Reason = "snapshot-stale-after-metrics-restarts"
                 }
                 $script:childHeartbeatObserved = $true
-                if ($heartbeatFailures -gt 0) {
+                if ($heartbeatHealth.Healthy -and $heartbeatFailures -gt 0) {
                     Write-WatchdogLog ("heartbeat recovered {0}" -f $heartbeatHealth.Reason)
                 }
                 elseif (-not $snapshotDecision.IsStale -and $previousSnapshotStaleHeartbeats -gt 0) {
                     Write-WatchdogLog ("snapshot recovered after consecutive={0}" -f $previousSnapshotStaleHeartbeats)
                 }
-                $heartbeatFailures = 0
-                $consecutiveFailures = 0
+                if ($heartbeatHealth.Healthy) {
+                    $heartbeatFailures = 0
+                    if (-not $snapshotDecision.IsStale) { $consecutiveFailures = 0 }
+                }
             }
             if (-not $heartbeatHealth.Healthy) {
                 if (-not $script:childHeartbeatObserved -and $heartbeatHealth.Reason -eq "missing") {

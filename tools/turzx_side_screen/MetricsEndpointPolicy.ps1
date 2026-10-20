@@ -71,6 +71,17 @@ function Get-TurzxMetricsEndpoint {
  [pscustomobject]@{HostName=$hostName;Port=$port;Url=('http://{0}:{1}/snapshot'-f $hostName,$port)}
 }
 
+function Wait-ManagedMetricsAgentExitAndPortRelease {
+    param([int[]]$ProcessIds, [object]$Endpoint, [ValidateRange(1, 30)][int]$TimeoutSeconds = 8)
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    do {
+        $remaining = @($ProcessIds | Where-Object { Test-MetricsProcessActive -ProcessId $_ })
+        if ($remaining.Count -eq 0 -and (Test-MetricsEndpointBind -Port $Endpoint.Port -HostName $Endpoint.HostName)) { return $true }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTime]::UtcNow -lt $deadline)
+    return $false
+}
+
 function Invoke-TurzxMetricsAgentMaintenance {
     param([string]$SideRoot = $PSScriptRoot, [string]$PythonPath, [switch]$Restart)
 
@@ -82,6 +93,9 @@ function Invoke-TurzxMetricsAgentMaintenance {
         if ($Restart) {
             Stop-Process -Id $candidate.ProcessId -Force -ErrorAction SilentlyContinue
         }
+    }
+    if ($Restart) {
+        [void](Wait-ManagedMetricsAgentExitAndPortRelease -ProcessIds @($managed | ForEach-Object { [int]$_.ProcessId }) -Endpoint $endpoint)
     }
     $remaining = @($managed | Where-Object { Test-MetricsProcessActive -ProcessId ([int]$_.ProcessId) })
     if ($remaining.Count -gt 0 -or -not (Test-MetricsEndpointBind -Port $endpoint.Port -HostName $endpoint.HostName)) {

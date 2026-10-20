@@ -67,31 +67,16 @@ function Stop-MatchingProcess {
 }
 
 . (Join-Path $PSScriptRoot 'MetricsEndpointPolicy.ps1')
-function Test-MetricsPortAvailable { $endpoint=Get-TurzxMetricsEndpoint; return (Test-MetricsEndpointBind -Port $endpoint.Port -HostName $endpoint.HostName) }
 
-function Wait-ManagedMetricsAgentExitAndPortRelease {
+function Assert-ManagedMetricsAgentExitAndPortRelease {
     param(
         [int[]]$ProcessIds,
         [ValidateRange(1, 30)][int]$TimeoutSeconds = 8
     )
 
-    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
-    $remaining = @()
-    do {
-        $remaining = @(
-            foreach ($processId in $ProcessIds) {
-                if ((Test-MetricsProcessActive -ProcessId $processId)) {
-                    $processId
-                }
-            }
-        )
-        if ($remaining.Count -eq 0 -and (Test-MetricsPortAvailable)) {
-            return
-        }
-        Start-Sleep -Milliseconds 250
-    } while ([DateTime]::UtcNow -lt $deadline)
-
     $endpoint = Get-TurzxMetricsEndpoint
+    if (Wait-ManagedMetricsAgentExitAndPortRelease -ProcessIds $ProcessIds -Endpoint $endpoint -TimeoutSeconds $TimeoutSeconds) { return }
+    $remaining = @($ProcessIds | Where-Object { Test-MetricsProcessActive -ProcessId $_ })
     $probeErrorVariable = Get-Variable -Name metricsPortProbeError -Scope Script -ErrorAction SilentlyContinue
     $portProbeError = if ($null -ne $probeErrorVariable) { [string]$probeErrorVariable.Value } else { 'unavailable' }
     $listenerOwners = 'unavailable'
@@ -333,7 +318,7 @@ Wait-TurzxStreamProcessesExit
 # Metrics owns no serial handle. A stuck collector must not block a new stream;
 # its PID/port evidence remains available while the watchdog retries it separately.
 try {
-    Wait-ManagedMetricsAgentExitAndPortRelease `
+    Assert-ManagedMetricsAgentExitAndPortRelease `
         -ProcessIds $stoppedMetricsProcessIds `
         -TimeoutSeconds $ProcessSnapshotTimeoutSeconds
 }

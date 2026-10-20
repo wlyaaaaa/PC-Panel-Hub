@@ -33,7 +33,7 @@ try {
 & {
  $recoveryRoot=Join-Path ([IO.Path]::GetTempPath()) ('turzx-metrics-'+[guid]::NewGuid().ToString('N'))
  $script:agentActive=$true; $script:portAvailable=$false; $script:launches=0; $script:stops=@()
- function Get-TurzxMetricsEndpoint {param($ConfigPath) [pscustomobject]@{HostName='127.0.0.1';Port=18766} }
+ function Get-TurzxMetricsEndpoint {param($ConfigPath) if($ConfigPath-ne(Join-Path $recoveryRoot 'config.json')){throw 'Maintenance must use its SideRoot endpoint'}; [pscustomobject]@{HostName='127.0.0.1';Port=18766} }
  function Get-CimInstance { [CmdletBinding()]param($ClassName,$OperationTimeoutSec) @(
   [pscustomobject]@{Name='python.exe';ProcessId=123;CommandLine=(Join-Path $recoveryRoot 'metrics_agent.py')},
   [pscustomobject]@{Name='python.exe';ProcessId=456;CommandLine='E:\other\metrics_agent.py'}) }
@@ -49,9 +49,10 @@ try {
   $script:agentActive=$false
   $blocked=Invoke-TurzxMetricsAgentMaintenance -SideRoot $recoveryRoot -PythonPath 'fake-python' -Restart
   if($script:launches-ne0){throw 'An unreleased port must block replacement even after process exit'}
-  $script:portAvailable=$true
+  $script:agentActive=$true; $script:portAvailable=$false; $script:polls=0
+  function Start-Sleep {param($Milliseconds) $script:polls++; $script:agentActive=$script:polls-lt2; $script:portAvailable=$script:polls-ge3 }
   $started=Invoke-TurzxMetricsAgentMaintenance -SideRoot $recoveryRoot -PythonPath 'fake-python' -Restart
-  if($script:launches-ne1 -or $started.Process.Id-ne789){throw 'A released endpoint must allow one replacement collector'}
+  if($script:launches-ne1 -or $started.Process.Id-ne789 -or $script:polls-ne3){throw 'Delayed PID exit and port release must allow replacement in the same maintenance attempt'}
  } finally { if(Test-Path -LiteralPath $recoveryRoot){Remove-Item -LiteralPath $recoveryRoot -Recurse -Force} }
 }
 'Endpoint regression passed: kernel completion, exclusive bind and independent collector recovery.'

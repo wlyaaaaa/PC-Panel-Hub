@@ -322,26 +322,27 @@ $matchingStopFunction = $stopAst.Find({param($node)
     }
 }
 
+. (Join-Path $side 'MetricsEndpointPolicy.ps1')
 $metricsStopProofFunction = $stopAst.Find(
     {
         param($node)
         $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
-        $node.Name -eq "Wait-ManagedMetricsAgentExitAndPortRelease"
+        $node.Name -eq "Assert-ManagedMetricsAgentExitAndPortRelease"
     },
     $true)
 $metricsCleanup = $stopAst.EndBlock.Statements | Where-Object {
     $_ -is [System.Management.Automation.Language.TryStatementAst] -and
-    $_.Body.Extent.Text -match 'Wait-ManagedMetricsAgentExitAndPortRelease'
+    $_.Body.Extent.Text -match 'Assert-ManagedMetricsAgentExitAndPortRelease'
 }
 $stopSourceText = Get-Content -Raw -LiteralPath (Join-Path $side "StopSideScreenStack.ps1")
 & {
     function Write-StopLog { param([string]$Message) }
     function Get-Process { param([int]$Id) return $null }
     function Test-MetricsProcessActive { param([int]$ProcessId) return $false }
-    function Get-TurzxMetricsEndpoint { [pscustomobject]@{Port=18766} }
-    function Test-MetricsPortAvailable { return $true }
+    function Get-TurzxMetricsEndpoint { [pscustomobject]@{HostName='127.0.0.1';Port=18766} }
+    function Test-MetricsEndpointBind { return $true }
     . ([scriptblock]::Create($metricsStopProofFunction.Extent.Text))
-    Wait-ManagedMetricsAgentExitAndPortRelease -ProcessIds @(62532) -TimeoutSeconds 1
+    Assert-ManagedMetricsAgentExitAndPortRelease -ProcessIds @(62532) -TimeoutSeconds 1
 }
 & {
     $script:metricsStopProofLog = @()
@@ -354,9 +355,9 @@ $stopSourceText = Get-Content -Raw -LiteralPath (Join-Path $side "StopSideScreen
         }
     }
     function Test-MetricsProcessActive { param([int]$ProcessId) return $true }
-    function Get-TurzxMetricsEndpoint { [pscustomobject]@{Port=18766} }
+    function Get-TurzxMetricsEndpoint { [pscustomobject]@{HostName='127.0.0.1';Port=18766} }
     $script:metricsPortProbeError = 'simulated exclusive bind denied'
-    function Test-MetricsPortAvailable { return $false }
+    function Test-MetricsEndpointBind { return $false }
     function Get-NetTCPConnection {
         [CmdletBinding()]
         param([string]$State, [int]$LocalPort)
@@ -366,7 +367,7 @@ $stopSourceText = Get-Content -Raw -LiteralPath (Join-Path $side "StopSideScreen
     . ([scriptblock]::Create($metricsStopProofFunction.Extent.Text))
     $failure = $null
     try {
-        Wait-ManagedMetricsAgentExitAndPortRelease -ProcessIds @(62532) -TimeoutSeconds 1
+        Assert-ManagedMetricsAgentExitAndPortRelease -ProcessIds @(62532) -TimeoutSeconds 1
     }
     catch {
         $failure = $_.Exception.Message
@@ -940,6 +941,42 @@ foreach ($pattern in @(
     if ($watchdogStart -notmatch [regex]::Escape($pattern)) {
         throw "Watchdog missing bounded snapshot stale recovery contract: $pattern"
     }
+}
+
+& {
+    $functions = $watchdogAst.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst]}, $true)
+    . ([scriptblock]::Create(($functions | Where-Object Name -eq 'Invoke-TurzxMetricsRecovery').Extent.Text))
+    . ([scriptblock]::Create($startupWindowFunction.Extent.Text))
+    $healthBody = $watchdogAst.FindAll({param($n) $n -is [Management.Automation.Language.IfStatementAst]}, $true) |
+        Where-Object { $_.Clauses[0].Item1.Extent.Text -eq '$child.HasExited' }
+    $healthBody = $healthBody.Clauses[1].Item2.Extent.Text
+    $healthStep = [scriptblock]::Create($healthBody.Substring(1, $healthBody.Length - 2))
+    function Get-TurzxMonotonicMilliseconds { 0 }
+    function Get-StreamHeartbeatHealth { [pscustomobject]@{Healthy=$true; SnapshotStatus=$snapshotStatus; Reason='ok'} }
+    function Invoke-TurzxMetricsAgentMaintenance {
+        param($SideRoot, [switch]$Restart)
+        $script:maintenanceCalls++; if ($nextStatus -eq 'throw') { throw 'collector failed' }
+        [pscustomobject]@{Status=$nextStatus}
+    }
+    function Invoke-TurzxStackRestartAttempt {param($Reason, $DelaySeconds) $script:stackRestarts++; [pscustomobject]@{Child=[pscustomobject]@{Id=42}} }
+    $scriptDir='unused'; $script:metricsRecoveryStarts=0; $script:maintenanceCalls=0; $script:stackRestarts=0; $nextStatus='started pid=123'
+    $script:metricsLastAttemptUtc=[DateTime]::UtcNow.AddSeconds(-31)
+    if ((Invoke-TurzxMetricsRecovery) -or $script:metricsRecoveryStarts -ne 1) { throw 'First collector restart must allow recovery time.' }
+    if ((Invoke-TurzxMetricsRecovery) -or $script:maintenanceCalls -ne 1) { throw 'Cooldown must not retry or escalate.' }
+    $nextStatus='blocked'; $script:metricsLastAttemptUtc=[DateTime]::UtcNow.AddSeconds(-31)
+    if ((Invoke-TurzxMetricsRecovery) -or $script:metricsRecoveryStarts -ne 0) { throw 'Blocked maintenance must break successful restart sequence.' }
+    $nextStatus='started pid=123'
+    foreach ($attempt in 1..2) { $script:metricsLastAttemptUtc=[DateTime]::UtcNow.AddSeconds(-31); if (Invoke-TurzxMetricsRecovery) { throw 'New collector needs cooldown.' } }
+    if ((Invoke-TurzxMetricsRecovery) -or $script:maintenanceCalls -ne 4) { throw 'Second successful restart also needs cooldown.' }
+    $HeartbeatStartupGraceSeconds=60; $MaxConsecutiveSnapshotStaleHeartbeats=5; $MaxConsecutiveHeartbeatFailures=3; $MaxConsecutiveFailures=3
+    $snapshotStaleHeartbeats=5; $heartbeatFailures=0; $consecutiveFailures=1; $snapshotStatus='stale:TimeoutException'; . $healthStep
+    if ($consecutiveFailures -ne 1) { throw 'Stale snapshots during collector cooldown must preserve previous stack failures for the circuit breaker.' }
+    $heartbeatFailures=2; $script:metricsLastAttemptUtc=[DateTime]::UtcNow.AddSeconds(-31); . $healthStep
+    if ($script:stackRestarts -ne 1 -or $script:metricsRecoveryStarts -ne 0 -or $consecutiveFailures -ne 2) { throw 'Persistent stale snapshots must accumulate bounded stack failures and reset collector count.' }
+    $script:metricsRecoveryStarts=1; $snapshotStatus='fresh'; . $healthStep
+    if ($script:metricsRecoveryStarts -ne 0 -or $consecutiveFailures -ne 0 -or $script:stackRestarts -ne 1) { throw 'A fresh snapshot must clear collector and stack recovery history.' }
+    $nextStatus='throw'; $script:metricsRecoveryStarts=1; $script:metricsLastAttemptUtc=[DateTime]::UtcNow.AddSeconds(-31)
+    if ((Invoke-TurzxMetricsRecovery) -or $script:metricsRecoveryStarts -ne 0) { throw 'Failed maintenance must break successful restart sequence.' }
 }
 
 $heartbeatTestRoot = Join-Path ([IO.Path]::GetTempPath()) ("turzx-heartbeat-slots-{0}" -f [guid]::NewGuid().ToString("N"))
