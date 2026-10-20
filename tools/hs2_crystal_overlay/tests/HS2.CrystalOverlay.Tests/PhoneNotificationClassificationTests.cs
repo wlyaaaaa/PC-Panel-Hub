@@ -4,23 +4,6 @@ namespace HS2.CrystalOverlay.Tests;
 
 public sealed class PhoneNotificationClassificationTests
 {
-    [Fact]
-    public void VivoToastRequiresObservedIdentityAndUsesOrdinaryTwoTextShape()
-    {
-        string[] texts = ["【微信】联系人", "测试通知"];
-        Assert.Equal(
-            OverlaySource.VivoOfficeSuite,
-            PhoneNotificationClassifier.SourceForRelayApp(
-                "vivo办公套件", "com.vivo.pcsuite"));
-        Assert.Equal(
-            PhoneNotificationCategory.Ordinary,
-            PhoneNotificationClassifier.Classify(texts[0], texts[1]));
-        Assert.Equal(
-            OverlaySource.System,
-            PhoneNotificationClassifier.SourceForRelayApp(
-                "vivo办公套件", "unmatched-app"));
-    }
-
     [Theory]
     [InlineData("妈妈来电", null, PhoneNotificationCategory.Call)]
     [InlineData("Incoming call", "Alex", PhoneNotificationCategory.Call)]
@@ -167,18 +150,6 @@ public sealed class PhoneNotificationClassificationTests
             known: true,
             changed: false,
             isActiveTracked: true));
-    }
-
-    [Theory]
-    [InlineData("小米妙享", OverlaySource.XiaomiHyperConnect)]
-    [InlineData("MiSmartShare", OverlaySource.XiaomiHyperConnect)]
-    public void RelayApplicationNamesMapToSupportedSource(
-        string appName,
-        OverlaySource expected)
-    {
-        Assert.Equal(
-            expected,
-            PhoneNotificationClassifier.SourceForRelayApp(appName));
     }
 
     [Theory]

@@ -66,8 +66,7 @@ public partial class App : Application
             glance.Toggle);
         phoneBattery = new PhoneBatterySourceCoordinator(
             controller,
-            (IPhoneBatteryProbe?)AndroidAdbBatteryProbe.FromUserEnvironment() ??
-            new XiaomiHyperConnectBatteryProbe());
+            AndroidAdbBatteryProbe.FromUserEnvironment());
         media = new MediaSessionSource(controller);
         steamGames = new SteamGameSourceCoordinator(controller);
         audioDevices = new AudioDeviceSourceCoordinator(controller);

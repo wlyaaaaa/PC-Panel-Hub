@@ -22,8 +22,7 @@ public enum OverlaySource
     System,
     NetEase,
     Steam,
-    XiaomiHyperConnect,
-    VivoOfficeSuite,
+    PhoneBridge,
     AndroidAdb,
 }
 

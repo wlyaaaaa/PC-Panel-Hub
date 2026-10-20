@@ -16,9 +16,9 @@ public sealed class VisibleCardSelectorTests
         scheduler.Publish(OverlayRequest.Active(
             "game", OverlayKind.GameActive, OverlaySource.Steam, "游戏"), Now);
         scheduler.Publish(OverlayRequest.Active(
-            "incoming-call", OverlayKind.PhoneCall, OverlaySource.XiaomiHyperConnect, "手机来电"), Now);
+            "incoming-call", OverlayKind.PhoneCall, OverlaySource.PhoneBridge, "手机来电"), Now);
         scheduler.Publish(OverlayRequest.Active(
-            "active-transfer", OverlayKind.PhoneTransfer, OverlaySource.XiaomiHyperConnect, "手机传输"), Now);
+            "active-transfer", OverlayKind.PhoneTransfer, OverlaySource.PhoneBridge, "手机传输"), Now);
         scheduler.Publish(OverlayRequest.Timed(
             "network-state", OverlayKind.DeviceOrNetwork, OverlaySource.System, "网络已断开"), Now);
         for (var index = 1; index <= 3; index++)
@@ -26,7 +26,7 @@ public sealed class VisibleCardSelectorTests
             scheduler.Publish(OverlayRequest.Timed(
                 $"phone-{index}",
                 OverlayKind.PhoneNotification,
-                OverlaySource.XiaomiHyperConnect,
+                OverlaySource.PhoneBridge,
                 $"手机通知 {index}"), Now.AddMilliseconds(index));
         }
 
@@ -68,15 +68,15 @@ public sealed class VisibleCardSelectorTests
         scheduler.Publish(OverlayRequest.Timed(
             "summary", OverlayKind.GameSummary, OverlaySource.Steam, "游戏总结"), Now);
         scheduler.Publish(OverlayRequest.Active(
-            "incoming-call", OverlayKind.PhoneCall, OverlaySource.XiaomiHyperConnect, "手机来电"), Now);
+            "incoming-call", OverlayKind.PhoneCall, OverlaySource.PhoneBridge, "手机来电"), Now);
         scheduler.Publish(OverlayRequest.Active(
-            "call", OverlayKind.PhoneCall, OverlaySource.XiaomiHyperConnect, "来电"), Now);
+            "call", OverlayKind.PhoneCall, OverlaySource.PhoneBridge, "来电"), Now);
         scheduler.Publish(OverlayRequest.Active(
-            "transfer", OverlayKind.PhoneTransfer, OverlaySource.XiaomiHyperConnect, "文件传输"), Now);
+            "transfer", OverlayKind.PhoneTransfer, OverlaySource.PhoneBridge, "文件传输"), Now);
         scheduler.Publish(OverlayRequest.Timed(
             "latest-phone",
             OverlayKind.PhoneNotification,
-            OverlaySource.XiaomiHyperConnect,
+            OverlaySource.PhoneBridge,
             "刚到的手机通知"), Now.AddSeconds(1));
 
         var visible = scheduler.GetFrame(
@@ -99,9 +99,9 @@ public sealed class VisibleCardSelectorTests
     {
         var scheduler = new OverlayScheduler();
         scheduler.Publish(OverlayRequest.Active(
-            "active-transfer", OverlayKind.PhoneTransfer, OverlaySource.XiaomiHyperConnect, "手机传输"), Now);
+            "active-transfer", OverlayKind.PhoneTransfer, OverlaySource.PhoneBridge, "手机传输"), Now);
         scheduler.Publish(OverlayRequest.Active(
-            "phone-transfer", OverlayKind.PhoneTransfer, OverlaySource.XiaomiHyperConnect, "手机文件传输"), Now);
+            "phone-transfer", OverlayKind.PhoneTransfer, OverlaySource.PhoneBridge, "手机文件传输"), Now);
         scheduler.Publish(OverlayRequest.Timed(
             "network-state", OverlayKind.DeviceOrNetwork, OverlaySource.System, "网络已断开"), Now);
         scheduler.Publish(OverlayRequest.Timed(
@@ -134,13 +134,13 @@ public sealed class VisibleCardSelectorTests
         scheduler.Publish(OverlayRequest.Active(
             "game", OverlayKind.GameActive, OverlaySource.Steam, "游戏"), Now);
         scheduler.Publish(OverlayRequest.Active(
-            "incoming-call", OverlayKind.PhoneCall, OverlaySource.XiaomiHyperConnect, "手机来电"), Now);
+            "incoming-call", OverlayKind.PhoneCall, OverlaySource.PhoneBridge, "手机来电"), Now);
         scheduler.Publish(OverlayRequest.Active(
-            "active-transfer", OverlayKind.PhoneTransfer, OverlaySource.XiaomiHyperConnect, "手机传输"), Now);
+            "active-transfer", OverlayKind.PhoneTransfer, OverlaySource.PhoneBridge, "手机传输"), Now);
         scheduler.Publish(OverlayRequest.Timed(
             "verification",
             OverlayKind.PhoneVerificationCode,
-            OverlaySource.XiaomiHyperConnect,
+            OverlaySource.PhoneBridge,
             "482731",
             dedupKey: "verification-code:482731",
             visual: new OverlayVisualData(VerificationCode: "482731")), Now);
@@ -149,7 +149,7 @@ public sealed class VisibleCardSelectorTests
             scheduler.Publish(OverlayRequest.Timed(
                 $"phone-{index}",
                 OverlayKind.PhoneNotification,
-                OverlaySource.XiaomiHyperConnect,
+                OverlaySource.PhoneBridge,
                 $"手机通知 {index}"), Now.AddMilliseconds(index));
         }
 

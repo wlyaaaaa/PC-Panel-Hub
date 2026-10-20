@@ -55,7 +55,6 @@ public sealed class OverlayPolicyTests
     [InlineData(OverlayKind.MediaTrackChange, 8)]
     [InlineData(OverlayKind.GameSummary, 60)]
     [InlineData(OverlayKind.DeviceOrNetwork, 12)]
-    [InlineData(OverlayKind.PhoneConnection, 5)]
     [InlineData(OverlayKind.PhoneDynamic, 60)]
     [InlineData(OverlayKind.PhoneVerificationCode, 15)]
     public void TimedPolicies_HaveApprovedDurations(OverlayKind kind, int seconds)
@@ -67,6 +66,7 @@ public sealed class OverlayPolicyTests
     }
 
     [Theory]
+    [InlineData(OverlayKind.PhoneConnection)]
     [InlineData(OverlayKind.MediaActive)]
     [InlineData(OverlayKind.GameActive)]
     [InlineData(OverlayKind.PhoneCall)]

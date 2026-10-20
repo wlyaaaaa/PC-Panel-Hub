@@ -492,9 +492,7 @@ public sealed class OverlayScheduler
         policy.VisualTier == OverlayVisualTier.StackedNotification;
 
     private static bool IsPhoneRelaySource(OverlaySource source) =>
-        source is
-            OverlaySource.XiaomiHyperConnect or
-            OverlaySource.VivoOfficeSuite;
+        source == OverlaySource.PhoneBridge;
 
     private static string? NormalizeDedupKey(string? value)
     {

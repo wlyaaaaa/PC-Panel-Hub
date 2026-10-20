@@ -32,8 +32,8 @@ public static class OverlayPolicies
                 OverlayVisualTier.Crystal, 12, 650, Normal),
             [OverlayKind.PhoneBattery] = Active(
                 OverlayVisualTier.Direct, 50, Ambient),
-            [OverlayKind.PhoneConnection] = Timed(
-                OverlayVisualTier.StackedNotification, 5, 750, Phone),
+            [OverlayKind.PhoneConnection] = Active(
+                OverlayVisualTier.StackedNotification, 750, Phone),
             [OverlayKind.PhoneNotification] = Timed(
                 OverlayVisualTier.StackedNotification,
                 60,

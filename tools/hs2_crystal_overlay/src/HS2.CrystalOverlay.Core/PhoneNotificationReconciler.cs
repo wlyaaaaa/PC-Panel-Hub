@@ -9,7 +9,8 @@ public sealed record PhoneNotificationSnapshotItem(
     string AppName,
     string Title,
     string? Body,
-    OverlaySource Source);
+    OverlaySource Source,
+    string? Code = null);
 
 internal sealed record TrackedPhoneNotification(
     OverlayKind Kind,
@@ -49,10 +50,10 @@ public sealed class PhoneNotificationSnapshotReconciler
             .Select(item => new
             {
                 Item = item,
-                Category = PhoneNotificationClassifier.Classify(
-                    item.Title,
-                    item.Body),
-                IsPlaceholder = PhoneNotificationClassifier.
+                Category = !string.IsNullOrWhiteSpace(item.Code)
+                    ? PhoneNotificationCategory.VerificationCode
+                    : PhoneNotificationClassifier.Classify(item.Title, item.Body),
+                IsPlaceholder = string.IsNullOrWhiteSpace(item.Code) && PhoneNotificationClassifier.
                     IsPlaceholderNotification(item.Title, item.Body),
             })
             .OrderBy(candidate => candidate.Item.CreationTime)
@@ -91,7 +92,7 @@ public sealed class PhoneNotificationSnapshotReconciler
                 PhoneNotificationCategory.VerificationCode;
             var fingerprint = PhoneNotificationClassifier.DedupKey(
                 item.Title,
-                item.Body);
+                item.Body) + "\u001f" + item.Code;
             var known = fingerprints.TryGetValue(
                 item.Id,
                 out var previousFingerprint);
@@ -284,10 +285,11 @@ public sealed class PhoneNotificationSnapshotReconciler
     {
         if (category == PhoneNotificationCategory.VerificationCode)
         {
-            if (!PhoneVerificationCodeDetector.TryExtract(
+            var code = item.Code;
+            if (string.IsNullOrWhiteSpace(code) && !PhoneVerificationCodeDetector.TryExtract(
                     item.Title,
                     item.Body,
-                    out var code))
+                    out code))
             {
                 throw new InvalidOperationException(
                     "Verification notification did not contain a code.");

@@ -17,12 +17,12 @@ public sealed class PhoneBatteryProbeReadingCacheTests
             0,
             TimeSpan.Zero);
         var reading = new PhoneBatteryReading(
-            PhoneBatteryProvider.XiaomiHyperConnect,
+            PhoneBatteryProvider.AndroidAdb,
             97,
             true,
             true,
             completedAt.AddSeconds(-1),
-            "xiaomi-ui");
+            "adb-dumpsys");
 
         var confirmed = cache.Apply(new PhoneBatteryProbeAttempt<
             PhoneBatteryReading?>(
@@ -44,7 +44,7 @@ public sealed class PhoneBatteryProbeReadingCacheTests
         Assert.Equal(confirmed, afterTimeout);
         Assert.Equal(confirmed, afterFault);
         Assert.Equal(
-            PhoneBatteryProvider.XiaomiHyperConnect,
+            PhoneBatteryProvider.AndroidAdb,
             PhoneBatterySelection.Select(
                 afterFault,
                 completedAt.AddSeconds(14),
@@ -64,12 +64,12 @@ public sealed class PhoneBatteryProbeReadingCacheTests
             PhoneBatteryReading?>(
             PhoneBatteryProbeAttemptStatus.Succeeded,
             new PhoneBatteryReading(
-                PhoneBatteryProvider.XiaomiHyperConnect,
+                PhoneBatteryProvider.AndroidAdb,
                 80,
                 false,
                 true,
                 completedAt,
-                "xiaomi-ui"),
+                "adb-dumpsys"),
             completedAt));
 
         var disconnected = cache.Apply(new PhoneBatteryProbeAttempt<
@@ -90,24 +90,24 @@ public sealed class PhoneBatteryProbeReadingCacheTests
             PhoneBatteryReading?>(
             PhoneBatteryProbeAttemptStatus.Succeeded,
             new PhoneBatteryReading(
-                PhoneBatteryProvider.XiaomiHyperConnect,
+                PhoneBatteryProvider.AndroidAdb,
                 80,
                 null,
                 true,
                 completedAt,
-                "xiaomi-ui"),
+                "adb-dumpsys"),
             completedAt));
 
         var replacement = cache.Apply(new PhoneBatteryProbeAttempt<
             PhoneBatteryReading?>(
             PhoneBatteryProbeAttemptStatus.Succeeded,
             new PhoneBatteryReading(
-                PhoneBatteryProvider.XiaomiHyperConnect,
+                PhoneBatteryProvider.AndroidAdb,
                 81,
                 null,
                 true,
                 completedAt.AddMinutes(-1),
-                "xiaomi-ui")));
+                "adb-dumpsys")));
 
         Assert.NotEqual(confirmed, replacement);
         Assert.Equal(81, replacement?.Percentage);
@@ -126,18 +126,18 @@ public sealed class PhoneBatteryProbeReadingCacheTests
             PhoneBatteryReading?>(
             PhoneBatteryProbeAttemptStatus.Succeeded,
             new PhoneBatteryReading(
-                PhoneBatteryProvider.XiaomiHyperConnect,
+                PhoneBatteryProvider.AndroidAdb,
                 92,
                 true,
                 true,
                 evidenceAt,
-                "xiaomi-log"),
+                "adb-dumpsys"),
             now));
 
         Assert.Equal(evidenceAt, confirmed?.ObservedAt);
         Assert.Equal(now, confirmed?.ConfirmedAt);
         Assert.Equal(
-            PhoneBatteryProvider.XiaomiHyperConnect,
+            PhoneBatteryProvider.AndroidAdb,
             PhoneBatterySelection.Select(
                 confirmed,
                 now.AddSeconds(14),

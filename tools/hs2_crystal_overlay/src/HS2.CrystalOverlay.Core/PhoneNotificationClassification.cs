@@ -188,36 +188,6 @@ public static partial class PhoneNotificationClassifier
         bool isActiveTracked) =>
         !known || changed || !isActiveTracked;
 
-    public static OverlaySource SourceForRelayApp(
-        string? appName,
-        string? appUserModelId = null)
-    {
-        var value = appName ?? string.Empty;
-        if (string.Equals(value, "vivo办公套件", StringComparison.Ordinal) &&
-            string.Equals(appUserModelId, "com.vivo.pcsuite", StringComparison.Ordinal))
-        {
-            return OverlaySource.VivoOfficeSuite;
-        }
-
-        if (value.Contains(
-                "Xiaomi",
-                StringComparison.OrdinalIgnoreCase) ||
-            value.Contains(
-                "小米",
-                StringComparison.OrdinalIgnoreCase) ||
-            value.Contains(
-                "妙享",
-                StringComparison.OrdinalIgnoreCase) ||
-            value.Contains(
-                "MiSmartShare",
-                StringComparison.OrdinalIgnoreCase))
-        {
-            return OverlaySource.XiaomiHyperConnect;
-        }
-
-        return OverlaySource.System;
-    }
-
     private static string CombinedNormalizedText(
         string? title,
         string? body) =>

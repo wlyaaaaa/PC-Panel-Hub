@@ -45,12 +45,12 @@ public sealed class OverlaySchedulerTests
         scheduler.Publish(OverlayRequest.Active(
             "phone-battery",
             OverlayKind.PhoneBattery,
-            OverlaySource.XiaomiHyperConnect,
+            OverlaySource.PhoneBridge,
             "手机 87% · 充电中"), Now);
         scheduler.Publish(OverlayRequest.Timed(
             "phone-toast",
             OverlayKind.PhoneNotification,
-            OverlaySource.XiaomiHyperConnect,
+            OverlaySource.PhoneBridge,
             "微信",
             "一条新消息",
             dedupKey: "wechat|一条新消息"), Now);
@@ -73,7 +73,7 @@ public sealed class OverlaySchedulerTests
         scheduler.Publish(OverlayRequest.Timed(
             "phone-toast",
             OverlayKind.PhoneNotification,
-            OverlaySource.XiaomiHyperConnect,
+            OverlaySource.PhoneBridge,
             "短信",
             "验证码 1234"), Now);
 
@@ -95,7 +95,7 @@ public sealed class OverlaySchedulerTests
         scheduler.Publish(OverlayRequest.Timed(
             "phone-toast",
             OverlayKind.PhoneNotification,
-            OverlaySource.XiaomiHyperConnect,
+            OverlaySource.PhoneBridge,
             "传输中",
             "已完成 20%"), Now);
         Assert.Single(scheduler.GetFrame(Now, 6, 3).VisibleCards);
@@ -103,7 +103,7 @@ public sealed class OverlaySchedulerTests
         scheduler.Publish(OverlayRequest.Timed(
             "phone-toast",
             OverlayKind.PhoneNotification,
-            OverlaySource.XiaomiHyperConnect,
+            OverlaySource.PhoneBridge,
             "传输中",
             "已完成 80%"), Now.AddSeconds(20));
         var updated = Assert.Single(
@@ -125,7 +125,7 @@ public sealed class OverlaySchedulerTests
             scheduler.Publish(OverlayRequest.Timed(
                 $"phone-toast-{index}",
                 OverlayKind.PhoneNotification,
-                OverlaySource.XiaomiHyperConnect,
+                OverlaySource.PhoneBridge,
                 $"通知 {index}",
                 $"正文 {index}"), Now);
         }
@@ -161,7 +161,7 @@ public sealed class OverlaySchedulerTests
         scheduler.Publish(OverlayRequest.Timed(
             "phone-toast",
             OverlayKind.PhoneNotification,
-            OverlaySource.XiaomiHyperConnect,
+            OverlaySource.PhoneBridge,
             "短信",
             "请稍后查看"), Now);
 
@@ -192,7 +192,7 @@ public sealed class OverlaySchedulerTests
         scheduler.Publish(OverlayRequest.Timed(
             "phone-toast",
             OverlayKind.PhoneNotification,
-            OverlaySource.XiaomiHyperConnect,
+            OverlaySource.PhoneBridge,
             "一条旧通知"), Now);
 
         Assert.Empty(scheduler.GetFrame(
@@ -206,7 +206,7 @@ public sealed class OverlaySchedulerTests
         staleScheduler.Publish(OverlayRequest.Timed(
             "stale-phone-toast",
             OverlayKind.PhoneNotification,
-            OverlaySource.XiaomiHyperConnect,
+            OverlaySource.PhoneBridge,
             "另一条旧通知"), Now);
         Assert.Empty(staleScheduler.GetFrame(
             Now.AddSeconds(179),
@@ -228,12 +228,12 @@ public sealed class OverlaySchedulerTests
         scheduler.Publish(OverlayRequest.Timed(
             "phone-toast-1",
             OverlayKind.PhoneNotification,
-            OverlaySource.XiaomiHyperConnect,
+            OverlaySource.PhoneBridge,
             "通知 1"), Now);
         scheduler.Publish(OverlayRequest.Timed(
             "phone-toast-2",
             OverlayKind.PhoneNotification,
-            OverlaySource.XiaomiHyperConnect,
+            OverlaySource.PhoneBridge,
             "通知 2"), Now.AddMilliseconds(1));
 
         var frame = scheduler.GetFrame(
@@ -274,7 +274,7 @@ public sealed class OverlaySchedulerTests
         scheduler.Publish(OverlayRequest.Active(
             "ride",
             OverlayKind.PhoneDynamic,
-            OverlaySource.XiaomiHyperConnect,
+            OverlaySource.PhoneBridge,
             "司机即将到达",
             "距离 300 米"), Now);
 
@@ -298,7 +298,7 @@ public sealed class OverlaySchedulerTests
         scheduler.Publish(OverlayRequest.Timed(
             "phone-toast",
             OverlayKind.PhoneNotification,
-            OverlaySource.XiaomiHyperConnect,
+            OverlaySource.PhoneBridge,
             "配送状态",
             "骑手已取货"), Now);
         Assert.Single(scheduler.GetFrame(
@@ -308,7 +308,7 @@ public sealed class OverlaySchedulerTests
         scheduler.Publish(OverlayRequest.Timed(
             "phone-toast",
             OverlayKind.PhoneNotification,
-            OverlaySource.XiaomiHyperConnect,
+            OverlaySource.PhoneBridge,
             "配送状态",
             "骑手距离 300 米"), Now.AddSeconds(4));
 
@@ -327,7 +327,7 @@ public sealed class OverlaySchedulerTests
         var accepted = scheduler.Publish(OverlayRequest.Timed(
             "xiaomi-toast",
             OverlayKind.PhoneNotification,
-            OverlaySource.XiaomiHyperConnect,
+            OverlaySource.PhoneBridge,
             "微信",
             "午饭见",
             dedupKey: PhoneNotificationClassifier.DedupKey(
@@ -336,7 +336,7 @@ public sealed class OverlaySchedulerTests
         var duplicate = scheduler.Publish(OverlayRequest.Timed(
             "xiaomi-repeat-toast",
             OverlayKind.PhoneNotification,
-            OverlaySource.XiaomiHyperConnect,
+            OverlaySource.PhoneBridge,
             "微信",
             "午饭见",
             dedupKey: PhoneNotificationClassifier.DedupKey(
@@ -360,7 +360,7 @@ public sealed class OverlaySchedulerTests
         Assert.True(scheduler.Publish(OverlayRequest.Timed(
             "xiaomi-delayed-toast",
             OverlayKind.PhoneNotification,
-            OverlaySource.XiaomiHyperConnect,
+            OverlaySource.PhoneBridge,
             "微信",
             "同一条跨设备消息",
             dedupKey: dedupKey), Now));
@@ -368,7 +368,7 @@ public sealed class OverlaySchedulerTests
         Assert.False(scheduler.Publish(OverlayRequest.Timed(
             "xiaomi-repeat-delayed-toast",
             OverlayKind.PhoneNotification,
-            OverlaySource.XiaomiHyperConnect,
+            OverlaySource.PhoneBridge,
             "微信",
             "同一条跨设备消息",
             dedupKey: dedupKey), Now.AddSeconds(90)));
@@ -381,7 +381,7 @@ public sealed class OverlaySchedulerTests
         Assert.True(scheduler.Publish(OverlayRequest.Timed(
             "xiaomi-toast-one",
             OverlayKind.PhoneNotification,
-            OverlaySource.XiaomiHyperConnect,
+            OverlaySource.PhoneBridge,
             "Fight for the Future",
             "UPDATE: KOSA theater is a gift to Big Tech",
             dedupKey: PhoneNotificationClassifier.DedupKey(
@@ -391,7 +391,7 @@ public sealed class OverlaySchedulerTests
         Assert.False(scheduler.Publish(OverlayRequest.Timed(
             "xiaomi-toast-two",
             OverlayKind.PhoneNotification,
-            OverlaySource.XiaomiHyperConnect,
+            OverlaySource.PhoneBridge,
             "Fight for the Future",
             "KOSA theater is a gift to Big Tech",
             dedupKey: PhoneNotificationClassifier.DedupKey(
@@ -409,14 +409,14 @@ public sealed class OverlaySchedulerTests
         Assert.True(scheduler.Publish(OverlayRequest.Timed(
             "xiaomi-kosa-early",
             OverlayKind.PhoneNotification,
-            OverlaySource.XiaomiHyperConnect,
+            OverlaySource.PhoneBridge,
             "Fight for the Future",
             "UPDATE: KOSA theater is a gift to Big Tech"), Now));
 
         Assert.False(scheduler.Publish(OverlayRequest.Timed(
             "xiaomi-kosa-delayed",
             OverlayKind.PhoneNotification,
-            OverlaySource.XiaomiHyperConnect,
+            OverlaySource.PhoneBridge,
             "Fight for the Future",
             "KOSA theater is a gift to Big Tech"), Now.AddSeconds(90)));
     }
@@ -428,7 +428,7 @@ public sealed class OverlaySchedulerTests
         Assert.True(scheduler.Publish(OverlayRequest.Timed(
             "xiaomi-kosa-one",
             OverlayKind.PhoneNotification,
-            OverlaySource.XiaomiHyperConnect,
+            OverlaySource.PhoneBridge,
             "Fight for the Future",
             "UPDATE: KOSA theater is a gift to Big Tech"), Now));
         Assert.Single(scheduler.GetFrame(
@@ -438,7 +438,7 @@ public sealed class OverlaySchedulerTests
         Assert.False(scheduler.Publish(OverlayRequest.Timed(
             "xiaomi-kosa-two",
             OverlayKind.PhoneNotification,
-            OverlaySource.XiaomiHyperConnect,
+            OverlaySource.PhoneBridge,
             "Fight for the Future",
             "KOSA theater is a gift to Big Tech"), Now.AddSeconds(8)));
 
@@ -457,13 +457,13 @@ public sealed class OverlaySchedulerTests
         Assert.True(scheduler.Publish(OverlayRequest.Timed(
             "otp-one",
             OverlayKind.PhoneNotification,
-            OverlaySource.XiaomiHyperConnect,
+            OverlaySource.PhoneBridge,
             "验证码",
             "123456"), Now));
         Assert.True(scheduler.Publish(OverlayRequest.Timed(
             "otp-two",
             OverlayKind.PhoneNotification,
-            OverlaySource.XiaomiHyperConnect,
+            OverlaySource.PhoneBridge,
             "验证码",
             "123457"), Now.AddSeconds(1)));
 
@@ -478,7 +478,7 @@ public sealed class OverlaySchedulerTests
         var scheduler = new OverlayScheduler();
         Assert.True(scheduler.Publish(VerificationCode(
             "482731",
-            OverlaySource.XiaomiHyperConnect), Now));
+            OverlaySource.PhoneBridge), Now));
         Assert.Single(scheduler.GetFrame(
             Now,
             maxVisibleCards: 1,
@@ -486,7 +486,7 @@ public sealed class OverlaySchedulerTests
 
         Assert.True(scheduler.Publish(VerificationCode(
             "482731",
-            OverlaySource.XiaomiHyperConnect), Now.AddSeconds(5)));
+            OverlaySource.PhoneBridge), Now.AddSeconds(5)));
 
         Assert.Single(scheduler.GetFrame(
             Now.AddSeconds(14.9),
@@ -504,7 +504,7 @@ public sealed class OverlaySchedulerTests
         var scheduler = new OverlayScheduler();
         Assert.True(scheduler.Publish(VerificationCode(
             "482731",
-            OverlaySource.XiaomiHyperConnect), Now));
+            OverlaySource.PhoneBridge), Now));
         Assert.Single(scheduler.GetFrame(
             Now,
             maxVisibleCards: 1,
@@ -512,7 +512,7 @@ public sealed class OverlaySchedulerTests
 
         Assert.True(scheduler.Publish(VerificationCode(
             "735194",
-            OverlaySource.XiaomiHyperConnect), Now.AddSeconds(5)));
+            OverlaySource.PhoneBridge), Now.AddSeconds(5)));
         var immediate = Assert.Single(scheduler.GetFrame(
             Now.AddSeconds(5),
             maxVisibleCards: 1,
@@ -536,7 +536,7 @@ public sealed class OverlaySchedulerTests
         var scheduler = new OverlayScheduler();
         Assert.True(scheduler.Publish(VerificationCode(
             "482731",
-            OverlaySource.XiaomiHyperConnect), Now));
+            OverlaySource.PhoneBridge), Now));
         Assert.Single(scheduler.GetFrame(
             Now,
             maxVisibleCards: 1,
@@ -545,7 +545,7 @@ public sealed class OverlaySchedulerTests
         Assert.Equal(1, scheduler.ClearDismissible(Now.AddSeconds(2)));
         Assert.False(scheduler.Publish(VerificationCode(
             "482731",
-            OverlaySource.XiaomiHyperConnect), Now.AddSeconds(3)));
+            OverlaySource.PhoneBridge), Now.AddSeconds(3)));
         Assert.Empty(scheduler.GetFrame(
             Now.AddSeconds(3),
             maxVisibleCards: 1,
@@ -553,7 +553,7 @@ public sealed class OverlaySchedulerTests
 
         Assert.True(scheduler.Publish(VerificationCode(
             "735194",
-            OverlaySource.XiaomiHyperConnect), Now.AddSeconds(4)));
+            OverlaySource.PhoneBridge), Now.AddSeconds(4)));
         var newCode = Assert.Single(scheduler.GetFrame(
             Now.AddSeconds(4),
             maxVisibleCards: 1,
@@ -568,14 +568,14 @@ public sealed class OverlaySchedulerTests
         Assert.True(scheduler.Publish(OverlayRequest.Timed(
             "xiaomi-kosa",
             OverlayKind.PhoneNotification,
-            OverlaySource.XiaomiHyperConnect,
+            OverlaySource.PhoneBridge,
             "Fight for the Future",
             "UPDATE: KOSA theater is a gift to Big Tech"), Now));
 
         Assert.False(scheduler.Publish(OverlayRequest.Timed(
             "xiaomi-repeat-kosa",
             OverlayKind.PhoneNotification,
-            OverlaySource.XiaomiHyperConnect,
+            OverlaySource.PhoneBridge,
             "Fight for the Future",
             "KOSA theater is a gift to Big Tech"), Now.AddSeconds(90)));
     }
@@ -587,7 +587,7 @@ public sealed class OverlaySchedulerTests
         scheduler.Publish(OverlayRequest.Timed(
             "phone-toast",
             OverlayKind.PhoneNotification,
-            OverlaySource.XiaomiHyperConnect,
+            OverlaySource.PhoneBridge,
             "持续被挤下的通知"), Now);
 
         Assert.Single(scheduler.GetFrame(
@@ -691,13 +691,13 @@ public sealed class OverlaySchedulerTests
         scheduler.Publish(OverlayRequest.Active(
             "game", OverlayKind.GameActive, OverlaySource.Steam, "游戏"), Now);
         scheduler.Publish(OverlayRequest.Active(
-            "call-1", OverlayKind.PhoneCall, OverlaySource.XiaomiHyperConnect, "来电 1"), Now);
+            "call-1", OverlayKind.PhoneCall, OverlaySource.PhoneBridge, "来电 1"), Now);
         scheduler.Publish(OverlayRequest.Active(
-            "call-2", OverlayKind.PhoneCall, OverlaySource.XiaomiHyperConnect, "来电 2"), Now);
+            "call-2", OverlayKind.PhoneCall, OverlaySource.PhoneBridge, "来电 2"), Now);
         scheduler.Publish(OverlayRequest.Active(
-            "transfer", OverlayKind.PhoneTransfer, OverlaySource.XiaomiHyperConnect, "传输"), Now);
+            "transfer", OverlayKind.PhoneTransfer, OverlaySource.PhoneBridge, "传输"), Now);
         scheduler.Publish(OverlayRequest.Timed(
-            "phone", OverlayKind.PhoneNotification, OverlaySource.XiaomiHyperConnect,
+            "phone", OverlayKind.PhoneNotification, OverlaySource.PhoneBridge,
             "最新通知"), Now);
         scheduler.Publish(OverlayRequest.Timed(
             "deferred-status",
@@ -734,11 +734,11 @@ public sealed class OverlaySchedulerTests
         scheduler.Publish(OverlayRequest.Active(
             "game", OverlayKind.GameActive, OverlaySource.Steam, "游戏"), Now);
         scheduler.Publish(OverlayRequest.Active(
-            "call", OverlayKind.PhoneCall, OverlaySource.XiaomiHyperConnect, "妈妈来电"), Now);
+            "call", OverlayKind.PhoneCall, OverlaySource.PhoneBridge, "妈妈来电"), Now);
         scheduler.Publish(OverlayRequest.Active(
-            "transfer", OverlayKind.PhoneTransfer, OverlaySource.XiaomiHyperConnect, "文件传输"), Now);
+            "transfer", OverlayKind.PhoneTransfer, OverlaySource.PhoneBridge, "文件传输"), Now);
         scheduler.Publish(OverlayRequest.Timed(
-            "phone", OverlayKind.PhoneNotification, OverlaySource.XiaomiHyperConnect,
+            "phone", OverlayKind.PhoneNotification, OverlaySource.PhoneBridge,
             "微信", "午饭见"), Now);
         scheduler.Publish(OverlayRequest.Timed(
             "audio-device", OverlayKind.DeviceOrNetwork, OverlaySource.System, "耳机已连接"), Now);
@@ -764,19 +764,19 @@ public sealed class OverlaySchedulerTests
         Assert.False(scheduler.Publish(OverlayRequest.Timed(
             "xiaomi-repeat-next-poll",
             OverlayKind.PhoneNotification,
-            OverlaySource.XiaomiHyperConnect,
+            OverlaySource.PhoneBridge,
             "微信",
             "午饭见"), Now.AddSeconds(2)));
         Assert.False(scheduler.Publish(OverlayRequest.Timed(
             "xiaomi-next-poll",
             OverlayKind.PhoneNotification,
-            OverlaySource.XiaomiHyperConnect,
+            OverlaySource.PhoneBridge,
             "微信",
             "午饭见"), Now.AddSeconds(2)));
         Assert.True(scheduler.Publish(OverlayRequest.Timed(
             "phone-new-content",
             OverlayKind.PhoneNotification,
-            OverlaySource.XiaomiHyperConnect,
+            OverlaySource.PhoneBridge,
             "微信",
             "晚饭见"), Now.AddSeconds(2)));
     }
