@@ -34,7 +34,7 @@ public sealed class OverlayScheduler
             return true;
         }
 
-        var policy = OverlayPolicies.For(request.Kind);
+        var policy = OverlayPolicies.For(request.Kind, request.Source);
         if (!IsDismissible(request.Kind))
         {
             dismissalSuppressions.RemoveAll(previous =>

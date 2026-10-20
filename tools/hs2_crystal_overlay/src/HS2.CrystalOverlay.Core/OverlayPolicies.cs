@@ -32,8 +32,8 @@ public static class OverlayPolicies
                 OverlayVisualTier.Crystal, 12, 650, Normal),
             [OverlayKind.PhoneBattery] = Active(
                 OverlayVisualTier.Direct, 50, Ambient),
-            [OverlayKind.PhoneConnection] = Active(
-                OverlayVisualTier.StackedNotification, 750, Phone),
+            [OverlayKind.PhoneConnection] = Timed(
+                OverlayVisualTier.StackedNotification, 5, 750, Phone),
             [OverlayKind.PhoneNotification] = Timed(
                 OverlayVisualTier.StackedNotification,
                 60,
@@ -52,8 +52,11 @@ public static class OverlayPolicies
                 OverlayVisualTier.Emphasis, 900, Critical),
         };
 
-    public static OverlayPresentationPolicy For(OverlayKind kind) =>
-        Policies.TryGetValue(kind, out var policy)
+    public static OverlayPresentationPolicy For(
+        OverlayKind kind, OverlaySource source = OverlaySource.System) =>
+        kind == OverlayKind.PhoneConnection && source == OverlaySource.PhoneBridge
+            ? Active(OverlayVisualTier.StackedNotification, 750, Phone)
+            : Policies.TryGetValue(kind, out var policy)
             ? policy
             : throw new ArgumentOutOfRangeException(nameof(kind), kind, null);
 

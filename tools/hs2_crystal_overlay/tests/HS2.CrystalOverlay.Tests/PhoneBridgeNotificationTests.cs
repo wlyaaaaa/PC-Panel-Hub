@@ -33,6 +33,7 @@ public sealed class PhoneBridgeNotificationTests
         {
             await Until(() => events.Any(e => e.Title == "手机桥未连接"));
             var scheduler = new OverlayScheduler();
+            Assert.Equal(TimeSpan.FromSeconds(5), OverlayPolicies.For(OverlayKind.PhoneConnection, OverlaySource.AndroidAdb).Duration);
             var now = DateTimeOffset.UtcNow;
             scheduler.Publish(events.First(), now);
             Assert.Single(scheduler.GetFrame(now.AddMinutes(1)).NotificationCards);
