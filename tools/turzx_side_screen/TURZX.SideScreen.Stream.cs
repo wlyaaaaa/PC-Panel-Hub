@@ -72,7 +72,6 @@ namespace TURZX.SideScreen
                 ", hybridRefresh=" + options.HybridRefresh +
                 ", diffSendTimeoutMs=" + options.DiffSendTimeoutMs +
                 ", fullResyncEveryFrames=" + options.FullResyncEveryFrames +
-                ", altHelper=" + options.AltHelper +
                 ", port=" + options.Port);
 
             try
@@ -171,7 +170,6 @@ namespace TURZX.SideScreen
                                         sequence,
                                         false,
                                         false,
-                                        options.AltHelper,
                                         options.DiffSendTimeoutMs,
                                         out result,
                                         out diffMessage);
@@ -1300,7 +1298,7 @@ namespace TURZX.SideScreen
 
         private static void PrintUsage()
         {
-            Console.WriteLine("TURZX.SideScreen.Stream.exe [--sample] [--dry-run] [--hybrid-refresh] [--diff --allow-unverified-diff] [--alt-helper] [--frames N] [--interval-ms 3000] [--send-timeout-ms 10000] [--diff-send-timeout-ms 900] [--baseline-brightness 170] [--preview-interval-seconds 45] [--full-resync-every-frames 900] [--max-consecutive-send-failures 1] [--metrics-url URL] [--root TURZX_ROOT] [--port COM7]");
+            Console.WriteLine("TURZX.SideScreen.Stream.exe [--sample] [--dry-run] [--hybrid-refresh] [--diff --allow-unverified-diff] [--frames N] [--interval-ms 3000] [--send-timeout-ms 10000] [--diff-send-timeout-ms 900] [--baseline-brightness 170] [--preview-interval-seconds 45] [--full-resync-every-frames 900] [--max-consecutive-send-failures 1] [--metrics-url URL] [--root TURZX_ROOT] [--port COM7]");
             Console.WriteLine("frames=0 means infinite. --hybrid-refresh keeps a 1Hz command-204 cadence with command-200 baselines at startup, frames 60/120/180, and the configured long-term boundary. Launch scripts default to Hybrid; omit the flag only for the explicit 3-second full-frame compatibility fallback.");
         }
 
@@ -1312,7 +1310,6 @@ namespace TURZX.SideScreen
             public bool HybridRefresh;
             public bool UseDiff;
             public bool AllowUnverifiedDiff;
-            public bool AltHelper;
             public int FrameCount = 0;
             public int IntervalMs = 3000;
             public int HttpTimeoutMs = DefaultHttpTimeoutMs;
@@ -1340,7 +1337,6 @@ namespace TURZX.SideScreen
                     else if (arg == "--hybrid-refresh") options.HybridRefresh = true;
                     else if (arg == "--diff") options.UseDiff = true;
                     else if (arg == "--allow-unverified-diff") options.AllowUnverifiedDiff = true;
-                    else if (arg == "--alt-helper") options.AltHelper = true;
                     else if (arg == "--frames") options.FrameCount = int.Parse(Next(args, ref i, arg));
                     else if (arg == "--interval-ms") options.IntervalMs = int.Parse(Next(args, ref i, arg));
                     else if (arg == "--timeout-ms") options.HttpTimeoutMs = int.Parse(Next(args, ref i, arg));

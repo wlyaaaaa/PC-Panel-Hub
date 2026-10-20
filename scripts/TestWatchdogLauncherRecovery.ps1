@@ -37,7 +37,7 @@ try {
             throw 'Launcher test copy differs from production.'
         }
         $stub = @'
-param([string]$Root,[string]$Port,[int]$IntervalMs,[switch]$HybridRefresh,[int]$PollSeconds,[switch]$AltHelper)
+param([string]$Root,[string]$Port,[int]$IntervalMs,[switch]$HybridRefresh,[int]$PollSeconds)
 $counterPath = Join-Path $Root 'attempts.txt'
 $count = if (Test-Path -LiteralPath $counterPath) { @(Get-Content -LiteralPath $counterPath).Count } else { 0 }
 [IO.File]::AppendAllText($counterPath, [DateTime]::UtcNow.ToString('o') + [Environment]::NewLine)

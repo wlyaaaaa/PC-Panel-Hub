@@ -72,7 +72,6 @@ namespace TURZX.SideScreen
                 ", dryRun=" + options.DryRun +
                 ", swapOrder=" + options.SwapOrder +
                 ", flag=" + options.Flag +
-                ", altHelper=" + options.AltHelper +
                 ", port=" + options.Port);
 
             if (options.DryRun)
@@ -131,7 +130,7 @@ namespace TURZX.SideScreen
                                 long changed = CountChangedBytes(previous, current);
                                 Stopwatch sendWatch = Stopwatch.StartNew();
                                 long sequence = frame - 2;
-                                int result = session.SendDiff(previous, current, sequence, options.SwapOrder, options.Flag, options.AltHelper);
+                                int result = session.SendDiff(previous, current, sequence, options.SwapOrder, options.Flag);
                                 sendWatch.Stop();
                                 Console.WriteLine("frame " + frame + " DIFF sent in " + sendWatch.ElapsedMilliseconds +
                                     "ms: seq=" + sequence + ", result=" + result + ", changedBytes=" + changed);
@@ -280,7 +279,7 @@ namespace TURZX.SideScreen
 
         private static void PrintUsage()
         {
-            Console.WriteLine("TURZX.SideScreen.DiffProbe.exe [--dry-run] [--frames 6] [--interval-ms 1000] [--root TURZX_ROOT] [--port COM7] [--swap-order] [--flag] [--alt-helper]");
+            Console.WriteLine("TURZX.SideScreen.DiffProbe.exe [--dry-run] [--frames 6] [--interval-ms 1000] [--root TURZX_ROOT] [--port COM7] [--swap-order] [--flag]");
             Console.WriteLine("Real COM mode sends one full baseline frame, then command-204 differential frames through the original TURZX helper.");
         }
 
@@ -290,7 +289,6 @@ namespace TURZX.SideScreen
             public bool DryRun;
             public bool SwapOrder;
             public bool Flag;
-            public bool AltHelper;
             public int Frames = 6;
             public int IntervalMs = 1000;
             public int TimeoutMs = 90000;
@@ -309,7 +307,6 @@ namespace TURZX.SideScreen
                     else if (arg == "--dry-run") options.DryRun = true;
                     else if (arg == "--swap-order") options.SwapOrder = true;
                     else if (arg == "--flag") options.Flag = true;
-                    else if (arg == "--alt-helper") options.AltHelper = true;
                     else if (arg == "--frames") options.Frames = int.Parse(Next(args, ref i, arg));
                     else if (arg == "--interval-ms") options.IntervalMs = int.Parse(Next(args, ref i, arg));
                     else if (arg == "--timeout-ms") options.TimeoutMs = int.Parse(Next(args, ref i, arg));

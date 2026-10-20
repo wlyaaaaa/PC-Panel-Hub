@@ -480,6 +480,49 @@ if ($guardPlan.Actions.Count -ne 1 -or
     throw "HS2 exclusive-window guard must move only ordinary apps into the primary work area."
 }
 
+# Repeated placement dispatches must stop fighting a window that returns to HS2.
+$bounceHistory = @{}
+$bounceNow = [DateTime]::Parse('2026-10-20T00:00:00Z').ToUniversalTime()
+$bounceArgs = @{ Monitors=@($primaryMonitor,$hs2Monitor); Windows=@($guardWindows[1]); CorrectionHistory=$bounceHistory }
+foreach ($attempt in 0..3) {
+    $bouncePlan = Get-HS2ExclusiveWindowGuardPlan @bounceArgs -NowUtc $bounceNow.AddSeconds($attempt)
+    $expected = if ($attempt -lt 3) { 'Move' } else { 'Minimize' }
+    if ($bouncePlan.Actions.Count -ne 1 -or $bouncePlan.Actions[0].Action -cne $expected) {
+        throw 'Three moves in a minute must be followed by one minimize, not another move.'
+    }
+    Register-HS2WindowGuardCorrection -History $bounceHistory -Action $bouncePlan.Actions[0] -NowUtc $bounceNow.AddSeconds($attempt)
+}
+$guardWindows[1].IsMinimized = $true
+if ((Get-HS2ExclusiveWindowGuardPlan @bounceArgs -NowUtc $bounceNow.AddSeconds(4)).Actions.Count -ne 0) {
+    throw 'A successfully minimized bouncing window must remain untouched.'
+}
+$guardWindows[1].IsMinimized = $false
+$bouncePlan = Get-HS2ExclusiveWindowGuardPlan @bounceArgs -NowUtc $bounceNow.AddSeconds(4)
+if ($bouncePlan.Actions[0].Action -cne 'Backoff' -or $bouncePlan.Actions[0].Hwnd -ne 2 -or
+    $bouncePlan.Actions[0].ProcessName -cne 'notepad' -or $bouncePlan.Actions[0].Left -ne 4000) {
+    throw 'A window that returns after minimize must produce one identifiable backoff event.'
+}
+Register-HS2WindowGuardCorrection -History $bounceHistory -Action $bouncePlan.Actions[0] -NowUtc $bounceNow.AddSeconds(4)
+foreach ($seconds in @(5,60,303)) {
+    if ((Get-HS2ExclusiveWindowGuardPlan @bounceArgs -NowUtc $bounceNow.AddSeconds($seconds)).Actions.Count -ne 0) {
+        throw 'The same HWND must remain untouched throughout its five-minute backoff.'
+    }
+}
+if ((Get-HS2ExclusiveWindowGuardPlan @bounceArgs -NowUtc $bounceNow.AddSeconds(305)).Actions[0].Action -cne 'Move') {
+    throw 'An expired backoff must allow ordinary protection to resume.'
+}
+$reusedWindow = $guardWindows[1].PSObject.Copy(); $reusedWindow.ProcessId = 999
+if ((Get-HS2ExclusiveWindowGuardPlan -Monitors $bounceArgs.Monitors -Windows @($reusedWindow) `
+        -CorrectionHistory $bounceHistory -NowUtc $bounceNow.AddSeconds(6)).Actions[0].Action -cne 'Move') {
+    throw 'A reused HWND owned by a different process must not inherit a previous backoff.'
+}
+$slowHistory = @{}
+Register-HS2WindowGuardCorrection -History $slowHistory -Action $guardPlan.Actions[0] -NowUtc $bounceNow.AddSeconds(-61)
+if ((Get-HS2ExclusiveWindowGuardPlan -Monitors $bounceArgs.Monitors -Windows $bounceArgs.Windows `
+        -CorrectionHistory $slowHistory -NowUtc $bounceNow).Actions[0].Action -cne 'Move') {
+    throw 'An isolated old correction must not count as a current bounce.'
+}
+
 # A window can overlap HS2 while MonitorFromWindow still reports the primary.
 $overlapMain = [pscustomobject]@{
     DeviceName = 'main'; IsPrimary = $true
@@ -2321,9 +2364,6 @@ foreach ($pattern in @(
 if ($stopText -notmatch '(?s)if\s*\(\$IncludeWatchdog\).*?Stop-RecordedWatchdogProcess.*?Stop-MatchingProcess\s+-Reason\s+"stream-exe"') {
     throw "IncludeWatchdog must stop the verified recorded owner before stopping the stream, otherwise the old watchdog can respawn it."
 }
-if ($watchdogText -notmatch '(?s)function Stop-Stack.*?\$LASTEXITCODE\s+-ne\s+0.*?throw') {
-    throw "Watchdog Start-Stack must fail closed when StopSideScreenStack cannot prove stream exit."
-}
 foreach ($powerTransition in @(
         [pscustomobject]@{ Function = 'Enter-SleepDisplayState'; Reason = 'suspend'; State = 'Sleep' },
         [pscustomobject]@{ Function = 'Enter-ShutdownDisplayState'; Reason = 'shutdown'; State = 'Shutdown' }
@@ -2614,15 +2654,25 @@ $exclusiveProtectionAst = @(
         },
         $true)
 )[0]
-if ($exclusiveProtectionAst.Extent.Text -match '-not\s+\$script:hs2DisplayStateActive' -or
-    $exclusiveProtectionAst.Extent.Text -match '\$null\s+-eq\s+\$overlayProcess\)\s*\{\s*return') {
-    throw "HS2 ordinary-window protection must not wait for controller or overlay activation."
-}
-if ($exclusiveProtectionAst.Extent.Text -notmatch '(?s)\[int\[\]\]\$overlayProcessIds\s*=\s*@\(.*?\$guardArguments.*?Invoke-HS2ExclusiveWindowGuard') {
-    throw "HS2 ordinary-window protection must run with an empty overlay allowlist before overlay startup."
-}
-if ($exclusiveProtectionAst.Extent.Text -notmatch '(?s)OverlayPlacementStatus.*?drifted.*?hs2OverlayRebindRequired\s*=\s*\$true') {
-    throw "A live overlay remapped away from HS2 must schedule a full display rebind."
+& {
+    $NoWindowPreservationPolicy = $false
+    $script:hs2WindowGuardTargetMonitorDevice = 'hs2'; $script:hs2WindowGuardSafeMonitorDevice = 'main'
+    $script:hs2WindowGuardLastStatus = $null; $script:hs2WindowGuardLastFailure = $null
+    function Get-HS2OverlayProcess { [pscustomobject]@{Id=91} }
+    function Write-WatchdogLog { param($Message) }
+    function Test-DesktopContinuityWorker { $script:workerAlive }
+    function Invoke-HS2ExclusiveWindowGuard {
+        param($PreferredTargetMonitorDevice, $PreferredSafeMonitorDevice, $OverlayProcessIds, [switch]$DryRun)
+        if ($PreferredTargetMonitorDevice -ne 'hs2' -or $PreferredSafeMonitorDevice -ne 'main' -or $OverlayProcessIds[0] -ne 91) { throw 'Guard identity arguments lost' }
+        $script:guardReadOnly = $DryRun.IsPresent
+        [pscustomobject]@{Status='ready';TargetMonitorDevice='hs2';SafeMonitorDevice='main';OverlayPlacementStatus='drifted';OverlayVisibleWindowCount=1;AppliedActions=@();FailedActions=@();BackoffEvents=@()}
+    }
+    . ([scriptblock]::Create($exclusiveProtectionAst.Extent.Text))
+    foreach ($alive in @($true,$false)) {
+        $script:workerAlive = $alive; $script:hs2OverlayRebindRequired = $false; $script:guardReadOnly = $null
+        Invoke-HS2ExclusiveWindowProtection
+        if ($script:guardReadOnly -ne $alive -or -not $script:hs2OverlayRebindRequired) { throw 'Worker ownership must retain read-only drift detection and fallback correction.' }
+    }
 }
 $vddReturnProtectionAst = @(
     $watchdogAst.FindAll(
@@ -3061,23 +3111,6 @@ foreach ($pattern in @("schtasks.exe", "TURZX SideScreen", "StartSideScreenWatch
     if ($startText -notmatch [regex]::Escape($pattern)) {
         throw "Desktop start path missing expected pattern: $pattern"
     }
-}
-
-$streamStart = Join-Path $side "StartVideoStream.ps1"
-$streamStartText = Get-Content -Raw -LiteralPath $streamStart
-foreach ($pattern in @(
-    "Wait-MetricsEndpointReady",
-    "Wait-MetricsEndpointOrPortAvailable",
-    "Test-MetricsPortAvailable",
-    'if ($metricsState -eq "available")',
-    "metrics endpoint did not become ready"
-)) {
-    if ($streamStartText -notmatch [regex]::Escape($pattern)) {
-        throw "Stream startup must wait for a real metrics response before sending the first full frame; missing: $pattern"
-    }
-}
-if ($streamStartText -match [regex]::Escape('$existingAgent')) {
-    throw "Stream startup must not confuse a stale process-table entry with a healthy metrics endpoint."
 }
 
 $stopText = Get-Content -Raw -LiteralPath $stop

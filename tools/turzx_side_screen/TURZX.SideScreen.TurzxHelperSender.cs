@@ -201,7 +201,6 @@ namespace TURZX.SideScreen
             private readonly MethodInfo _sendFull;
             private readonly MethodInfo _sendDiff;
             private readonly MethodInfo _frameDiff;
-            private readonly MethodInfo _frameDiffAlt;
             private readonly MethodInfo _sendCommand;
             private readonly MethodInfo _sendBody;
             private readonly MethodInfo _prime;
@@ -277,20 +276,6 @@ namespace TURZX.SideScreen
                             p[4].ParameterType == typeof(int).MakeByRefType() &&
                             p[5].ParameterType == typeof(int);
                     });
-                _frameDiffAlt = frameType.GetMethods(BindingFlags.Public | BindingFlags.Static)
-                    .FirstOrDefault(m =>
-                    {
-                        ParameterInfo[] p = m.GetParameters();
-                        return m.Name == "\u87A0" &&
-                            p.Length == 6 &&
-                            p[0].ParameterType == typeof(byte[]) &&
-                            p[1].ParameterType == typeof(byte[]) &&
-                            p[2].ParameterType == typeof(int) &&
-                            p[3].ParameterType == typeof(int) &&
-                            p[4].ParameterType == typeof(int).MakeByRefType() &&
-                            p[5].ParameterType == typeof(int);
-                    });
-
                 _sendCommand = _serial.GetType().GetMethod("\u8A54", BindingFlags.Instance | BindingFlags.Public, null, new[] { typeof(int), typeof(int), typeof(byte[]), typeof(byte) }, null);
                 if (_sendCommand == null)
                 {
@@ -376,18 +361,13 @@ namespace TURZX.SideScreen
 
             public int SendDiff(byte[] previousFrameData, byte[] currentFrameData, long sequence, bool swapOrder, bool flag)
             {
-                return SendDiff(previousFrameData, currentFrameData, sequence, swapOrder, flag, false);
-            }
-
-            public int SendDiff(byte[] previousFrameData, byte[] currentFrameData, long sequence, bool swapOrder, bool flag, bool useAltHelper)
-            {
                 ThrowIfDisposed();
                 if (previousFrameData == null) throw new ArgumentNullException("previousFrameData");
                 if (currentFrameData == null) throw new ArgumentNullException("currentFrameData");
 
                 if (!flag)
                 {
-                    return SendDiffCommand204(previousFrameData, currentFrameData, sequence, swapOrder, useAltHelper);
+                    return SendDiffCommand204(previousFrameData, currentFrameData, sequence, swapOrder);
                 }
 
                 object[] args = swapOrder
@@ -403,7 +383,6 @@ namespace TURZX.SideScreen
                 long sequence,
                 bool swapOrder,
                 bool flag,
-                bool useAltHelper,
                 int timeoutMs,
                 out int result,
                 out string message)
@@ -421,8 +400,7 @@ namespace TURZX.SideScreen
                         currentFrameData,
                         sequence,
                         swapOrder,
-                        flag,
-                        useAltHelper);
+                        flag);
                 }, timeoutMs, "DIFF", out message);
                 result = localResult;
                 return ok;
@@ -485,17 +463,12 @@ namespace TURZX.SideScreen
                 return true;
             }
 
-            private int SendDiffCommand204(byte[] previousFrameData, byte[] currentFrameData, long sequence, bool swapOrder, bool useAltHelper)
+            private int SendDiffCommand204(byte[] previousFrameData, byte[] currentFrameData, long sequence, bool swapOrder)
             {
                 byte[] from = swapOrder ? currentFrameData : previousFrameData;
                 byte[] to = swapOrder ? previousFrameData : currentFrameData;
                 object[] args = new object[] { from, to, 0, 4, 0, 65000 };
-                if (useAltHelper && _frameDiffAlt == null)
-                {
-                    throw new MissingMethodException("Requested alternate TURZX diff helper is unavailable.");
-                }
-                MethodInfo helper = useAltHelper ? _frameDiffAlt : _frameDiff;
-                byte[] payload = (byte[])helper.Invoke(null, args);
+                byte[] payload = (byte[])_frameDiff.Invoke(null, args);
                 int bodyLength = System.Convert.ToInt32(args[4]);
                 if (payload == null)
                 {

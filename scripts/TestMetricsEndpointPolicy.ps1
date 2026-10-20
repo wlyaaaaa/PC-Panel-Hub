@@ -30,4 +30,28 @@ try {
  function Get-NetTCPConnection { throw 'provider unavailable' }
  if(Test-MetricsEndpointBind -Port 0){throw 'Unknown TCP status must block reuse'}
 }
-'Endpoint regression passed: kernel process completion including exit 259, dead-row reuse and unknown/live fail-closed.'
+& {
+ $recoveryRoot=Join-Path ([IO.Path]::GetTempPath()) ('turzx-metrics-'+[guid]::NewGuid().ToString('N'))
+ $script:agentActive=$true; $script:portAvailable=$false; $script:launches=0; $script:stops=@()
+ function Get-TurzxMetricsEndpoint {param($ConfigPath) [pscustomobject]@{HostName='127.0.0.1';Port=18766} }
+ function Get-CimInstance { [CmdletBinding()]param($ClassName,$OperationTimeoutSec) @(
+  [pscustomobject]@{Name='python.exe';ProcessId=123;CommandLine=(Join-Path $recoveryRoot 'metrics_agent.py')},
+  [pscustomobject]@{Name='python.exe';ProcessId=456;CommandLine='E:\other\metrics_agent.py'}) }
+ function Stop-Process { [CmdletBinding()]param($Id,[switch]$Force) $script:stops+= $Id }
+ function Test-MetricsProcessActive {param($ProcessId) $script:agentActive }
+ function Test-MetricsEndpointBind {param($Port,$HostName) $script:portAvailable }
+ function Test-PythonModules {param($Path,$Modules) $true }
+ function Get-NetTCPConnection { [CmdletBinding()]param($State) [pscustomobject]@{LocalPort=18766;OwningProcess=123} }
+ function Start-HiddenProcess {param($FilePath,$WorkingDirectory,$ArgumentList,$RedirectStandardOutput,$RedirectStandardError) $script:launches++; [pscustomobject]@{Id=789} }
+ try {
+  $blocked=Invoke-TurzxMetricsAgentMaintenance -SideRoot $recoveryRoot -PythonPath 'fake-python' -Restart
+  if($blocked.Status-notmatch 'remainingPids=123 metricsPort=18766 metricsPortOwners=123' -or $script:launches-ne0 -or ($script:stops -join ',')-ne'123'){throw 'Only the project collector may be retried; a live owner blocks replacement'}
+  $script:agentActive=$false
+  $blocked=Invoke-TurzxMetricsAgentMaintenance -SideRoot $recoveryRoot -PythonPath 'fake-python' -Restart
+  if($script:launches-ne0){throw 'An unreleased port must block replacement even after process exit'}
+  $script:portAvailable=$true
+  $started=Invoke-TurzxMetricsAgentMaintenance -SideRoot $recoveryRoot -PythonPath 'fake-python' -Restart
+  if($script:launches-ne1 -or $started.Process.Id-ne789){throw 'A released endpoint must allow one replacement collector'}
+ } finally { if(Test-Path -LiteralPath $recoveryRoot){Remove-Item -LiteralPath $recoveryRoot -Recurse -Force} }
+}
+'Endpoint regression passed: kernel completion, exclusive bind and independent collector recovery.'

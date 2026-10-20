@@ -51,7 +51,7 @@ try {
     }
     $modeRejected = $false
     try { & (Join-Path $Root 'scripts\start.ps1') -Root $testRoot -FullFrame }
-    catch { $modeRejected = $_.Exception.Message -like 'The scheduled task uses a different refresh/helper mode.*' }
+    catch { $modeRejected = $_.Exception.Message -like '*different refresh*mode.*' }
     if (-not $modeRejected) { throw 'Explicit mode mismatch must fail before attempting a duplicate watchdog.' }
     Write-Host 'Panel configuration and serial identity checks passed (synthetic devices only).'
 }

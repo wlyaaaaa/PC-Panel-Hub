@@ -6,8 +6,7 @@ param(
     [int]$TimeoutMs = 90000,
     [switch]$DryRun,
     [switch]$SwapOrder,
-    [switch]$Flag,
-    [switch]$AltHelper
+    [switch]$Flag
 )
 
 Set-StrictMode -Version Latest
@@ -66,7 +65,6 @@ $argsList = @(
 if ($DryRun) { $argsList += "--dry-run" }
 if ($SwapOrder) { $argsList += "--swap-order" }
 if ($Flag) { $argsList += "--flag" }
-if ($AltHelper) { $argsList += "--alt-helper" }
 
 & $exePath @argsList
 if ($LASTEXITCODE -ne 0) {

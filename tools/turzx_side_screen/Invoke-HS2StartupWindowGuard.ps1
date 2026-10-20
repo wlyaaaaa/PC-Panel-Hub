@@ -102,7 +102,7 @@ try {
             $hs2 = Invoke-HS2ExclusiveWindowGuard
             $vdd = Invoke-VddWindowReturnGuard
             $totalMoves += @($hs2.AppliedActions).Count + @($vdd.AppliedActions).Count
-            foreach ($source in @(@{ Name='hs2'; Actions=@($hs2.AppliedActions) },
+            foreach ($source in @(@{ Name='hs2'; Actions=@($hs2.AppliedActions)+@($hs2.BackoffEvents) },
                                   @{ Name='vdd'; Actions=@($vdd.AppliedActions) })) {
                 foreach ($action in $source.Actions) {
                     $recentActions += [pscustomobject]@{
@@ -111,6 +111,8 @@ try {
                         ProcessId=[int]$action.ProcessId
                         ProcessName=[string]$action.ProcessName
                         Hwnd=[int64]$action.Hwnd
+                        Left=[int]$action.Left; Top=[int]$action.Top
+                        Right=[int]$action.Right; Bottom=[int]$action.Bottom
                     }
                 }
             }

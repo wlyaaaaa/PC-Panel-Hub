@@ -28,6 +28,10 @@ tools/*
 !tools/turzx_side_screen/**
 !tools/turzx_weather_shim/
 !tools/turzx_weather_shim/**
+!tools/turzx_metrics/
+tools/turzx_metrics/*
+!tools/turzx_metrics/TURZX.Metrics.cs
+!tools/turzx_metrics/build_metrics.ps1
 !tools/hs2_crystal_overlay/
 !tools/hs2_crystal_overlay/**
 tools/turzx_side_screen/config.json

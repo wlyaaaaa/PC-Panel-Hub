@@ -6,7 +6,6 @@ param(
     [int]$IntervalMs = 3000,
     [switch]$HybridRefresh = $true,
     [switch]$FullFrame,
-    [switch]$AltHelper,
     [switch]$DoNotDisableOldTasks
 )
 
@@ -46,7 +45,6 @@ $workingDir = Split-Path -Parent $script
 $wscriptPath = Join-Path $env:WINDIR "System32\wscript.exe"
 $refreshArguments = ""
 if ($HybridRefresh) { $refreshArguments += " -HybridRefresh" }
-if ($AltHelper) { $refreshArguments += " -AltHelper" }
 $portArguments = if ($portWasExplicit) { ' -Port "{0}"' -f $Port } else { '' }
 $launcherArguments = ('"{0}" -Root "{1}"{2} -IntervalMs {3}{4}' -f $launcher, $Root, $portArguments, $IntervalMs, $refreshArguments)
 $action = New-ScheduledTaskAction `

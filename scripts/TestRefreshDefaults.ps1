@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 )
 
@@ -11,10 +11,8 @@ $defaultFiles = @(
     "scripts\start.ps1",
     "scripts\install-startup-admin.ps1",
     "scripts\create-desktop-shortcut.ps1",
-    "scripts\repair-elevated.ps1",
     "tools\turzx_side_screen\StartSideScreenStack.ps1",
     "tools\turzx_side_screen\StartSideScreenWatchdog.ps1",
-    "tools\turzx_side_screen\InstallStartupTask-Admin.ps1",
     "tools\turzx_side_screen\StartVideoStreamBackground.ps1"
 )
 
@@ -56,7 +54,6 @@ foreach ($transport in @("verified_full_200", "hybrid_diff_204_full_200")) {
 $hs2StartupEntries = @(
     "scripts\start.ps1",
     "scripts\install-startup-admin.ps1",
-    "tools\turzx_side_screen\InstallStartupTask-Admin.ps1",
     "tools\turzx_side_screen\StartSideScreenStack.ps1",
     "tools\turzx_side_screen\StartSideScreenWatchdog-Hidden.vbs"
 )
@@ -97,9 +94,7 @@ foreach ($relative in $hiddenLaunchers) {
     }
     foreach ($pattern in @(
         'hybridRefresh = False',
-        'altHelper = False',
-        'Case "-nohybridrefresh"',
-        'Case "-noalthelper"'
+        'Case "-nohybridrefresh"'
     )) {
         if ($text -notmatch [regex]::Escape($pattern)) {
             throw "Hidden launcher must preserve and explicitly propagate false mode overrides; missing '$pattern' in $relative"
@@ -109,7 +104,6 @@ foreach ($relative in $hiddenLaunchers) {
 
 $explicitEntries = @(
     "start-side-screen.cmd",
-    "scripts\repair-elevated.cmd",
     "README.md",
     "docs\startup.md",
     "docs\architecture.md"

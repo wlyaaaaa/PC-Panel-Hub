@@ -5,7 +5,6 @@ param(
     [int]$IntervalMs = 3000,
     [switch]$HybridRefresh = $true,
     [switch]$FullFrame,
-    [switch]$AltHelper,
     [switch]$Direct
 )
 
@@ -17,21 +16,16 @@ $Port = Get-TurzxConfiguredPort -Root $Root -Port $Port
 if ($FullFrame) { $HybridRefresh = $false }
 
 $hybridRefreshWasExplicit = $PSBoundParameters.ContainsKey("HybridRefresh") -or [bool]$FullFrame
-$altHelperWasExplicit = $PSBoundParameters.ContainsKey("AltHelper")
 $effectiveHybridRefresh = [bool]$HybridRefresh
-$effectiveAltHelper = [bool]$AltHelper
 
 function Test-ScheduledTaskActionMode {
     param(
         [AllowEmptyString()][string]$Arguments,
-        [bool]$HybridRefreshEnabled,
-        [bool]$AltHelperEnabled
+        [bool]$HybridRefreshEnabled
     )
 
     $hasHybridRefresh = [regex]::IsMatch($Arguments, '(?i)(?:^|\s)-HybridRefresh(?:\s|$)')
-    $hasAltHelper = [regex]::IsMatch($Arguments, '(?i)(?:^|\s)-AltHelper(?:\s|$)')
-    return ($hasHybridRefresh -eq $HybridRefreshEnabled) -and
-        ($hasAltHelper -eq $AltHelperEnabled)
+    return $hasHybridRefresh -eq $HybridRefreshEnabled
 }
 
 function Resolve-RequestedSwitchMode {
@@ -80,17 +74,11 @@ if (-not $Direct) {
             -FlagName "HybridRefresh" `
             -RequestedValue ([bool]$HybridRefresh) `
             -WasExplicit $hybridRefreshWasExplicit
-        $effectiveAltHelper = Resolve-RequestedSwitchMode `
-            -Arguments $registeredArguments `
-            -FlagName "AltHelper" `
-            -RequestedValue ([bool]$AltHelper) `
-            -WasExplicit $altHelperWasExplicit
         $modeMatches = Test-ScheduledTaskActionMode `
             -Arguments $registeredArguments `
-            -HybridRefreshEnabled $effectiveHybridRefresh `
-            -AltHelperEnabled $effectiveAltHelper
+            -HybridRefreshEnabled $effectiveHybridRefresh
         if (-not $modeMatches) {
-            throw 'The scheduled task uses a different refresh/helper mode. Re-run install-startup-admin.ps1 with the requested mode, then start it again. For a temporary direct run, stop the existing task/watchdog first and use -Direct.'
+            throw 'The scheduled task uses a different refresh mode. Re-run install-startup-admin.ps1 with the requested mode, then start it again. For a temporary direct run, stop the existing task/watchdog first and use -Direct.'
         }
         else {
             $outDir = Join-Path $Root "tools\turzx_side_screen\out"
@@ -137,5 +125,4 @@ $directArguments = @(
     "-Root", $Root, "-Port", $Port, "-IntervalMs", [string]$IntervalMs
 )
 if ($effectiveHybridRefresh) { $directArguments += "-HybridRefresh" }
-if ($effectiveAltHelper) { $directArguments += "-AltHelper" }
 & powershell @directArguments

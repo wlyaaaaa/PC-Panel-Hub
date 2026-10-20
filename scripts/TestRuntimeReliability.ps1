@@ -316,14 +316,10 @@ $matchingStopFunction = $stopAst.Find({param($node)
     function Stop-Process { [CmdletBinding()]param([int]$Id,[switch]$Force) throw 'simulated stop denied' }
     function Get-Process { [CmdletBinding()]param([int]$Id) return [pscustomobject]@{Id=$Id} }
     . ([scriptblock]::Create($matchingStopFunction.Extent.Text))
-    $failure = $null
-    try { Stop-MatchingProcess -Predicate {$true} -Reason 'metrics-agent' -FailOnStopError }
-    catch { $failure = $_.Exception.Message }
-    if ($failure -ne 'simulated stop denied' -or ($script:stopErrorLog -join ' ') -notmatch 'failed to stop PID=62532') {
-        throw 'A live metrics stop failure must preserve the original error and candidate PID.'
+    $attempted = @(Stop-MatchingProcess -Predicate {$true} -Reason 'metrics-agent')
+    if ($attempted -notcontains 62532 -or ($script:stopErrorLog -join ' ') -notmatch 'failed to stop PID=62532') {
+        throw 'A failed metrics stop must retain its PID for proof without aborting stream cleanup.'
     }
-    function Get-Process { [CmdletBinding()]param([int]$Id) return $null }
-    [void](Stop-MatchingProcess -Predicate {$true} -Reason 'metrics-agent' -FailOnStopError)
 }
 
 $metricsStopProofFunction = $stopAst.Find(
@@ -333,15 +329,11 @@ $metricsStopProofFunction = $stopAst.Find(
         $node.Name -eq "Wait-ManagedMetricsAgentExitAndPortRelease"
     },
     $true)
-if ($null -eq $metricsStopProofFunction -or
-    $metricsStopProofFunction.Extent.Text -notmatch [regex]::Escape('Test-MetricsPortAvailable') -or
-    $metricsStopProofFunction.Extent.Text -notmatch [regex]::Escape('throw')) {
-    throw "Metrics shutdown must prove both the managed PID exit and local port release."
+$metricsCleanup = $stopAst.EndBlock.Statements | Where-Object {
+    $_ -is [System.Management.Automation.Language.TryStatementAst] -and
+    $_.Body.Extent.Text -match 'Wait-ManagedMetricsAgentExitAndPortRelease'
 }
 $stopSourceText = Get-Content -Raw -LiteralPath (Join-Path $side "StopSideScreenStack.ps1")
-if ($stopSourceText -notmatch '(?s)Stop-MatchingProcess\s+-Reason\s+"metrics-agent"\s+-FailOnStopError.*?Wait-ManagedMetricsAgentExitAndPortRelease') {
-    throw "Metrics shutdown failure must prevent a replacement stack from starting."
-}
 & {
     function Write-StopLog { param([string]$Message) }
     function Get-Process { param([int]$Id) return $null }
@@ -383,8 +375,11 @@ if ($stopSourceText -notmatch '(?s)Stop-MatchingProcess\s+-Reason\s+"metrics-age
         $failure -notmatch 'metricsPort=18766 metricsPortOwners=62532' -or
         $failure -notmatch 'metricsPortProbeError=simulated exclusive bind denied' -or
         ($script:metricsStopProofLog -join "`n") -notmatch 'metrics stop proof failed') {
-        throw "A persistent project metrics PID must fail closed with the exact PID and port-owner evidence."
+        throw "A persistent project metrics PID must report the exact PID and port-owner evidence."
     }
+    $stoppedMetricsProcessIds = @(62532); $ProcessSnapshotTimeoutSeconds = 1
+    . ([scriptblock]::Create($metricsCleanup.Extent.Text))
+    if (($script:metricsStopProofLog -join ' ') -notmatch 'metrics cleanup deferred') { throw 'Collector failure must not block stream restart.' }
 }
 
 $watchdogStopFunction = $restartAst.Find(
@@ -437,6 +432,7 @@ foreach ($pattern in @(
     }
 
     $Root = 'C:\synthetic-turzx'
+    $outDir = Join-Path $Root 'out'
     $stopScript = 'C:\synthetic-turzx\StopSideScreenStack.ps1'
     $StopProcessSnapshotTimeoutSeconds = 7
     $StopStackTimeoutSeconds = 9
@@ -455,6 +451,12 @@ foreach ($pattern in @(
         $timeoutError -notmatch 'strict total timeout') {
         throw "Watchdog must stop the tracked child and force-stop a stalled StopSideScreenStack child at its strict total deadline."
     }
+    $fakeStopProcess | Add-Member -Force -MemberType ScriptMethod -Name WaitForExit -Value { param($Milliseconds) $true }
+    $fakeStopProcess.ExitCode = 1; $stopFailure = $null
+    try { Stop-Stack -Reason 'synthetic-proof-failure' } catch { $stopFailure = $_.Exception.Message }
+    if ($stopFailure -notmatch 'exitCode=1') { throw 'A failed stream-stop proof must block stack restart.' }
+    $fakeStopProcess.ExitCode = 0
+    Stop-Stack -Reason 'synthetic-stream-exited'
 }
 
 # A freshly launched child has one monotonic window to produce its first
@@ -622,8 +624,7 @@ $requestedModeCases = @(
     @{ Name = "omitted Hybrid adopts registered Hybrid"; Arguments = '-HybridRefresh'; Flag = 'HybridRefresh'; Requested = $false; Explicit = $false; Expected = $true },
     @{ Name = "omitted Hybrid keeps registered full mode"; Arguments = '-Root "E:\repo"'; Flag = 'HybridRefresh'; Requested = $false; Explicit = $false; Expected = $false },
     @{ Name = "explicit false overrides registered Hybrid"; Arguments = '-HybridRefresh'; Flag = 'HybridRefresh'; Requested = $false; Explicit = $true; Expected = $false },
-    @{ Name = "explicit true overrides registered full mode"; Arguments = '-Root "E:\repo"'; Flag = 'HybridRefresh'; Requested = $true; Explicit = $true; Expected = $true },
-    @{ Name = "omitted Alt adopts registered Alt"; Arguments = '-HybridRefresh -AltHelper'; Flag = 'AltHelper'; Requested = $false; Explicit = $false; Expected = $true }
+    @{ Name = "explicit true overrides registered full mode"; Arguments = '-Root "E:\repo"'; Flag = 'HybridRefresh'; Requested = $true; Explicit = $true; Expected = $true }
 )
 foreach ($case in $requestedModeCases) {
     $actual = Resolve-RequestedSwitchMode `
@@ -637,18 +638,16 @@ foreach ($case in $requestedModeCases) {
 }
 
 $modeCases = @(
-    @{ Name = "full defaults match no flags"; Arguments = '-Root "E:\\repo"'; Hybrid = $false; Alt = $false; Expected = $true },
-    @{ Name = "hybrid and alt flags match explicit request"; Arguments = '-HybridRefresh -AltHelper'; Hybrid = $true; Alt = $true; Expected = $true },
-    @{ Name = "old full task cannot satisfy hybrid request"; Arguments = '-Root "E:\\repo"'; Hybrid = $true; Alt = $false; Expected = $false },
-    @{ Name = "old hybrid task cannot satisfy full request"; Arguments = '-HybridRefresh'; Hybrid = $false; Alt = $false; Expected = $false },
-    @{ Name = "alt helper mismatch is rejected independently"; Arguments = '-HybridRefresh'; Hybrid = $true; Alt = $true; Expected = $false },
-    @{ Name = "negative flags never impersonate positive mode"; Arguments = '-NoHybridRefresh -NoAltHelper'; Hybrid = $false; Alt = $false; Expected = $true }
+    @{ Name = "full defaults match no flags"; Arguments = '-Root "E:\\repo"'; Hybrid = $false; Expected = $true },
+    @{ Name = "hybrid flags match explicit request"; Arguments = '-HybridRefresh'; Hybrid = $true; Expected = $true },
+    @{ Name = "old full task cannot satisfy hybrid request"; Arguments = '-Root "E:\\repo"'; Hybrid = $true; Expected = $false },
+    @{ Name = "old hybrid task cannot satisfy full request"; Arguments = '-HybridRefresh'; Hybrid = $false; Expected = $false },
+    @{ Name = "negative flags never impersonate positive mode"; Arguments = '-NoHybridRefresh'; Hybrid = $false; Expected = $true }
 )
 foreach ($case in $modeCases) {
     $actual = Test-ScheduledTaskActionMode `
         -Arguments $case.Arguments `
-        -HybridRefreshEnabled $case.Hybrid `
-        -AltHelperEnabled $case.Alt
+        -HybridRefreshEnabled $case.Hybrid
     if ([bool]$actual -ne [bool]$case.Expected) {
         throw ("Scheduled-task action mode case failed: {0}; expected={1} actual={2}" -f $case.Name, $case.Expected, $actual)
     }
@@ -708,9 +707,7 @@ foreach ($pattern in @(
     '"--send-timeout-ms"',
     '[string]$PythonPath',
     '"TURZX.SideScreen.Stream.*.exe"',
-    '$staleBuildCutoff',
-    'Start-HiddenProcess',
-    '-FilePath $PythonPath'
+    '$staleBuildCutoff'
 )) {
     if ($streamStart -notmatch [regex]::Escape($pattern)) {
         throw "StartVideoStream missing reliability contract: $pattern"
@@ -763,9 +760,6 @@ foreach ($pattern in @(
 }
 
 foreach ($pattern in @(
-    "psutil",
-    "asyncpg",
-    "Test-PythonModules",
     "[ValidateRange(1, 32)][int]`$LogBackupCount",
     "-PythonPath",
     "Write-BoundedLogLine",

@@ -12,7 +12,6 @@
     [int64]$MaxStreamLogBytes = 5242880,
     [ValidateRange(1, 32)][int]$LogBackupCount = 3,
     [switch]$HybridRefresh,
-    [switch]$AltHelper,
     [switch]$Worker
 )
 
@@ -120,67 +119,13 @@ if (-not $Worker) {
     if ($HybridRefresh) {
         $watchdogArguments += "-HybridRefresh"
     }
-    if ($AltHelper) {
-        $watchdogArguments += "-AltHelper"
-    }
     Start-HiddenProcess -FilePath "powershell.exe" `
         -ArgumentList $watchdogArguments `
         -WorkingDirectory $scriptDir | Out-Null
     exit 0
 }
 
-function Test-PythonModules {
-    param(
-        [Parameter(Mandatory = $true)][string]$Path,
-        [string[]]$Modules = @()
-    )
-
-    if (!(Test-Path -LiteralPath $Path -PathType Leaf)) {
-        return $false
-    }
-    if ($Modules.Count -eq 0) {
-        return $true
-    }
-
-    & $Path -c "import importlib.util,sys;sys.exit(0 if all(importlib.util.find_spec(name) is not None for name in sys.argv[1:]) else 1)" @Modules 2>$null
-    return $LASTEXITCODE -eq 0
-}
-
-function Find-Python {
-    $requiresTimeAudit = (
-        -not [string]::IsNullOrWhiteSpace($env:TIMEAUDIT_DSN) -or
-        (-not [string]::IsNullOrWhiteSpace($env:TIMEAUDIT_DB_PASSWORD) -and -not [string]::IsNullOrWhiteSpace($env:TIMEAUDIT_DB_USER))
-    )
-    $requiredModules = if ($requiresTimeAudit) { @("psutil", "asyncpg") } else { @() }
-    $cmd = Get-Command python -ErrorAction SilentlyContinue
-    $commandPath = if ($cmd) { $cmd.Source } else { $null }
-    $candidates = if ($requiresTimeAudit) {
-        @(
-            (Join-Path $env:LOCALAPPDATA "Programs\Python\Python311\python.exe"),
-            $commandPath,
-            (Join-Path $env:LOCALAPPDATA "Programs\Python\Python314\python.exe"),
-            (Join-Path $env:LOCALAPPDATA "Microsoft\WindowsApps\python.exe")
-        )
-    } else {
-        @(
-            $commandPath,
-            (Join-Path $env:LOCALAPPDATA "Programs\Python\Python311\python.exe"),
-            (Join-Path $env:LOCALAPPDATA "Programs\Python\Python314\python.exe"),
-            (Join-Path $env:LOCALAPPDATA "Microsoft\WindowsApps\python.exe")
-        )
-    }
-
-    foreach ($candidate in @($candidates | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)) {
-        if (Test-PythonModules -Path $candidate -Modules $requiredModules) {
-            return $candidate
-        }
-    }
-
-    if ($requiresTimeAudit) {
-        throw "No Python interpreter with required modules psutil+asyncpg was found for TimeAudit FPS."
-    }
-    throw "python.exe not found"
-}
+. (Join-Path $PSScriptRoot 'MetricsEndpointPolicy.ps1')
 
 function Stop-ProcessByCommandLine {
     param(
@@ -196,7 +141,7 @@ function Stop-ProcessByCommandLine {
         }
 }
 
-Write-StackLog ("starting stack root={0} port={1} interval={2} hybrid={3} altHelper={4}" -f $Root, $Port, $IntervalMs, $HybridRefresh.IsPresent, $AltHelper.IsPresent)
+Write-StackLog ("starting stack root={0} port={1} interval={2} hybrid={3}" -f $Root, $Port, $IntervalMs, $HybridRefresh.IsPresent)
 
 # Keep the custom side-screen stack authoritative.
 Get-Process "TURZX", "TURZX.weatherfix", "TURZX.weatherfix.metrics" -ErrorAction SilentlyContinue |
@@ -243,7 +188,7 @@ $streamScript = Join-Path $scriptDir "StartVideoStream.ps1"
 try {
     # HybridRefresh is explicit and reversible: it uses a vendor-shaped command-200
     # baseline plus bounded command-204 deltas. The default remains full command 200.
-    & $streamScript -Root $Root -Port $Port -IntervalMs $IntervalMs -Frames 0 -SendTimeoutMs $SendTimeoutMs -DiffSendTimeoutMs $DiffSendTimeoutMs -MaxConsecutiveSendFailures $MaxConsecutiveSendFailures -FullResyncEveryFrames $FullResyncEveryFrames -BaselineBrightness $BaselineBrightness -PreviewIntervalSeconds $PreviewIntervalSeconds -PythonPath $python -HybridRefresh:$HybridRefresh -AltHelper:$AltHelper *>&1 |
+    & $streamScript -Root $Root -Port $Port -IntervalMs $IntervalMs -Frames 0 -SendTimeoutMs $SendTimeoutMs -DiffSendTimeoutMs $DiffSendTimeoutMs -MaxConsecutiveSendFailures $MaxConsecutiveSendFailures -FullResyncEveryFrames $FullResyncEveryFrames -BaselineBrightness $BaselineBrightness -PreviewIntervalSeconds $PreviewIntervalSeconds -PythonPath $python -HybridRefresh:$HybridRefresh *>&1 |
         ForEach-Object {
             Write-BoundedLogLine -Path $stdoutPath -Message ([string]$_) -MaxBytes $MaxStreamLogBytes -BackupCount $LogBackupCount
         }

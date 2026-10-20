@@ -44,8 +44,7 @@ function Get-TurzxProcessSnapshot {
 function Stop-MatchingProcess {
     param(
         [scriptblock]$Predicate,
-        [string]$Reason,
-        [switch]$FailOnStopError
+        [string]$Reason
     )
 
     $stoppedProcessIds = New-Object 'System.Collections.Generic.List[int]'
@@ -55,17 +54,13 @@ function Stop-MatchingProcess {
         } |
         ForEach-Object {
             $candidate = $_
+            [void]$stoppedProcessIds.Add([int]$candidate.ProcessId)
             Write-StopLog ("stopping PID={0} reason={1} CMD={2}" -f $candidate.ProcessId, $Reason, $candidate.CommandLine)
             try {
                 Stop-Process -Id $candidate.ProcessId -Force -ErrorAction Stop
-                [void]$stoppedProcessIds.Add([int]$candidate.ProcessId)
             }
             catch {
                 Write-StopLog ("failed to stop PID={0} reason={1}: {2}" -f $candidate.ProcessId, $Reason, $_.Exception.Message)
-                if ($FailOnStopError -and
-                    $null -ne (Get-Process -Id $candidate.ProcessId -ErrorAction SilentlyContinue)) {
-                    throw
-                }
             }
         }
     return $stoppedProcessIds.ToArray()
@@ -251,7 +246,7 @@ if ($IncludeWatchdog) {
         -LauncherPath (Join-Path $side 'StartSideScreenWatchdog-Hidden.vbs')
 }
 
-$stoppedMetricsProcessIds = @(Stop-MatchingProcess -Reason "metrics-agent" -FailOnStopError -Predicate {
+$stoppedMetricsProcessIds = @(Stop-MatchingProcess -Reason "metrics-agent" -Predicate {
     param($p)
     $p.Name -like "python*" -and $p.CommandLine -like "*turzx_side_screen\metrics_agent.py*" -and $p.CommandLine -like $sidePattern
 })
@@ -270,10 +265,6 @@ $stoppedMetricsProcessIds = @(Stop-MatchingProcess -Reason "metrics-agent" -Fail
     param($p)
     $p.Name -like "TURZX.SideScreen.Stream*" -and $p.CommandLine -like $sidePattern
 })
-
-Wait-ManagedMetricsAgentExitAndPortRelease `
-    -ProcessIds $stoppedMetricsProcessIds `
-    -TimeoutSeconds $ProcessSnapshotTimeoutSeconds
 
 # A parent PID from an old CIM snapshot is not permission to kill a process
 # tree. Revalidate the exact project -File entrypoint and its creation time.
@@ -338,6 +329,15 @@ if (-not $SkipStackEntrypoint) {
 # A new COM writer must never start until the previous stream process has
 # actually released the device.  taskkill success text alone is not proof.
 Wait-TurzxStreamProcessesExit
+
+# Metrics owns no serial handle. A stuck collector must not block a new stream;
+# its PID/port evidence remains available while the watchdog retries it separately.
+try {
+    Wait-ManagedMetricsAgentExitAndPortRelease `
+        -ProcessIds $stoppedMetricsProcessIds `
+        -TimeoutSeconds $ProcessSnapshotTimeoutSeconds
+}
+catch { Write-StopLog ("metrics cleanup deferred; stream exit proved: {0}" -f $_.Exception.Message) }
 
 foreach ($pidFile in @("video-stream.pid", "side-screen-stack-child.pid", "side-screen-stack.pid")) {
     $path = Join-Path $outDir $pidFile

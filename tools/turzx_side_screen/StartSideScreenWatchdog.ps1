@@ -44,7 +44,6 @@
     [ValidateRange(0, 255)][int]$ActiveBrightness = 170,
     [ValidateRange(1, 65535)][int]$LConnectServicePort = 11021,
     [switch]$HybridRefresh,
-    [switch]$AltHelper,
     [switch]$NoWindowPreservationPolicy,
     [switch]$NoPowerEvents
 )
@@ -132,6 +131,8 @@ New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 . $activeRecoveryPolicy
 . $windowPreservationPolicy
 . $overlayWatchdogPolicy
+. (Join-Path $scriptDir 'MetricsEndpointPolicy.ps1')
+$script:metricsLastAttemptUtc = [DateTime]::MinValue
 
 function Write-BoundedLogLine {
     param(
@@ -466,7 +467,7 @@ function Stop-Stack {
         throw "StopSideScreenStack exceeded strict total timeout: $StopStackTimeoutSeconds seconds"
     }
     if ($stopProcess.ExitCode -ne 0) {
-        throw "StopSideScreenStack failed to prove the previous stream exited: exitCode=$($stopProcess.ExitCode)"
+        throw "Stack stop failed exitCode=$($stopProcess.ExitCode); see $outDir\side-screen-stop.log for process and port evidence"
     }
 }
 
@@ -1343,6 +1344,7 @@ function Invoke-HS2ExclusiveWindowProtection {
         $guardArguments = @{
             PreferredTargetMonitorDevice = $script:hs2WindowGuardTargetMonitorDevice
             PreferredSafeMonitorDevice = $script:hs2WindowGuardSafeMonitorDevice
+            DryRun = (Test-DesktopContinuityWorker)
         }
         if ($overlayProcessIds.Count -gt 0) {
             $guardArguments.OverlayProcessIds = $overlayProcessIds
@@ -1385,17 +1387,14 @@ function Invoke-HS2ExclusiveWindowProtection {
                 $applied |
                     Where-Object { $_.Action -ceq "Minimize" }
             ).Count
-            $processes = @(
-                $applied |
-                    ForEach-Object { [string]$_.ProcessName } |
-                    Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
-                    Sort-Object -Unique
-            ) -join ","
-            Write-WatchdogLog (
-                "HS2 exclusive-window guard corrected moved={0} minimized={1} processes={2}" -f `
-                    $moved,
-                    $minimized,
-                    $processes)
+            $details = @($applied | ForEach-Object {
+                '{0} hwnd={1} target=({2},{3},{4},{5})' -f $_.ProcessName, $_.Hwnd, $_.Left, $_.Top, $_.Right, $_.Bottom
+            }) -join '; '
+            Write-WatchdogLog ("HS2 exclusive-window guard corrected moved={0} minimized={1} windows={2}" -f $moved, $minimized, $details)
+        }
+        foreach ($action in @($result.BackoffEvents)) {
+            Write-WatchdogLog ('HS2 exclusive-window guard backoff process={0} hwnd={1} bounds=({2},{3},{4},{5}) seconds=300' -f
+                $action.ProcessName, $action.Hwnd, $action.Left, $action.Top, $action.Right, $action.Bottom)
         }
 
         $failures = @($result.FailedActions)
@@ -1736,7 +1735,7 @@ function Start-Stack {
     foreach ($candidatePath in $heartbeatPaths) {
         Remove-Item -LiteralPath $candidatePath -Force -ErrorAction SilentlyContinue
     }
-    Write-WatchdogLog ("start stack reason={0} root={1} port={2} interval={3} hybrid={4} altHelper={5}" -f $Reason, $Root, $Port, $IntervalMs, $HybridRefresh.IsPresent, $AltHelper.IsPresent)
+    Write-WatchdogLog ("start stack reason={0} root={1} port={2} interval={3} hybrid={4}" -f $Reason, $Root, $Port, $IntervalMs, $HybridRefresh.IsPresent)
     $arguments = @(
         "-NoProfile",
         "-ExecutionPolicy", "Bypass",
@@ -1757,9 +1756,6 @@ function Start-Stack {
     )
     if ($HybridRefresh) {
         $arguments += "-HybridRefresh"
-    }
-    if ($AltHelper) {
-        $arguments += "-AltHelper"
     }
     $process = Start-HiddenProcess -FilePath "powershell.exe" -ArgumentList $arguments
     Set-Content -LiteralPath $childPidPath -Value $process.Id -Encoding ASCII
@@ -1799,9 +1795,19 @@ function Invoke-TurzxStackRestartAttempt {
     }
 }
 
-# A single metrics timeout is intentionally tolerated because the stream keeps
-# sending the last complete snapshot.  Only a bounded consecutive run should
-# enter the existing heartbeat recovery path.
+function Invoke-TurzxMetricsRecovery {
+    $now = [DateTime]::UtcNow
+    if (($now - $script:metricsLastAttemptUtc).TotalSeconds -lt 30) { return }
+    $script:metricsLastAttemptUtc = $now
+    try {
+        $result = Invoke-TurzxMetricsAgentMaintenance -SideRoot $scriptDir -Restart
+        Write-WatchdogLog ("metrics recovery {0}; stream remains running" -f $result.Status)
+    }
+    catch { Write-WatchdogLog ("metrics recovery deferred; stream remains running: {0}" -f $_.Exception.Message) }
+}
+
+# Sustained snapshot failures recover the collector independently. Serial
+# heartbeat failures still follow the existing bounded stack recovery path.
 function Get-TurzxSnapshotStaleDecision {
     param(
         [AllowEmptyString()][string]$SnapshotStatus,
@@ -2278,23 +2284,17 @@ try {
                         "snapshot stale threshold reached reason={0}" -f $snapshotDecision.Reason)
                 }
                 if ($snapshotDecision.FailureThresholdReached) {
-                    $heartbeatHealth = [pscustomobject]@{
-                        Healthy = $false
-                        Reason = $snapshotDecision.Reason
-                    }
+                    Invoke-TurzxMetricsRecovery
                 }
-                else {
-                    $script:childHeartbeatObserved = $true
-                    if ($heartbeatFailures -gt 0) {
-                        Write-WatchdogLog ("heartbeat recovered {0}" -f $heartbeatHealth.Reason)
-                    }
-                    elseif ($previousSnapshotStaleHeartbeats -gt 0) {
-                        Write-WatchdogLog (
-                            "snapshot recovered after consecutive={0}" -f $previousSnapshotStaleHeartbeats)
-                    }
-                    $heartbeatFailures = 0
-                    $consecutiveFailures = 0
+                $script:childHeartbeatObserved = $true
+                if ($heartbeatFailures -gt 0) {
+                    Write-WatchdogLog ("heartbeat recovered {0}" -f $heartbeatHealth.Reason)
                 }
+                elseif (-not $snapshotDecision.IsStale -and $previousSnapshotStaleHeartbeats -gt 0) {
+                    Write-WatchdogLog ("snapshot recovered after consecutive={0}" -f $previousSnapshotStaleHeartbeats)
+                }
+                $heartbeatFailures = 0
+                $consecutiveFailures = 0
             }
             if (-not $heartbeatHealth.Healthy) {
                 if (-not $script:childHeartbeatObserved -and $heartbeatHealth.Reason -eq "missing") {

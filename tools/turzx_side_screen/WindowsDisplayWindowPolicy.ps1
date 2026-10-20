@@ -667,7 +667,9 @@ function Get-HS2ExclusiveWindowGuardPlan {
         [object[]]$Windows,
         [AllowNull()][object]$OverlayProcessIds,
         [string]$PreferredTargetMonitorDevice,
-        [string]$PreferredSafeMonitorDevice
+        [string]$PreferredSafeMonitorDevice,
+        [hashtable]$CorrectionHistory = @{},
+        [datetime]$NowUtc = [DateTime]::UtcNow
     )
 
     $overlayIds = New-Object "System.Collections.Generic.HashSet[int]"
@@ -860,6 +862,24 @@ function Get-HS2ExclusiveWindowGuardPlan {
             continue
         }
 
+        $previous = $CorrectionHistory[[string]$window.Hwnd]
+        if ($null -ne $previous -and $previous.ProcessId -eq [int]$window.ProcessId -and
+            $previous.ProcessName -ceq [string]$window.ProcessName) {
+            if ($NowUtc -lt $previous.BackoffUntilUtc) { continue }
+            $recentMoves = @($previous.RecentMovesUtc | Where-Object { ($NowUtc - $_).TotalSeconds -lt 60 })
+            if ($NowUtc -lt $previous.MinimizedUntilUtc -or $recentMoves.Count -ge 3) {
+                if ([bool]$window.IsMinimized) { continue }
+                [void]$actions.Add([pscustomobject]@{
+                    Action = if ($NowUtc -lt $previous.MinimizedUntilUtc) { 'Backoff' } else { 'Minimize' }
+                    Hwnd = [int64]$window.Hwnd; ProcessId = [int]$window.ProcessId
+                    ProcessName = [string]$window.ProcessName
+                    Left = [int]$window.PlacementLeft; Top = [int]$window.PlacementTop
+                    Right = [int]$window.PlacementRight; Bottom = [int]$window.PlacementBottom
+                })
+                continue
+            }
+        }
+
         if ($null -eq $safeMonitor) {
             if (-not [bool]$window.IsMinimized) {
                 [void]$actions.Add([pscustomobject]@{
@@ -867,6 +887,8 @@ function Get-HS2ExclusiveWindowGuardPlan {
                     Hwnd = [int64]$window.Hwnd
                     ProcessId = [int]$window.ProcessId
                     ProcessName = [string]$window.ProcessName
+                    Left = [int]$window.PlacementLeft; Top = [int]$window.PlacementTop
+                    Right = [int]$window.PlacementRight; Bottom = [int]$window.PlacementBottom
                 })
             }
             continue
@@ -1201,6 +1223,32 @@ function Get-VddWindowReturnPlan {
     }
 }
 
+function Register-HS2WindowGuardCorrection {
+    param([hashtable]$History, $Action, [datetime]$NowUtc = [DateTime]::UtcNow)
+    $key = [string]$Action.Hwnd
+    $entry = $History[$key]
+    if ($null -eq $entry -or $entry.ProcessId -ne [int]$Action.ProcessId -or
+        $entry.ProcessName -cne [string]$Action.ProcessName) {
+        $entry = [pscustomobject]@{
+            ProcessId = [int]$Action.ProcessId; ProcessName = [string]$Action.ProcessName
+            RecentMovesUtc = @(); MinimizedUntilUtc = [DateTime]::MinValue
+            BackoffUntilUtc = [DateTime]::MinValue
+            LastAttemptUtc = $NowUtc
+        }
+        $History[$key] = $entry
+    }
+    $entry.LastAttemptUtc = $NowUtc
+    switch ([string]$Action.Action) {
+        'Move' { $entry.RecentMovesUtc = @($entry.RecentMovesUtc | Where-Object { ($NowUtc - $_).TotalSeconds -lt 60 }) + @($NowUtc) }
+        'Minimize' { $entry.MinimizedUntilUtc = $NowUtc.AddMinutes(5) }
+        'Backoff' {
+            $entry.BackoffUntilUtc = $NowUtc.AddMinutes(5)
+            $entry.MinimizedUntilUtc = [DateTime]::MinValue
+            $entry.RecentMovesUtc = @()
+        }
+    }
+}
+
 function Invoke-HS2ExclusiveWindowGuard {
     param(
         [AllowNull()][object]$OverlayProcessIds,
@@ -1228,11 +1276,23 @@ function Invoke-HS2ExclusiveWindowGuard {
         }
     }
 
+    if ($null -eq (Get-Variable -Name hs2WindowCorrectionHistory -Scope Script -ErrorAction SilentlyContinue)) {
+        $script:hs2WindowCorrectionHistory = @{}
+    }
+    $history = $script:hs2WindowCorrectionHistory
+    $now = [DateTime]::UtcNow
+    if (-not $DryRun) {
+        foreach ($key in @($history.Keys)) {
+            if (($now - $history[$key].LastAttemptUtc).TotalMinutes -gt 5) { $history.Remove($key) }
+        }
+    }
     $planArguments = @{
         Monitors = $monitors
         Windows = $windows
         PreferredTargetMonitorDevice = $PreferredTargetMonitorDevice
         PreferredSafeMonitorDevice = $PreferredSafeMonitorDevice
+        CorrectionHistory = $history
+        NowUtc = $now
     }
     if ($overlayIdArray.Count -gt 0) {
         $planArguments.OverlayProcessIds = $overlayIdArray
@@ -1240,8 +1300,15 @@ function Invoke-HS2ExclusiveWindowGuard {
     $plan = Get-HS2ExclusiveWindowGuardPlan @planArguments
     $applied = New-Object "System.Collections.Generic.List[object]"
     $failures = New-Object "System.Collections.Generic.List[object]"
+    $backoffEvents = New-Object "System.Collections.Generic.List[object]"
     if (-not $DryRun) {
         foreach ($action in @($plan.Actions)) {
+            # Count dispatch attempts too: a refused move must not become a tight retry loop.
+            Register-HS2WindowGuardCorrection -History $history -Action $action -NowUtc $now
+            if ([string]$action.Action -ceq 'Backoff') {
+                [void]$backoffEvents.Add($action)
+                continue
+            }
             $succeeded = if ([string]$action.Action -ceq "Move") {
                 $nativeMethods::MoveWindowPlacementChecked(
                     [int64]$action.Hwnd,
@@ -1273,6 +1340,7 @@ function Invoke-HS2ExclusiveWindowGuard {
         PlannedActions = @($plan.Actions)
         AppliedActions = $applied.ToArray()
         FailedActions = $failures.ToArray()
+        BackoffEvents = $backoffEvents.ToArray()
         DryRun = [bool]$DryRun
     }
 }

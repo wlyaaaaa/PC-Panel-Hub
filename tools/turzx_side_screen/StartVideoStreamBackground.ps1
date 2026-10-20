@@ -8,8 +8,7 @@
     [int]$FullResyncEveryFrames = 900,
     [switch]$HybridRefresh,
     [switch]$NoDiff,
-    [switch]$ExperimentalDiff,
-    [switch]$AltHelper
+    [switch]$ExperimentalDiff
 )
 
 Set-StrictMode -Version Latest
@@ -53,9 +52,6 @@ if ($HybridRefresh) {
 }
 if ($ExperimentalDiff -and !$NoDiff) {
     $arguments += @("-Diff", "-AllowUnverifiedDifferentialProtocol")
-}
-if ($AltHelper) {
-    $arguments += "-AltHelper"
 }
 
 $process = Start-HiddenProcess -FilePath powershell.exe -ArgumentList $arguments -RedirectStandardOutput $logPath -RedirectStandardError $errPath

@@ -34,8 +34,6 @@ The recommended startup path is a Windows Scheduled Task:
   hard serial-session rebuilds run at frames **60, 120, and 180**; the long-term
   rebuild remains every 900 frames. `-HybridRefresh:$false` is the explicit
   **3-second compatibility fallback**, not an automatic stability downgrade.
-  The optional Alt helper is not enabled: this panel accepted 18 frames and then
-  rejected Alt command 204 plus subsequent writes.
 
 This is not a `SYSTEM` account task. It runs as the current interactive user with `Highest` run level, which is usually safer for COM ports, user-profile Python installs, RTSS/Afterburner, and other desktop telemetry tools.
 

@@ -16,8 +16,7 @@
     [switch]$DryRun,
     [switch]$HybridRefresh,
     [switch]$Diff,
-    [switch]$AllowUnverifiedDifferentialProtocol,
-    [switch]$AltHelper
+    [switch]$AllowUnverifiedDifferentialProtocol
 )
 
 Set-StrictMode -Version Latest
@@ -47,27 +46,6 @@ $metricsEndpoint = Get-TurzxMetricsEndpoint
 $metricsHost = $metricsEndpoint.HostName
 $metricsPort = $metricsEndpoint.Port
 $metricsUrl = $metricsEndpoint.Url
-# Keep the newest 32 launches (stdout and stderr together). A restart storm
-# must not leave thousands of permanent diagnostic files behind.
-$oldMetricsLogs = @(Get-ChildItem -LiteralPath $outDir -File -Filter 'metrics-agent.*.log' -ErrorAction SilentlyContinue |
-    Where-Object { $_.Name -match '^metrics-agent\.(\d{8}-\d{9}-\d+)\.(stdout|stderr)\.log$' })
-$keepTags = @($oldMetricsLogs |
-    ForEach-Object { [regex]::Match($_.Name, '^metrics-agent\.(\d{8}-\d{9}-\d+)\.').Groups[1].Value } |
-    Sort-Object -Descending -Unique | Select-Object -First 31)
-foreach ($oldLog in $oldMetricsLogs) {
-    $tag = [regex]::Match($oldLog.Name, '^metrics-agent\.(\d{8}-\d{9}-\d+)\.').Groups[1].Value
-    if ($tag -notin $keepTags) {
-        Remove-Item -LiteralPath $oldLog.FullName -Force -ErrorAction SilentlyContinue
-    }
-}
-$metricsLaunchTag = "{0}-{1}" -f `
-    [DateTime]::UtcNow.ToString("yyyyMMdd-HHmmssfff"), `
-    $PID
-$metricsStdoutPath = Join-Path $outDir `
-    "metrics-agent.$metricsLaunchTag.stdout.log"
-$metricsStderrPath = Join-Path $outDir `
-    "metrics-agent.$metricsLaunchTag.stderr.log"
-
 if ([string]::IsNullOrWhiteSpace($PreviewDir)) {
     $PreviewDir = Join-Path $outDir "stream"
 }
@@ -84,59 +62,6 @@ if (!$hasExplicitExecutablePath) {
         }
 }
 
-function Test-PythonModules {
-    param(
-        [Parameter(Mandatory = $true)][string]$Path,
-        [string[]]$Modules = @()
-    )
-
-    if (!(Test-Path -LiteralPath $Path -PathType Leaf)) {
-        return $false
-    }
-    if ($Modules.Count -eq 0) {
-        return $true
-    }
-
-    & $Path -c "import importlib.util,sys;sys.exit(0 if all(importlib.util.find_spec(name) is not None for name in sys.argv[1:]) else 1)" @Modules 2>$null
-    return $LASTEXITCODE -eq 0
-}
-
-function Find-Python {
-    $requiresTimeAudit = (
-        -not [string]::IsNullOrWhiteSpace($env:TIMEAUDIT_DSN) -or
-        (-not [string]::IsNullOrWhiteSpace($env:TIMEAUDIT_DB_PASSWORD) -and -not [string]::IsNullOrWhiteSpace($env:TIMEAUDIT_DB_USER))
-    )
-    $requiredModules = if ($requiresTimeAudit) { @("psutil", "asyncpg") } else { @() }
-    $command = Get-Command python -ErrorAction SilentlyContinue
-    $commandPath = if ($command) { $command.Source } else { $null }
-    $candidates = if ($requiresTimeAudit) {
-        @(
-            (Join-Path $env:LOCALAPPDATA "Programs\Python\Python311\python.exe"),
-            $commandPath,
-            (Join-Path $env:LOCALAPPDATA "Programs\Python\Python314\python.exe"),
-            (Join-Path $env:LOCALAPPDATA "Microsoft\WindowsApps\python.exe")
-        )
-    } else {
-        @(
-            $commandPath,
-            (Join-Path $env:LOCALAPPDATA "Programs\Python\Python311\python.exe"),
-            (Join-Path $env:LOCALAPPDATA "Programs\Python\Python314\python.exe"),
-            (Join-Path $env:LOCALAPPDATA "Microsoft\WindowsApps\python.exe")
-        )
-    }
-
-    foreach ($candidate in @($candidates | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)) {
-        if (Test-PythonModules -Path $candidate -Modules $requiredModules) {
-            return $candidate
-        }
-    }
-
-    if ($requiresTimeAudit) {
-        throw "No Python interpreter with required modules psutil+asyncpg was found for TimeAudit FPS."
-    }
-    throw "python.exe not found"
-}
-
 function Test-MetricsEndpointReady {
     try {
         $healthUri = [UriBuilder]::new($metricsUrl)
@@ -149,49 +74,6 @@ function Test-MetricsEndpointReady {
     catch {
         return $false
     }
-}
-
-. (Join-Path $PSScriptRoot 'MetricsEndpointPolicy.ps1')
-function Test-MetricsPortAvailable { return (Test-MetricsEndpointBind -Port $metricsPort -HostName $metricsHost) }
-
-function Wait-MetricsEndpointOrPortAvailable {
-    param([int]$TimeoutSeconds = 30)
-
-    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
-    do {
-        if (Test-MetricsEndpointReady) {
-            return "ready"
-        }
-        if (Test-MetricsPortAvailable) {
-            return "available"
-        }
-        Start-Sleep -Milliseconds 250
-    } while ([DateTime]::UtcNow -lt $deadline)
-
-    throw "metrics endpoint is unhealthy and port $metricsPort did not release within $TimeoutSeconds seconds"
-}
-
-function Wait-MetricsEndpointReady {
-    param(
-        [int]$TimeoutSeconds = 15,
-        [System.Diagnostics.Process]$Process
-    )
-
-    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
-    do {
-        if (Test-MetricsEndpointReady) {
-            return
-        }
-        if ($null -ne $Process) {
-            $Process.Refresh()
-            if ($Process.HasExited) {
-                throw "metrics agent exited with code $($Process.ExitCode); see $metricsStderrPath"
-            }
-        }
-        Start-Sleep -Milliseconds 250
-    } while ([DateTime]::UtcNow -lt $deadline)
-
-    throw "metrics endpoint did not become ready within $TimeoutSeconds seconds"
 }
 
 $cscCommand = Get-Command csc -ErrorAction SilentlyContinue
@@ -227,28 +109,14 @@ if ($LASTEXITCODE -ne 0) {
 
 $agentProcess = $null
 if (!$Sample -and !$DryRun) {
-    if ([string]::IsNullOrWhiteSpace($PythonPath)) {
-        $PythonPath = Find-Python
+    try {
+        if (-not (Test-MetricsEndpointReady)) {
+            $maintenance = Invoke-TurzxMetricsAgentMaintenance -SideRoot $scriptDir -PythonPath $PythonPath
+            $agentProcess = $maintenance.Process
+            Write-Host ("metrics startup {0}; stream may use cached data" -f $maintenance.Status)
+        }
     }
-    $requiredModules = if (
-        [string]::IsNullOrWhiteSpace($env:TIMEAUDIT_DSN) -and
-        ([string]::IsNullOrWhiteSpace($env:TIMEAUDIT_DB_PASSWORD) -or [string]::IsNullOrWhiteSpace($env:TIMEAUDIT_DB_USER))
-    ) { @() } else { @("psutil", "asyncpg") }
-    if (!(Test-PythonModules -Path $PythonPath -Modules $requiredModules)) {
-        throw "Selected Python interpreter is missing required runtime modules."
-    }
-
-    $agent = Join-Path $scriptDir "metrics_agent.py"
-    $metricsState = Wait-MetricsEndpointOrPortAvailable
-    if ($metricsState -eq "available") {
-        $agentProcess = Start-HiddenProcess `
-            -FilePath $PythonPath `
-            -ArgumentList @("-u", $agent, "--host", $metricsHost, "--port", [string]$metricsPort) `
-            -RedirectStandardOutput $metricsStdoutPath `
-            -RedirectStandardError $metricsStderrPath
-    }
-
-    Wait-MetricsEndpointReady -Process $agentProcess
+    catch { Write-Warning ("metrics startup deferred; stream may use cached data: {0}" -f $_.Exception.Message) }
 }
 
 try {
@@ -258,7 +126,6 @@ try {
     if ($HybridRefresh) { $argsList += "--hybrid-refresh" }
     if ($Diff) { $argsList += "--diff" }
     if ($AllowUnverifiedDifferentialProtocol) { $argsList += "--allow-unverified-diff" }
-    if ($AltHelper) { $argsList += "--alt-helper" }
     & $exePath @argsList
     if ($LASTEXITCODE -ne 0) {
         throw "stream failed with exit code $LASTEXITCODE"

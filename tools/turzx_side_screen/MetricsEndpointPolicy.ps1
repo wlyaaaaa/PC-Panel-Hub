@@ -1,4 +1,4 @@
-# Shared by metrics startup and shutdown; no service, no socket retained.
+﻿# Shared by metrics startup and shutdown; no service, no socket retained.
 if (-not ('TURZX.MetricsProcessState' -as [type])) {
  Add-Type -TypeDefinition @"
 using System;
@@ -69,4 +69,111 @@ function Get-TurzxMetricsEndpoint {
   }
  }
  [pscustomobject]@{HostName=$hostName;Port=$port;Url=('http://{0}:{1}/snapshot'-f $hostName,$port)}
+}
+
+function Invoke-TurzxMetricsAgentMaintenance {
+    param([string]$SideRoot = $PSScriptRoot, [string]$PythonPath, [switch]$Restart)
+
+    $endpoint = Get-TurzxMetricsEndpoint -ConfigPath (Join-Path $SideRoot 'config.json')
+    $agent = Join-Path $SideRoot 'metrics_agent.py'
+    $managed = @(Get-CimInstance Win32_Process -OperationTimeoutSec 8 -ErrorAction Stop |
+        Where-Object { $_.Name -like 'python*' -and $_.CommandLine -like ('*' + $agent + '*') })
+    foreach ($candidate in $managed) {
+        if ($Restart) {
+            Stop-Process -Id $candidate.ProcessId -Force -ErrorAction SilentlyContinue
+        }
+    }
+    $remaining = @($managed | Where-Object { Test-MetricsProcessActive -ProcessId ([int]$_.ProcessId) })
+    if ($remaining.Count -gt 0 -or -not (Test-MetricsEndpointBind -Port $endpoint.Port -HostName $endpoint.HostName)) {
+        $owners = @(Get-NetTCPConnection -State Listen -ErrorAction Stop |
+            Where-Object { [int]$_.LocalPort -eq $endpoint.Port } |
+            Select-Object -ExpandProperty OwningProcess -Unique) -join ','
+        return [pscustomobject]@{ Process = $null; Status = ('blocked remainingPids={0} metricsPort={1} metricsPortOwners={2}' -f
+            (@($remaining | ForEach-Object { $_.ProcessId }) -join ','), $endpoint.Port, $owners) }
+    }
+    if ([string]::IsNullOrWhiteSpace($PythonPath)) {
+        $PythonPath = Find-Python
+    }
+    $requiredModules = if (
+        [string]::IsNullOrWhiteSpace($env:TIMEAUDIT_DSN) -and
+        ([string]::IsNullOrWhiteSpace($env:TIMEAUDIT_DB_PASSWORD) -or [string]::IsNullOrWhiteSpace($env:TIMEAUDIT_DB_USER))
+    ) { @() } else { @("psutil", "asyncpg") }
+    if (!(Test-PythonModules -Path $PythonPath -Modules $requiredModules)) {
+        throw "Selected Python interpreter is missing required runtime modules."
+    }
+
+    $outDir = Join-Path $SideRoot 'out'
+    New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+    # Keep the newest 32 launches (stdout and stderr together). A restart storm
+    # must not leave thousands of permanent diagnostic files behind.
+    $oldMetricsLogs = @(Get-ChildItem -LiteralPath $outDir -File -Filter 'metrics-agent.*.log' -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '^metrics-agent\.(\d{8}-\d{9}-\d+)\.(stdout|stderr)\.log$' })
+    $keepTags = @($oldMetricsLogs |
+        ForEach-Object { [regex]::Match($_.Name, '^metrics-agent\.(\d{8}-\d{9}-\d+)\.').Groups[1].Value } |
+        Sort-Object -Descending -Unique | Select-Object -First 31)
+    foreach ($oldLog in $oldMetricsLogs) {
+        $tag = [regex]::Match($oldLog.Name, '^metrics-agent\.(\d{8}-\d{9}-\d+)\.').Groups[1].Value
+        if ($tag -notin $keepTags) {
+            Remove-Item -LiteralPath $oldLog.FullName -Force -ErrorAction SilentlyContinue
+        }
+    }
+    $tag = '{0}-{1}' -f [DateTime]::UtcNow.ToString('yyyyMMdd-HHmmssfff'), $PID
+    $process = Start-HiddenProcess -FilePath $PythonPath -WorkingDirectory $SideRoot `
+        -ArgumentList @('-u', $agent, '--host', $endpoint.HostName, '--port', [string]$endpoint.Port) `
+        -RedirectStandardOutput (Join-Path $outDir "metrics-agent.$tag.stdout.log") `
+        -RedirectStandardError (Join-Path $outDir "metrics-agent.$tag.stderr.log")
+    return [pscustomobject]@{ Process = $process; Status = "started pid=$($process.Id) metricsPort=$($endpoint.Port)" }
+}
+
+function Test-PythonModules {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [string[]]$Modules = @()
+    )
+
+    if (!(Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return $false
+    }
+    if ($Modules.Count -eq 0) {
+        return $true
+    }
+
+    & $Path -c "import importlib.util,sys;sys.exit(0 if all(importlib.util.find_spec(name) is not None for name in sys.argv[1:]) else 1)" @Modules 2>$null
+    return $LASTEXITCODE -eq 0
+}
+
+function Find-Python {
+    $requiresTimeAudit = (
+        -not [string]::IsNullOrWhiteSpace($env:TIMEAUDIT_DSN) -or
+        (-not [string]::IsNullOrWhiteSpace($env:TIMEAUDIT_DB_PASSWORD) -and -not [string]::IsNullOrWhiteSpace($env:TIMEAUDIT_DB_USER))
+    )
+    $requiredModules = if ($requiresTimeAudit) { @("psutil", "asyncpg") } else { @() }
+    $command = Get-Command python -ErrorAction SilentlyContinue
+    $commandPath = if ($command) { $command.Source } else { $null }
+    $candidates = if ($requiresTimeAudit) {
+        @(
+            (Join-Path $env:LOCALAPPDATA "Programs\Python\Python311\python.exe"),
+            $commandPath,
+            (Join-Path $env:LOCALAPPDATA "Programs\Python\Python314\python.exe"),
+            (Join-Path $env:LOCALAPPDATA "Microsoft\WindowsApps\python.exe")
+        )
+    } else {
+        @(
+            $commandPath,
+            (Join-Path $env:LOCALAPPDATA "Programs\Python\Python311\python.exe"),
+            (Join-Path $env:LOCALAPPDATA "Programs\Python\Python314\python.exe"),
+            (Join-Path $env:LOCALAPPDATA "Microsoft\WindowsApps\python.exe")
+        )
+    }
+
+    foreach ($candidate in @($candidates | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)) {
+        if (Test-PythonModules -Path $candidate -Modules $requiredModules) {
+            return $candidate
+        }
+    }
+
+    if ($requiresTimeAudit) {
+        throw "No Python interpreter with required modules psutil+asyncpg was found for TimeAudit FPS."
+    }
+    throw "python.exe not found"
 }
