@@ -21,11 +21,14 @@ function Start-Process {
     [IO.File]::WriteAllText($script:log,'中文 fallback 输出',[Text.UTF8Encoding]::new($false))
     [pscustomobject]@{ExitCode=19}
 }
+[Console]::OutputEncoding=[Text.Encoding]::GetEncoding(936)
 $result=Invoke-ProjectElevated 'Write-Output fixture'
+Check ([Console]::OutputEncoding.CodePage -eq 65001) 'parent decodes native output as UTF-8'
 Check ($result -eq '中文 sudo 输出' -and $LASTEXITCODE -eq 17) 'inline sudo preserves output and exit code'
 $body=[Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($script:encoded))
 Check ($body -match 'OutputEncoding' -and $body -match 'Set-Location' -and $body -match 'WindowsIdentity') 'child enforces UTF-8, original directory and Windows user'
 $script:mode=0
+[Console]::OutputEncoding=[Text.Encoding]::GetEncoding(936)
 $result=Invoke-ProjectElevated 'Write-Output fixture'
 Check ($result -eq '中文 fallback 输出' -and $LASTEXITCODE -eq 19) 'fallback preserves UTF-8 output and exit code'
 Check (-not(Test-Path -LiteralPath $script:log)) 'fallback removes its own output file'
