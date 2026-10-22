@@ -6,11 +6,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).
-    IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-if (-not $isAdmin) {
-    throw "Please run as Administrator."
-}
+. (Join-Path $PSScriptRoot 'Elevation.ps1')
+if (-not (Test-ProjectAdministrator)) { Invoke-ProjectElevated (New-ProjectInvocation $PSCommandPath $PSBoundParameters); exit $LASTEXITCODE }
 
 foreach ($name in @($TaskName, $ResumeTaskName)) {
     $existing = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue

@@ -3107,7 +3107,7 @@ foreach ($pattern in @("StartSideScreenWatchdog.ps1", "shell.Run(command, 0, Tru
 }
 
 $installerCmdText = Get-Content -Raw -LiteralPath $installerCmd
-foreach ($pattern in @("Start-Process", "-Verb RunAs", "install-startup-admin.ps1", "-Root")) {
+foreach ($pattern in @("pwsh.exe", "-WindowStyle Hidden", "install-startup-admin.ps1", "%*")) {
     if ($installerCmdText -notmatch [regex]::Escape($pattern)) {
         throw "Admin startup cmd wrapper missing expected pattern: $pattern"
     }

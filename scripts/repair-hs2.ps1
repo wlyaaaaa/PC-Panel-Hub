@@ -6,6 +6,9 @@ param(
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'Elevation.ps1')
+if ($Apply -and -not $WhatIfPreference -and -not (Test-ProjectAdministrator)) { Invoke-ProjectElevated (New-ProjectInvocation $PSCommandPath $PSBoundParameters); exit $LASTEXITCODE }
+
 . (Join-Path $Root 'tools\turzx_side_screen\HS2ActiveRecoveryPolicy.ps1')
 if ([string]::IsNullOrWhiteSpace($BindingPath)) {
     $BindingPath = Join-Path $Root 'tools\turzx_side_screen\out\hs2-usb-topology-binding.json'

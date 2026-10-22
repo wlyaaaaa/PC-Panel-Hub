@@ -10,6 +10,9 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot 'Elevation.ps1')
+if (-not (Test-ProjectAdministrator)) { Invoke-ProjectElevated (New-ProjectInvocation $PSCommandPath $PSBoundParameters); exit $LASTEXITCODE }
+
 
 . (Join-Path $Root 'tools\turzx_side_screen\PanelDevicePolicy.ps1')
 $Port = Get-TurzxConfiguredPort -Root $Root -Port $Port
@@ -94,19 +97,7 @@ if (-not $Direct) {
                 "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $stopper,
                 "-Root", $Root, "-IncludeWatchdog", "-SkipStackEntrypoint", "-Quiet"
             )
-            $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-            $principal = [Security.Principal.WindowsPrincipal]::new($identity)
-            $isElevated = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-            if ($isElevated) {
-                & powershell.exe @stopArguments
-            }
-            else {
-                $sudo = Get-Command sudo.exe -ErrorAction SilentlyContinue
-                if ($null -eq $sudo) {
-                    throw "The elevated watchdog outlived its hidden task parent. Re-run this command as Administrator."
-                }
-                & $sudo.Source powershell.exe @stopArguments
-            }
+            & powershell.exe @stopArguments
             if ($LASTEXITCODE -ne 0) {
                 throw "Unable to reclaim the previous side-screen watchdog (exit $LASTEXITCODE)."
             }

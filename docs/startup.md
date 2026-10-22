@@ -15,7 +15,7 @@ Run `scripts/check-runtime.ps1` for dependency diagnostics. Manual launch is
 `start-side-screen.cmd`; `scripts/repair-panel.ps1` checks the exact device,
 reclaims the single serial writer and waits for a fresh host heartbeat.
 For HS2 Code 43, `scripts/repair-hs2.ps1` checks the saved topology;
-administrator `-Apply` is the separate hardware recovery action.
+`-Apply` is the separate hardware recovery action and automatically elevates when required.
 
 FPS is optional TimeAudit data. Supply `TIMEAUDIT_DSN`, or both
 `TIMEAUDIT_DB_USER` and `TIMEAUDIT_DB_PASSWORD` in the local environment;

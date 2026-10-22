@@ -17,11 +17,8 @@ $portWasExplicit = $PSBoundParameters.ContainsKey('Port')
 $Port = Get-TurzxConfiguredPort -Root $Root -Port $Port
 if ($FullFrame) { $HybridRefresh = $false }
 
-$isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).
-    IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-if (-not $isAdmin) {
-    throw "Please run as Administrator, or use scripts\install-startup-admin.cmd for a UAC prompt."
-}
+. (Join-Path $PSScriptRoot 'Elevation.ps1')
+if (-not (Test-ProjectAdministrator)) { Invoke-ProjectElevated (New-ProjectInvocation $PSCommandPath $PSBoundParameters); exit $LASTEXITCODE }
 
 $Root = (Resolve-Path $Root).Path
 $script = Join-Path $Root "tools\turzx_side_screen\StartSideScreenWatchdog.ps1"
