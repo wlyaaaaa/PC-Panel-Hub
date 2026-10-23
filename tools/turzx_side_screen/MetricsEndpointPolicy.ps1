@@ -35,11 +35,7 @@ function Test-MetricsEndpointBind {
  $listener=$null
  $script:metricsPortProbeError=$null
  try {
-  foreach($connection in @(Get-NetTCPConnection -State Listen -ErrorAction Stop | Where-Object { [int]$_.LocalPort -eq $Port })) {
-   # Get-Process/CIM may retain an exiting process inconsistently. The kernel
-   # wait state, not an exit code or row presence, decides process completion.
-   if(Test-MetricsProcessActive -ProcessId ([int]$connection.OwningProcess)) { return $false }
-  }
+  # Native exclusive bind is the availability authority; avoid unbounded CIM provider on stop deadline.
   $listener=[Net.Sockets.TcpListener]::new([Net.IPAddress]::Parse($HostName),$Port)
   # A dead owner can still retain kernel sockets. Never force-reuse that endpoint.
   $listener.Server.ExclusiveAddressUse=$true
