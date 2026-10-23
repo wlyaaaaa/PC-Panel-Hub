@@ -70,7 +70,15 @@ function Test-MetricsEndpointReady {
         $healthUri.Query = ''
         $probe = Invoke-WebRequest -UseBasicParsing -Uri $healthUri.Uri -TimeoutSec 2
         $health = $probe.Content | ConvertFrom-Json
-        return $probe.StatusCode -eq 200 -and $health.service -eq 'turzx-metrics' -and $health.status -eq 'ok'
+        if ($probe.StatusCode -ne 200 -or $health.service -ne 'turzx-metrics' -or $health.status -ne 'ok') {
+            return $false
+        }
+        $ownership = Get-TurzxMetricsEndpointOwnership -SideRoot $scriptDir -Endpoint $metricsEndpoint
+        if (-not $ownership.Managed) {
+            Write-Warning ('metrics endpoint is live but source is not verified: {0}; existing listener is preserved' -f $ownership.Reason)
+            return $false
+        }
+        return $true
     }
     catch {
         return $false

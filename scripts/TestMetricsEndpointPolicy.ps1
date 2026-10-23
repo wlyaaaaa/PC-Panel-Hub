@@ -31,6 +31,22 @@ try {
  if(Test-MetricsEndpointBind -Port 0){throw 'Unknown TCP status must block reuse'}
 }
 & {
+ $ownershipRoot=Join-Path (Split-Path $PSScriptRoot -Parent) 'tools\turzx_side_screen'
+ $script:ownershipCommand='python.exe -u "'+(Join-Path $ownershipRoot 'metrics_agent.py')+'" --port 18766'
+ function Get-NetTCPConnection { [CmdletBinding()]param($State,$LocalPort) [pscustomobject]@{OwningProcess=123} }
+ function Get-CimInstance { [CmdletBinding()]param($ClassName,$Filter,$OperationTimeoutSec) [pscustomobject]@{Name='python.exe';CommandLine=$script:ownershipCommand} }
+ function Test-MetricsProcessActive {param($ProcessId) $true }
+ $endpoint=[pscustomobject]@{HostName='127.0.0.1';Port=18766}
+ if(-not(Get-TurzxMetricsEndpointOwnership -SideRoot $ownershipRoot -Endpoint $endpoint).Managed){throw 'A live canonical collector must be reusable'}
+ $script:ownershipCommand='python.exe -u E:\deleted-worktree\tools\turzx_side_screen\metrics_agent.py --port 18766'
+ $ownership=Get-TurzxMetricsEndpointOwnership -SideRoot $ownershipRoot -Endpoint $endpoint
+ if($ownership.Managed-or$ownership.Reason-notmatch 'unexpected-agent-source pid=123'){throw 'Healthy HTTP from another checkout must not prove collector ownership'}
+ $script:ownershipCommand='python.exe -u "'+(Join-Path $ownershipRoot 'metrics_agent.py')+'.old" --port 18766'
+ if((Get-TurzxMetricsEndpointOwnership -SideRoot $ownershipRoot -Endpoint $endpoint).Managed){throw 'A source path prefix must not prove collector ownership'}
+ function Get-NetTCPConnection { [CmdletBinding()]param($State,$LocalPort) @([pscustomobject]@{OwningProcess=123},[pscustomobject]@{OwningProcess=456}) }
+ if((Get-TurzxMetricsEndpointOwnership -SideRoot $ownershipRoot -Endpoint $endpoint).Managed){throw 'Multiple listener owners must not be silently accepted'}
+}
+& {
  $recoveryRoot=Join-Path ([IO.Path]::GetTempPath()) ('turzx-metrics-'+[guid]::NewGuid().ToString('N'))
  $script:agentActive=$true; $script:portAvailable=$false; $script:launches=0; $script:stops=@()
  function Get-TurzxMetricsEndpoint {param($ConfigPath) if($ConfigPath-ne(Join-Path $recoveryRoot 'config.json')){throw 'Maintenance must use its SideRoot endpoint'}; [pscustomobject]@{HostName='127.0.0.1';Port=18766} }

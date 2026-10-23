@@ -71,6 +71,40 @@ function Get-TurzxMetricsEndpoint {
  [pscustomobject]@{HostName=$hostName;Port=$port;Url=('http://{0}:{1}/snapshot'-f $hostName,$port)}
 }
 
+function Get-TurzxMetricsEndpointOwnership {
+    param([string]$SideRoot = $PSScriptRoot, [object]$Endpoint)
+
+    $expectedAgent = [IO.Path]::GetFullPath((Join-Path $SideRoot 'metrics_agent.py'))
+    try {
+        if ($null -eq $Endpoint) {
+            $Endpoint = Get-TurzxMetricsEndpoint -ConfigPath (Join-Path $SideRoot 'config.json')
+        }
+        $owners = @(Get-NetTCPConnection -State Listen -LocalPort $Endpoint.Port -ErrorAction Stop |
+            Select-Object -ExpandProperty OwningProcess -Unique)
+        if ($owners.Count -ne 1) {
+            return [pscustomobject]@{ Managed = $false; Reason = ('listener-owner-count={0}' -f $owners.Count) }
+        }
+        $ownerId = [int]$owners[0]
+        $process = @(Get-CimInstance Win32_Process -Filter ('ProcessId={0}' -f $ownerId) `
+            -OperationTimeoutSec 8 -ErrorAction Stop)
+        $agentArgument = '(?i)(?:^|[\s"])' + [regex]::Escape($expectedAgent) + '(?:[\s"]|$)'
+        # A successful HTTP health response does not establish deployment identity.
+        # In particular, an agent loaded from a deleted worktree can stay alive.
+        $managed = $process.Count -eq 1 -and
+            [string]$process[0].Name -like 'python*' -and
+            [string]$process[0].CommandLine -match $agentArgument -and
+            (Test-Path -LiteralPath $expectedAgent -PathType Leaf) -and
+            (Test-MetricsProcessActive -ProcessId $ownerId)
+        return [pscustomobject]@{
+            Managed = [bool]$managed
+            Reason = ('{0} pid={1}' -f $(if ($managed) { 'managed-agent' } else { 'unexpected-agent-source' }), $ownerId)
+        }
+    }
+    catch {
+        return [pscustomobject]@{ Managed = $false; Reason = ('ownership-unverified: {0}' -f $_.Exception.Message) }
+    }
+}
+
 function Wait-ManagedMetricsAgentExitAndPortRelease {
     param([int[]]$ProcessIds, [object]$Endpoint, [ValidateRange(1, 30)][int]$TimeoutSeconds = 8)
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)

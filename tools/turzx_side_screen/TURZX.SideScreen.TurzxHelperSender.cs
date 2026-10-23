@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.Drawing;
 using System.Linq;
 using System.Reflection;
@@ -208,6 +209,44 @@ namespace TURZX.SideScreen
             private readonly MethodInfo _close;
             private bool _disposed;
             private volatile bool _abandoned;
+            private volatile SendProgress _sendProgress;
+
+            private sealed class SendProgress
+            {
+                public readonly string Phase;
+                public readonly long StartedAt;
+                public readonly string CompletedStages;
+
+                public SendProgress(string phase, string completedStages)
+                {
+                    Phase = phase;
+                    StartedAt = Stopwatch.GetTimestamp();
+                    CompletedStages = completedStages;
+                }
+            }
+
+            private static long PhaseElapsedMilliseconds(SendProgress progress)
+            {
+                return (long)((Stopwatch.GetTimestamp() - progress.StartedAt) * 1000.0 / Stopwatch.Frequency);
+            }
+
+            private void SetSendPhase(string phase)
+            {
+                SendProgress previous = _sendProgress;
+                string completed = previous == null ? "" : previous.CompletedStages +
+                    previous.Phase + "=" + PhaseElapsedMilliseconds(previous) + "ms,";
+                // Publish phase and its monotonic start together so the timeout
+                // thread can report the blocked step without touching the COM object.
+                _sendProgress = new SendProgress(phase, completed);
+            }
+
+            private string DescribeSendProgress()
+            {
+                SendProgress progress = _sendProgress;
+                return progress == null ? "phase=unknown" : "phase=" + progress.Phase +
+                    " phaseElapsedMs=" + PhaseElapsedMilliseconds(progress) +
+                    " completedStages=[" + progress.CompletedStages.TrimEnd(',') + "]";
+            }
 
             public DiffSession(string root, string comPort, string devCode)
             {
@@ -364,6 +403,7 @@ namespace TURZX.SideScreen
                 ThrowIfDisposed();
                 if (previousFrameData == null) throw new ArgumentNullException("previousFrameData");
                 if (currentFrameData == null) throw new ArgumentNullException("currentFrameData");
+                _sendProgress = new SendProgress("diff-dispatch", "");
 
                 if (!flag)
                 {
@@ -373,6 +413,7 @@ namespace TURZX.SideScreen
                 object[] args = swapOrder
                     ? new object[] { currentFrameData, previousFrameData, sequence, flag }
                     : new object[] { previousFrameData, currentFrameData, sequence, flag };
+                SetSendPhase("vendor-diff");
                 object result = _sendDiff.Invoke(_driver, args);
                 return result == null ? 0 : System.Convert.ToInt32(result);
             }
@@ -408,6 +449,7 @@ namespace TURZX.SideScreen
 
             private bool RunBoundedSend(Action send, int timeoutMs, string operation, out string message)
             {
+                _sendProgress = new SendProgress("worker-start", "");
                 Exception workerError = null;
                 Thread worker = null;
                 try
@@ -446,7 +488,7 @@ namespace TURZX.SideScreen
                     // still be blocked. The caller exits this process; Windows
                     // then releases the abandoned COM handle atomically.
                     _abandoned = true;
-                    message = operation + " TIMEOUT after " + timeoutMs + " ms";
+                    message = operation + " TIMEOUT after " + timeoutMs + " ms; " + DescribeSendProgress();
                     return false;
                 }
 
@@ -455,7 +497,8 @@ namespace TURZX.SideScreen
                     Exception detail = workerError is TargetInvocationException && workerError.InnerException != null
                         ? workerError.InnerException
                         : workerError;
-                    message = operation + " EXCEPTION - " + detail.GetType().Name + ": " + detail.Message;
+                    message = operation + " EXCEPTION - " + detail.GetType().Name + ": " + detail.Message +
+                        "; " + DescribeSendProgress();
                     return false;
                 }
 
@@ -468,7 +511,9 @@ namespace TURZX.SideScreen
                 byte[] from = swapOrder ? currentFrameData : previousFrameData;
                 byte[] to = swapOrder ? previousFrameData : currentFrameData;
                 object[] args = new object[] { from, to, 0, 4, 0, 65000 };
+                SetSendPhase("diff-calculate");
                 byte[] payload = (byte[])_frameDiff.Invoke(null, args);
+                SetSendPhase("diff-payload-prepare");
                 int bodyLength = System.Convert.ToInt32(args[4]);
                 if (payload == null)
                 {
@@ -502,8 +547,11 @@ namespace TURZX.SideScreen
                 header[2] = (byte)((seq >> 8) & 0xFF);
                 header[3] = (byte)(seq & 0xFF);
 
+                SetSendPhase("command-204-header");
                 _sendCommand.Invoke(_serial, new object[] { 204, bodyLength, header, (byte)0 });
+                SetSendPhase("command-204-body");
                 _sendBody.Invoke(_serial, new object[] { payload, bodyLength });
+                SetSendPhase("diff-complete");
                 return bodyLength;
             }
 
