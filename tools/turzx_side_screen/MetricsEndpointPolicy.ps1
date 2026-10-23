@@ -1,34 +1,13 @@
 ﻿# Shared by metrics startup and shutdown; no service, no socket retained.
-if (-not ('TURZX.MetricsProcessState' -as [type])) {
- Add-Type -TypeDefinition @"
-using System;
-using System.ComponentModel;
-using System.Runtime.InteropServices;
-namespace TURZX {
- public static class MetricsProcessState {
-  [DllImport("kernel32.dll",SetLastError=true)] static extern IntPtr OpenProcess(uint access,bool inherit,int id);
-  [DllImport("kernel32.dll",SetLastError=true)] static extern uint WaitForSingleObject(IntPtr handle,uint milliseconds);
-  [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
-  public static bool IsActive(int id) {
-   if(id<=0) throw new ArgumentOutOfRangeException("id");
-   var handle=OpenProcess(0x00100000,false,id); // SYNCHRONIZE
-   if(handle==IntPtr.Zero) { int error=Marshal.GetLastWin32Error(); if(error==87) return false; throw new Win32Exception(error); }
-   try {
-    uint result=WaitForSingleObject(handle,0);
-    if(result==0) return false; // WAIT_OBJECT_0: process completed
-    if(result==258) return true; // WAIT_TIMEOUT: process has not completed
-    if(result==0xFFFFFFFF) throw new Win32Exception(Marshal.GetLastWin32Error());
-    throw new InvalidOperationException("Unexpected process wait result: "+result);
-   }
-   finally { CloseHandle(handle); }
-  }
- }
-}
-"@
-}
 function Test-MetricsProcessActive {
  param([Parameter(Mandatory=$true)][int]$ProcessId)
- return [TURZX.MetricsProcessState]::IsActive($ProcessId)
+ if($ProcessId-le0){throw [ArgumentOutOfRangeException]::new('ProcessId')}
+ $process=$null
+ try {
+  try { $process=[Diagnostics.Process]::GetProcessById($ProcessId) }
+  catch [ArgumentException] { return $false }
+  return -not $process.HasExited
+ } finally { if($null-ne$process){$process.Dispose()} }
 }
 function Test-MetricsEndpointBind {
  param([ValidateRange(0,65535)][int]$Port=18765,[string]$HostName='127.0.0.1')

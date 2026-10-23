@@ -1,6 +1,9 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference='Stop'
-. (Join-Path (Split-Path $PSScriptRoot -Parent) 'tools\turzx_side_screen\MetricsEndpointPolicy.ps1')
+function Add-Type { throw 'Policy loading must not compile code' }
+try {
+ . (Join-Path (Split-Path $PSScriptRoot -Parent) 'tools\turzx_side_screen\MetricsEndpointPolicy.ps1')
+} finally { Remove-Item -LiteralPath Function:\Add-Type }
 if(-not(Test-MetricsProcessActive -ProcessId $PID)){throw 'Current real process must be alive'}
 $hostProcess=[Diagnostics.Process]::GetCurrentProcess()
 try { $hostExecutable=$hostProcess.MainModule.FileName } finally { $hostProcess.Dispose() }
@@ -11,7 +14,7 @@ $startInfo.WindowStyle=[Diagnostics.ProcessWindowStyle]::Hidden
 $startInfo.Arguments='-NoProfile -NonInteractive -Command "exit 259"'
 $child=[Diagnostics.Process]::Start($startInfo)
 try {
- $heldHandle=$child.Handle # Keep the completed process object available to OpenProcess.
+ $heldHandle=$child.Handle # Keep the completed process registered while checking its completion.
  if(-not$child.WaitForExit(10000)){throw 'Exit-259 child did not complete in time'}
  if($child.ExitCode-ne259){throw 'Exit-259 child returned an unexpected exit code'}
  if(Test-MetricsProcessActive -ProcessId $child.Id){throw 'A completed process with exit code 259 must be inactive'}

@@ -74,6 +74,7 @@ helper; `TestDiffPayload.ps1` compares the effective payload bytes offline. This
 does not extend the 900 ms budget or prove that the physical panel refreshed.
 Stack-stop diagnostics record the worker PID and elapsed time around policy
 loading, process discovery and exit checks to locate a total stop timeout.
+The stop path avoids runtime compilation and retains completion checks through the built-in .NET process API.
 
 Installed Hybrid startup follows the vendor 8.8-inch lifecycle: raw `0x2C` priming,
 brightness restore, then two identical command-200 baselines before command 204 begins.
