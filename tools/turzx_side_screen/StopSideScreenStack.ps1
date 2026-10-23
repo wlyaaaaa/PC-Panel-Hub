@@ -26,6 +26,13 @@ function Write-StopLog {
     }
 }
 
+$script:stopPhaseWatch = [System.Diagnostics.Stopwatch]::StartNew()
+function Write-StopPhase {
+    param([string]$Phase)
+    Write-StopLog ('phase={0} stopPid={1} elapsedMs={2}' -f $Phase, $PID, $script:stopPhaseWatch.ElapsedMilliseconds)
+}
+Write-StopPhase 'entry'
+
 function Get-TurzxProcessSnapshot {
     param([ValidateRange(1, 30)][int]$TimeoutSeconds)
 
@@ -67,7 +74,9 @@ function Stop-MatchingProcess {
     return $stoppedProcessIds.ToArray()
 }
 
+Write-StopPhase 'metrics-policy-start'
 . (Join-Path $PSScriptRoot 'MetricsEndpointPolicy.ps1')
+Write-StopPhase 'metrics-policy-done'
 
 function Assert-ManagedMetricsAgentExitAndPortRelease {
     param(
@@ -208,7 +217,9 @@ function Stop-RecordedWatchdogProcess {
 
 $sidePattern = "*" + $side + "*"
 $weatherPattern = "*" + $weather + "*"
+Write-StopPhase 'process-snapshot-start'
 $processSnapshot = @(Get-TurzxProcessSnapshot -TimeoutSeconds $ProcessSnapshotTimeoutSeconds)
+Write-StopPhase 'process-snapshot-done'
 
 if ($IncludeWatchdog) {
     Stop-RecordedWatchdogProcess `
@@ -277,7 +288,9 @@ foreach ($parentPid in $streamParents) {
         continue
     }
     try {
+        Write-StopPhase 'parent-identity-cim-start'
         $fresh = Get-CimInstance Win32_Process -Filter ("ProcessId={0}" -f [int]$parentPid) -ErrorAction Stop
+        Write-StopPhase 'parent-identity-cim-done'
         if (-not (Test-OwnedStreamParent -Candidate $fresh -SideRoot $side) -or
             $fresh.CreationDate -ne $prior[0].CreationDate -or
             -not (Test-MetricsProcessActive -ProcessId ([int]$parentPid))) { continue }
@@ -290,13 +303,17 @@ foreach ($parentPid in $streamParents) {
 
 # Hard fallback stays exact-PID and exact project image. A machine-wide /IM or
 # tree kill can affect another task; it is not a valid COM-ownership proof.
+Write-StopPhase 'fresh-stream-cim-start'
 $freshStreams = @(Get-CimInstance Win32_Process -Filter "Name='TURZX.SideScreen.Stream.exe'" -ErrorAction Stop)
+Write-StopPhase 'fresh-stream-cim-done'
 foreach ($stream in $freshStreams) {
     if ([string]$stream.CommandLine -notlike $sidePattern -or
         [string]$stream.ExecutablePath -notlike ($side + '\*')) { continue }
     try {
         if (-not (Test-MetricsProcessActive -ProcessId ([int]$stream.ProcessId))) { continue }
+        Write-StopPhase 'taskkill-start'
         $fallbackOutput = & taskkill.exe /PID ([int]$stream.ProcessId) /F 2>&1
+        Write-StopPhase 'taskkill-done'
         foreach ($line in $fallbackOutput) { Write-StopLog ("taskkill exact stream: {0}" -f $line) }
     }
     catch { Write-StopLog ("exact stream stop failed PID={0}: {1}" -f $stream.ProcessId,$_.Exception.Message) }
@@ -314,15 +331,19 @@ if (-not $SkipStackEntrypoint) {
 
 # A new COM writer must never start until the previous stream process has
 # actually released the device.  taskkill success text alone is not proof.
+Write-StopPhase 'stream-exit-wait-start'
 Wait-TurzxStreamProcessesExit
+Write-StopPhase 'stream-exit-wait-done'
 
 # Metrics owns no serial handle. A stuck collector must not block a new stream;
 # its PID/port evidence remains available while the watchdog retries it separately.
 try {
     if (-not $KeepMetrics) {
+        Write-StopPhase 'metrics-exit-proof-start'
         Assert-ManagedMetricsAgentExitAndPortRelease `
             -ProcessIds $stoppedMetricsProcessIds `
             -TimeoutSeconds $ProcessSnapshotTimeoutSeconds
+        Write-StopPhase 'metrics-exit-proof-done'
     }
 }
 catch { Write-StopLog ("metrics cleanup deferred; stream exit proved: {0}" -f $_.Exception.Message) }

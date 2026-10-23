@@ -451,6 +451,7 @@ function Stop-Stack {
     )
     if ($KeepMetrics) { $stopArguments += "-KeepMetrics" }
     $stopProcess = Start-HiddenProcess -FilePath "powershell.exe" -ArgumentList $stopArguments
+    Write-WatchdogLog ("stop worker started pid={0}" -f $stopProcess.Id)
     $completed = $false
     try {
         $completed = $stopProcess.WaitForExit($StopStackTimeoutSeconds * 1000)

@@ -67,6 +67,14 @@ worker to exit and reopen under the watchdog. Heartbeat timing checks also rejec
 live-but-stalled process. Diagnostic preview encoding is asynchronous and never sits
 on the COM7 send path.
 
+Command-204 payload generation uses a direct linear BGRA scan instead of the
+vendor helper's obfuscated per-pixel dispatcher. The byte layout, including the
+single-pixel and end-of-frame cases, remains compatible with the local vendor
+helper; `TestDiffPayload.ps1` compares the effective payload bytes offline. This
+does not extend the 900 ms budget or prove that the physical panel refreshed.
+Stack-stop diagnostics record the worker PID and elapsed time around policy
+loading, process discovery and exit checks to locate a total stop timeout.
+
 Installed Hybrid startup follows the vendor 8.8-inch lifecycle: raw `0x2C` priming,
 brightness restore, then two identical command-200 baselines before command 204 begins.
 Frames 60, 120, and 180 repeat a single complete command-200 baseline on a rebuilt

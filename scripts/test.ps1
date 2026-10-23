@@ -101,6 +101,8 @@ $vendorAssembly = @("TURZX.weatherfix.metrics.exe", "TURZX.exe") |
     Where-Object { Test-Path -LiteralPath (Join-Path $Root $_) -PathType Leaf } |
     Select-Object -First 1
 if ($vendorAssembly) {
+    powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $side "TestDiffPayload.ps1") -VendorRoot $Root
+    if ($LASTEXITCODE -ne 0) { throw "TestDiffPayload.ps1 failed" }
     powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $side "TestDiffProbe.ps1") -Root $Root
     if ($LASTEXITCODE -ne 0) { throw "TestDiffProbe.ps1 failed" }
 } else {

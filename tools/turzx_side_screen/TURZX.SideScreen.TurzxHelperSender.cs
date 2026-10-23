@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Drawing;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Threading;
 
 namespace TURZX.SideScreen
@@ -16,6 +17,60 @@ namespace TURZX.SideScreen
         internal static ThreadPriority DesiredSenderThreadPriorityForTest()
         {
             return ThreadPriority.Highest;
+        }
+
+        internal static byte[] BuildDifferentialPayload(byte[] previous, byte[] current, out int length)
+        {
+            if (previous == null) throw new ArgumentNullException("previous");
+            if (current == null) throw new ArgumentNullException("current");
+            if (previous.Length != current.Length || (current.Length & 3) != 0)
+                throw new ArgumentException("Frames must have equal, four-byte-aligned lengths.");
+
+            length = 0;
+            byte[] payload = new byte[checked(current.Length + 9)];
+            int offset = 0, written = 0;
+            while (offset < current.Length)
+            {
+                if (PixelsEqual(previous, current, offset))
+                {
+                    offset += 4;
+                    continue;
+                }
+
+                int start = offset;
+                do { offset += 4; }
+                while (offset < current.Length && !PixelsEqual(previous, current, offset));
+                int count = (offset - start) / 4;
+                // The vendor checks the limit only when an equal pixel ends a run.
+                // At EOF it writes the low 16 count bits, even above that limit.
+                bool atEnd = offset == current.Length;
+                if (!atEnd && count > 65000) return null;
+                bool single = count == 1 && !atEnd;
+                int required = checked(written + (single ? 3 : 5) + count * 4);
+                if (required > payload.Length)
+                    Array.Resize(ref payload, (int)Math.Min(int.MaxValue,
+                        Math.Max((long)required, payload.Length * 2L)));
+
+                int index = start / 4;
+                payload[written++] = (byte)((index >> 16) | (single ? 0x80 : 0));
+                payload[written++] = (byte)(index >> 8);
+                payload[written++] = (byte)index;
+                if (!single)
+                {
+                    payload[written++] = (byte)(count >> 8);
+                    payload[written++] = (byte)count;
+                }
+                Buffer.BlockCopy(current, start, payload, written, count * 4);
+                written += count * 4;
+            }
+            length = written;
+            return payload;
+        }
+
+        private static bool PixelsEqual(byte[] previous, byte[] current, int offset)
+        {
+            return previous[offset] == current[offset] && previous[offset + 1] == current[offset + 1] &&
+                previous[offset + 2] == current[offset + 2] && previous[offset + 3] == current[offset + 3];
         }
 
         public static byte[] ConvertBitmapToFrameData(string root, Bitmap bitmap)
@@ -201,7 +256,6 @@ namespace TURZX.SideScreen
             private readonly object _serial;
             private readonly MethodInfo _sendFull;
             private readonly MethodInfo _sendDiff;
-            private readonly MethodInfo _frameDiff;
             private readonly MethodInfo _sendCommand;
             private readonly MethodInfo _sendBody;
             private readonly MethodInfo _prime;
@@ -211,16 +265,44 @@ namespace TURZX.SideScreen
             private volatile bool _abandoned;
             private volatile SendProgress _sendProgress;
 
+            [DllImport("kernel32.dll", EntryPoint = "GetThreadTimes", SetLastError = true)]
+            private static extern bool Win32GetThreadTimes(IntPtr thread, out long created, out long exited, out long kernel, out long user);
+            [DllImport("kernel32.dll")]
+            private static extern IntPtr GetCurrentThread();
+
+            private static long CurrentThreadCpuTicks()
+            {
+                try
+                {
+                    long created, exited, kernel, user;
+                    return Win32GetThreadTimes(GetCurrentThread(), out created, out exited, out kernel, out user) ? kernel + user : -1;
+                }
+                catch { return -1; }
+            }
+
+            private static string PhaseCpuMilliseconds(SendProgress progress)
+            {
+                if (progress.StartedThreadId != Thread.CurrentThread.ManagedThreadId || progress.StartedCpuTicks < 0)
+                    return "unavailable";
+                long ended = CurrentThreadCpuTicks();
+                return ended < progress.StartedCpuTicks ? "unavailable" :
+                    ((ended - progress.StartedCpuTicks) / 10000.0).ToString("F3", System.Globalization.CultureInfo.InvariantCulture);
+            }
+
             private sealed class SendProgress
             {
                 public readonly string Phase;
                 public readonly long StartedAt;
+                public readonly long StartedCpuTicks;
+                public readonly int StartedThreadId;
                 public readonly string CompletedStages;
 
                 public SendProgress(string phase, string completedStages)
                 {
                     Phase = phase;
                     StartedAt = Stopwatch.GetTimestamp();
+                    StartedThreadId = Thread.CurrentThread.ManagedThreadId;
+                    StartedCpuTicks = CurrentThreadCpuTicks();
                     CompletedStages = completedStages;
                 }
             }
@@ -234,7 +316,7 @@ namespace TURZX.SideScreen
             {
                 SendProgress previous = _sendProgress;
                 string completed = previous == null ? "" : previous.CompletedStages +
-                    previous.Phase + "=" + PhaseElapsedMilliseconds(previous) + "ms,";
+                    previous.Phase + "=" + PhaseElapsedMilliseconds(previous) + "ms(cpuMs=" + PhaseCpuMilliseconds(previous) + "),";
                 // Publish phase and its monotonic start together so the timeout
                 // thread can report the blocked step without touching the COM object.
                 _sendProgress = new SendProgress(phase, completed);
@@ -301,20 +383,6 @@ namespace TURZX.SideScreen
                     throw new MissingMethodException(driverType.FullName, "\u88FA(byte[],byte[],long,bool)");
                 }
 
-                Type frameType = asm.GetType("\u8DB5", true);
-                _frameDiff = frameType.GetMethods(BindingFlags.Public | BindingFlags.Static)
-                    .First(m =>
-                    {
-                        ParameterInfo[] p = m.GetParameters();
-                        return m.Name == "\u86F3" &&
-                            p.Length == 6 &&
-                            p[0].ParameterType == typeof(byte[]) &&
-                            p[1].ParameterType == typeof(byte[]) &&
-                            p[2].ParameterType == typeof(int) &&
-                            p[3].ParameterType == typeof(int) &&
-                            p[4].ParameterType == typeof(int).MakeByRefType() &&
-                            p[5].ParameterType == typeof(int);
-                    });
                 _sendCommand = _serial.GetType().GetMethod("\u8A54", BindingFlags.Instance | BindingFlags.Public, null, new[] { typeof(int), typeof(int), typeof(byte[]), typeof(byte) }, null);
                 if (_sendCommand == null)
                 {
@@ -510,11 +578,10 @@ namespace TURZX.SideScreen
             {
                 byte[] from = swapOrder ? currentFrameData : previousFrameData;
                 byte[] to = swapOrder ? previousFrameData : currentFrameData;
-                object[] args = new object[] { from, to, 0, 4, 0, 65000 };
                 SetSendPhase("diff-calculate");
-                byte[] payload = (byte[])_frameDiff.Invoke(null, args);
+                int bodyLength;
+                byte[] payload = BuildDifferentialPayload(from, to, out bodyLength);
                 SetSendPhase("diff-payload-prepare");
-                int bodyLength = System.Convert.ToInt32(args[4]);
                 if (payload == null)
                 {
                     throw new InvalidOperationException("TURZX diff helper returned null payload.");
