@@ -72,6 +72,12 @@ vendor helper's obfuscated per-pixel dispatcher. The byte layout, including the
 single-pixel and end-of-frame cases, remains compatible with the local vendor
 helper; `TestDiffPayload.ps1` compares the effective payload bytes offline. This
 does not extend the 900 ms budget or prove that the physical panel refreshed.
+Send diagnostics include phase UTC boundaries, snapshot-read UTC, and the native
+thread ID sampled by the send worker. CPU and wall-clock endpoints are sampled
+sequentially, not atomically. Bounded-call diagnostics retain thread-start and
+Join boundaries; a successful DIFF whose total send time exceeds 900 ms also
+logs conversion time and the bounded-call time separately. Total send time
+includes conversion, whereas the unchanged Join budget starts after worker start.
 Stack-stop diagnostics record the worker PID and elapsed time around policy
 loading, process discovery and exit checks to locate a total stop timeout.
 The stop path avoids runtime compilation and retains completion checks through the built-in .NET process API.

@@ -121,7 +121,11 @@ namespace TURZX.SideScreen
                             {
                                 sendAttempted = true;
                                 sendWatch = Stopwatch.StartNew();
+                                DateTime sendStartedUtc = DateTime.UtcNow;
+                                Stopwatch convertWatch = Stopwatch.StartNew();
                                 byte[] currentFrameData = diffSession.Convert(bitmap);
+                                convertWatch.Stop();
+                                DateTime convertReturnedUtc = DateTime.UtcNow;
                                 bool hasPreviousFrame = previousFrameData != null;
                                 if (ShouldSendFullFrame(frame, hasPreviousFrame, options.FullResyncEveryFrames) ||
                                     ShouldSendHybridWarmupFullFrame(frame, options.HybridRefresh, hasPreviousFrame))
@@ -164,6 +168,8 @@ namespace TURZX.SideScreen
                                     long sequence = diffSequence++;
                                     int result;
                                     string diffMessage;
+                                    DateTime boundedStartedUtc = DateTime.UtcNow;
+                                    Stopwatch boundedWatch = Stopwatch.StartNew();
                                     bool diffOk = diffSession.SendDiffWithTimeout(
                                         previousFrameData,
                                         currentFrameData,
@@ -173,6 +179,8 @@ namespace TURZX.SideScreen
                                         options.DiffSendTimeoutMs,
                                         out result,
                                         out diffMessage);
+                                    boundedWatch.Stop();
+                                    DateTime boundedReturnedUtc = DateTime.UtcNow;
                                     if (!diffOk)
                                     {
                                         throw new InvalidOperationException(diffMessage);
@@ -181,7 +189,16 @@ namespace TURZX.SideScreen
                                     sendMs = sendWatch.ElapsedMilliseconds;
                                     sent++;
                                     consecutiveSendFailures = 0;
-                                    Console.WriteLine("frame " + frame + " DIFF sent in " + sendWatch.ElapsedMilliseconds + "ms: seq=" + sequence + ", result=" + result);
+                                    string slowDetails = sendMs > options.DiffSendTimeoutMs
+                                        ? ", convertMs=" + convertWatch.ElapsedMilliseconds +
+                                            ", boundedCallMs=" + boundedWatch.ElapsedMilliseconds +
+                                            ", sendStartUtc=" + sendStartedUtc.ToString("o") +
+                                            ", convertReturnUtc=" + convertReturnedUtc.ToString("o") +
+                                            ", boundedCallStartUtc=" + boundedStartedUtc.ToString("o") +
+                                            ", boundedCallReturnUtc=" + boundedReturnedUtc.ToString("o") +
+                                            ", diagnostic={" + diffMessage + "}"
+                                        : "";
+                                    Console.WriteLine("frame " + frame + " DIFF sent in " + sendWatch.ElapsedMilliseconds + "ms: seq=" + sequence + ", result=" + result + slowDetails);
                                 }
 
                                 previousFrameData = currentFrameData;

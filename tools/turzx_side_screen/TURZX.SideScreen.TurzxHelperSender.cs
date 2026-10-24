@@ -269,6 +269,8 @@ namespace TURZX.SideScreen
             private static extern bool Win32GetThreadTimes(IntPtr thread, out long created, out long exited, out long kernel, out long user);
             [DllImport("kernel32.dll")]
             private static extern IntPtr GetCurrentThread();
+            [DllImport("kernel32.dll")]
+            private static extern uint GetCurrentThreadId();
 
             private static long CurrentThreadCpuTicks()
             {
@@ -295,13 +297,17 @@ namespace TURZX.SideScreen
                 public readonly long StartedAt;
                 public readonly long StartedCpuTicks;
                 public readonly int StartedThreadId;
+                public readonly uint NativeThreadId;
+                public readonly DateTime StartedUtc;
                 public readonly string CompletedStages;
 
                 public SendProgress(string phase, string completedStages)
                 {
                     Phase = phase;
                     StartedAt = Stopwatch.GetTimestamp();
+                    StartedUtc = DateTime.UtcNow;
                     StartedThreadId = Thread.CurrentThread.ManagedThreadId;
+                    NativeThreadId = GetCurrentThreadId();
                     StartedCpuTicks = CurrentThreadCpuTicks();
                     CompletedStages = completedStages;
                 }
@@ -315,8 +321,11 @@ namespace TURZX.SideScreen
             private void SetSendPhase(string phase)
             {
                 SendProgress previous = _sendProgress;
+                DateTime completedUtc = DateTime.UtcNow;
                 string completed = previous == null ? "" : previous.CompletedStages +
-                    previous.Phase + "=" + PhaseElapsedMilliseconds(previous) + "ms(cpuMs=" + PhaseCpuMilliseconds(previous) + "),";
+                    previous.Phase + "=" + PhaseElapsedMilliseconds(previous) + "ms(cpuMs=" + PhaseCpuMilliseconds(previous) +
+                    ",startUtc=" + previous.StartedUtc.ToString("o") + ",endUtc=" + completedUtc.ToString("o") +
+                    ",nativeTid=" + previous.NativeThreadId + "),";
                 // Publish phase and its monotonic start together so the timeout
                 // thread can report the blocked step without touching the COM object.
                 _sendProgress = new SendProgress(phase, completed);
@@ -325,9 +334,20 @@ namespace TURZX.SideScreen
             private string DescribeSendProgress()
             {
                 SendProgress progress = _sendProgress;
-                return progress == null ? "phase=unknown" : "phase=" + progress.Phase +
+                DateTime readUtc = DateTime.UtcNow;
+                return progress == null ? "phase=unknown snapshotReadUtc=" + readUtc.ToString("o") : "phase=" + progress.Phase +
                     " phaseElapsedMs=" + PhaseElapsedMilliseconds(progress) +
+                    " phaseStartUtc=" + progress.StartedUtc.ToString("o") +
+                    " snapshotReadUtc=" + readUtc.ToString("o") +
+                    " nativeTid=" + progress.NativeThreadId +
+                    " cpuWallEndpoints=non-atomic" +
                     " completedStages=[" + progress.CompletedStages.TrimEnd(',') + "]";
+            }
+
+            private sealed class WorkerIdentity
+            {
+                public readonly DateTime EnteredUtc = DateTime.UtcNow;
+                public readonly uint NativeThreadId = GetCurrentThreadId();
             }
 
             public DiffSession(string root, string comPort, string devCode)
@@ -517,13 +537,22 @@ namespace TURZX.SideScreen
 
             private bool RunBoundedSend(Action send, int timeoutMs, string operation, out string message)
             {
-                _sendProgress = new SendProgress("worker-start", "");
+                Stopwatch boundedWatch = Stopwatch.StartNew();
+                DateTime boundedStartUtc = DateTime.UtcNow;
+                DateTime threadStartUtc;
+                DateTime threadStartedUtc;
+                WorkerIdentity workerIdentity = null;
+                // Until the worker publishes its own samples, its phase and
+                // native identity are unknown; never substitute the caller's.
+                _sendProgress = null;
                 Exception workerError = null;
                 Thread worker = null;
                 try
                 {
                     worker = new Thread(delegate()
                     {
+                        Interlocked.Exchange(ref workerIdentity, new WorkerIdentity());
+                        _sendProgress = new SendProgress("worker-start", "");
                         try
                         {
                             send();
@@ -543,20 +572,41 @@ namespace TURZX.SideScreen
                         // The timeout remains authoritative if the OS refuses
                         // the requested managed thread priority.
                     }
+                    threadStartUtc = DateTime.UtcNow;
                     worker.Start();
+                    threadStartedUtc = DateTime.UtcNow;
                 }
                 catch
                 {
                     throw;
                 }
 
-                if (!worker.Join(timeoutMs))
+                DateTime joinStartUtc = DateTime.UtcNow;
+                Stopwatch joinWatch = Stopwatch.StartNew();
+                bool joined = worker.Join(timeoutMs);
+                // Preserve abandonment before diagnostics can throw: a writer
+                // that timed out must never have its COM object closed/reused.
+                if (!joined) _abandoned = true;
+                joinWatch.Stop();
+                DateTime joinReturnUtc = DateTime.UtcNow;
+                WorkerIdentity started = Interlocked.CompareExchange(ref workerIdentity, null, null);
+                string timing = "boundedStartUtc=" + boundedStartUtc.ToString("o") +
+                    " threadStartUtc=" + threadStartUtc.ToString("o") +
+                    " threadStartedUtc=" + threadStartedUtc.ToString("o") +
+                    " workerEnteredUtc=" + (started == null ? "unknown" : started.EnteredUtc.ToString("o")) +
+                    " workerNativeTid=" + (started == null ? "unknown" : started.NativeThreadId.ToString()) +
+                    " joinStartUtc=" + joinStartUtc.ToString("o") +
+                    " joinReturnUtc=" + joinReturnUtc.ToString("o") +
+                    " joinMs=" + joinWatch.ElapsedMilliseconds + " joined=" + joined;
+                string progress = DescribeSendProgress();
+                timing += " boundedMs=" + boundedWatch.ElapsedMilliseconds +
+                    " boundedSampleUtc=" + DateTime.UtcNow.ToString("o");
+                if (!joined)
                 {
                     // Never close or reuse a serial object while its writer may
                     // still be blocked. The caller exits this process; Windows
                     // then releases the abandoned COM handle atomically.
-                    _abandoned = true;
-                    message = operation + " TIMEOUT after " + timeoutMs + " ms; " + DescribeSendProgress();
+                    message = operation + " TIMEOUT after " + timeoutMs + " ms; " + timing + "; " + progress;
                     return false;
                 }
 
@@ -566,11 +616,14 @@ namespace TURZX.SideScreen
                         ? workerError.InnerException
                         : workerError;
                     message = operation + " EXCEPTION - " + detail.GetType().Name + ": " + detail.Message +
-                        "; " + DescribeSendProgress();
+                        "; " + timing + "; " + progress;
                     return false;
                 }
 
-                message = operation + " OK";
+                // A successful Join may return after the nominal budget due to
+                // caller scheduling. Retain the same verdict and report its
+                // actual boundaries rather than treating elapsed time as cause.
+                message = operation + " OK; " + timing + "; " + progress;
                 return true;
             }
 
