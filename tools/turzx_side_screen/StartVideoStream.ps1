@@ -23,8 +23,18 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+$startupClock = [Diagnostics.Stopwatch]::StartNew()
+function Write-StreamStartupStage {
+    param([string]$Stage)
+    Write-Host ('stage={0} pid={1} utc={2} elapsedMs={3}' -f $Stage, $PID, [DateTime]::UtcNow.ToString('o'), $startupClock.ElapsedMilliseconds)
+}
+
+Write-StreamStartupStage 'panel-device-policy-start'
 . (Join-Path $PSScriptRoot 'PanelDevicePolicy.ps1')
+Write-StreamStartupStage 'panel-device-policy-done'
+Write-StreamStartupStage 'configured-port-start'
 $Port = Get-TurzxConfiguredPort -Root $Root -Port $Port
+Write-StreamStartupStage 'configured-port-done'
 if ($Diff -and -not $DryRun -and -not $AllowUnverifiedDifferentialProtocol) {
     throw "Live differential command 204 is unverified. Production must use the full-frame transport."
 }
@@ -33,8 +43,12 @@ if ($HybridRefresh -and $Diff) {
 }
 
 if (-not $DryRun) {
+    Write-StreamStartupStage 'serial-endpoint-verify-start'
     Get-TurzxVerifiedSerialEndpoint -Port $Port | Out-Null
+    Write-StreamStartupStage 'serial-endpoint-verify-done'
+    Write-StreamStartupStage 'stream-stopped-assert-start'
     Assert-TurzxStreamStopped
+    Write-StreamStartupStage 'stream-stopped-assert-done'
 }
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -42,7 +56,9 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $outDir = Join-Path $scriptDir "out"
 $hasExplicitExecutablePath = -not [string]::IsNullOrWhiteSpace($ExecutablePath)
 $exePath = if ($hasExplicitExecutablePath) { $ExecutablePath } else { Join-Path $outDir "TURZX.SideScreen.Stream.exe" }
+Write-StreamStartupStage 'metrics-policy-start'
 . (Join-Path $PSScriptRoot 'MetricsEndpointPolicy.ps1')
+Write-StreamStartupStage 'metrics-policy-done'
 $metricsEndpoint = Get-TurzxMetricsEndpoint
 $metricsHost = $metricsEndpoint.HostName
 $metricsPort = $metricsEndpoint.Port
@@ -85,6 +101,7 @@ function Test-MetricsEndpointReady {
     }
 }
 
+Write-StreamStartupStage 'csc-select-start'
 $cscCommand = Get-Command csc -ErrorAction SilentlyContinue
 $cscPath = $null
 if ($null -ne $cscCommand) {
@@ -99,6 +116,7 @@ if ([string]::IsNullOrWhiteSpace($cscPath)) {
 if ([string]::IsNullOrWhiteSpace($cscPath)) {
     throw "csc.exe not found."
 }
+Write-StreamStartupStage 'csc-select-done'
 
 if (!$hasExplicitExecutablePath -and (Get-Process "TURZX.SideScreen.Stream*" -ErrorAction SilentlyContinue)) {
     $exePath = Join-Path $outDir ("TURZX.SideScreen.Stream.{0}.exe" -f $PID)
@@ -111,13 +129,16 @@ $sources = @(
     (Join-Path $scriptDir "TURZX.SideScreen.Stream.cs")
 )
 
+Write-StreamStartupStage 'csc-compile-start'
 & $cscPath /nologo /codepage:65001 /utf8output /target:exe /out:$exePath /r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Net.Http.dll /r:System.Runtime.Serialization.dll $sources
+Write-StreamStartupStage 'csc-compile-done'
 if ($LASTEXITCODE -ne 0) {
     throw "csc failed with exit code $LASTEXITCODE"
 }
 
 $agentProcess = $null
 if (!$Sample -and !$DryRun) {
+    Write-StreamStartupStage 'metrics-ready-maintenance-start'
     try {
         if (-not (Test-MetricsEndpointReady)) {
             $maintenance = Invoke-TurzxMetricsAgentMaintenance -SideRoot $scriptDir -PythonPath $PythonPath
@@ -126,6 +147,7 @@ if (!$Sample -and !$DryRun) {
         }
     }
     catch { Write-Warning ("metrics startup deferred; stream may use cached data: {0}" -f $_.Exception.Message) }
+    Write-StreamStartupStage 'metrics-ready-maintenance-done'
 }
 
 try {
@@ -135,6 +157,7 @@ try {
     if ($HybridRefresh) { $argsList += "--hybrid-refresh" }
     if ($Diff) { $argsList += "--diff" }
     if ($AllowUnverifiedDifferentialProtocol) { $argsList += "--allow-unverified-diff" }
+    Write-StreamStartupStage 'stream-execute-start'
     & $exePath @argsList
     if ($LASTEXITCODE -ne 0) {
         throw "stream failed with exit code $LASTEXITCODE"
