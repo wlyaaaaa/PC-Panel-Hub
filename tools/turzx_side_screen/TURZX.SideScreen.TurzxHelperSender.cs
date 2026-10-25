@@ -75,6 +75,12 @@ namespace TURZX.SideScreen
 
         public static byte[] ConvertBitmapToFrameData(string root, Bitmap bitmap)
         {
+            return ConvertBitmapToFrameData(root, bitmap, null);
+        }
+
+        private static byte[] ConvertBitmapToFrameData(string root, Bitmap bitmap, Action<string> stage)
+        {
+            if (stage != null) stage("validation");
             if (string.IsNullOrWhiteSpace(root))
             {
                 throw new ArgumentException("Root is required.", "root");
@@ -90,8 +96,10 @@ namespace TURZX.SideScreen
                 throw new InvalidOperationException("Bitmap must be 480x1920; got " + bitmap.Width + "x" + bitmap.Height);
             }
 
-            Assembly asm = LoadTurzxAssembly(root);
+            Assembly asm = LoadTurzxAssembly(root, stage);
+            if (stage != null) stage("type-resolve");
             Type frameType = asm.GetType("\u8DB5", true);
+            if (stage != null) stage("method-resolve");
             MethodInfo convert = frameType.GetMethods(BindingFlags.Public | BindingFlags.Static)
                 .First(m =>
                 {
@@ -103,7 +111,10 @@ namespace TURZX.SideScreen
                         p[2].ParameterType == typeof(int);
                 });
 
-            return (byte[])convert.Invoke(null, new object[] { bitmap, 4, Width });
+            if (stage != null) stage("vendor-convert");
+            byte[] frameData = (byte[])convert.Invoke(null, new object[] { bitmap, 4, Width });
+            if (stage != null) stage("complete");
+            return frameData;
         }
 
         public static bool SendPng(string root, string comPort, string pngPath, string devCode, int timeoutMs, out string message)
@@ -264,6 +275,7 @@ namespace TURZX.SideScreen
             private bool _disposed;
             private volatile bool _abandoned;
             private volatile SendProgress _sendProgress;
+            private volatile SendProgress _conversionProgress;
 
             [DllImport("kernel32.dll", EntryPoint = "GetThreadTimes", SetLastError = true)]
             private static extern bool Win32GetThreadTimes(IntPtr thread, out long created, out long exited, out long kernel, out long user);
@@ -320,7 +332,16 @@ namespace TURZX.SideScreen
 
             private void SetSendPhase(string phase)
             {
-                SendProgress previous = _sendProgress;
+                _sendProgress = AdvanceProgress(_sendProgress, phase);
+            }
+
+            private void SetConversionPhase(string phase)
+            {
+                _conversionProgress = AdvanceProgress(_conversionProgress, phase);
+            }
+
+            private static SendProgress AdvanceProgress(SendProgress previous, string phase)
+            {
                 DateTime completedUtc = DateTime.UtcNow;
                 string completed = previous == null ? "" : previous.CompletedStages +
                     previous.Phase + "=" + PhaseElapsedMilliseconds(previous) + "ms(cpuMs=" + PhaseCpuMilliseconds(previous) +
@@ -328,12 +349,23 @@ namespace TURZX.SideScreen
                     ",nativeTid=" + previous.NativeThreadId + "),";
                 // Publish phase and its monotonic start together so the timeout
                 // thread can report the blocked step without touching the COM object.
-                _sendProgress = new SendProgress(phase, completed);
+                return new SendProgress(phase, completed);
             }
 
             private string DescribeSendProgress()
             {
-                SendProgress progress = _sendProgress;
+                return DescribeProgress(_sendProgress);
+            }
+
+            public string DescribeLastConversionProgress()
+            {
+                // A complete chain records return boundaries, not a pause cause.
+                // Reading it neither advances conversion nor touches send state.
+                return DescribeProgress(_conversionProgress);
+            }
+
+            private static string DescribeProgress(SendProgress progress)
+            {
                 DateTime readUtc = DateTime.UtcNow;
                 return progress == null ? "phase=unknown snapshotReadUtc=" + readUtc.ToString("o") : "phase=" + progress.Phase +
                     " phaseElapsedMs=" + PhaseElapsedMilliseconds(progress) +
@@ -424,7 +456,8 @@ namespace TURZX.SideScreen
             public byte[] Convert(Bitmap bitmap)
             {
                 ThrowIfDisposed();
-                return ConvertBitmapToFrameData(_root, bitmap);
+                _conversionProgress = null;
+                return ConvertBitmapToFrameData(_root, bitmap, SetConversionPhase);
             }
 
             public void SendFull(byte[] frameData)
@@ -702,12 +735,15 @@ namespace TURZX.SideScreen
             }
         }
 
-        private static Assembly LoadTurzxAssembly(string root)
+        private static Assembly LoadTurzxAssembly(string root, Action<string> stage = null)
         {
+            if (stage != null) stage("assembly-resolve-setup");
             EnsureAssemblyResolve(root);
+            if (stage != null) stage("assembly-locate");
             string patched = System.IO.Path.Combine(root, "TURZX.weatherfix.metrics.exe");
             string original = System.IO.Path.Combine(root, "TURZX.exe");
             string assemblyPath = System.IO.File.Exists(patched) ? patched : original;
+            if (stage != null) stage("assembly-load");
             return Assembly.LoadFrom(assemblyPath);
         }
 

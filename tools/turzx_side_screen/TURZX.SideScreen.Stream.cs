@@ -196,7 +196,8 @@ namespace TURZX.SideScreen
                                             ", convertReturnUtc=" + convertReturnedUtc.ToString("o") +
                                             ", boundedCallStartUtc=" + boundedStartedUtc.ToString("o") +
                                             ", boundedCallReturnUtc=" + boundedReturnedUtc.ToString("o") +
-                                            ", diagnostic={" + diffMessage + "}"
+                                            ", diagnostic={" + diffMessage + "}" +
+                                            ", conversionDiagnostic={" + diffSession.DescribeLastConversionProgress() + "}"
                                         : "";
                                     Console.WriteLine("frame " + frame + " DIFF sent in " + sendWatch.ElapsedMilliseconds + "ms: seq=" + sequence + ", result=" + result + slowDetails);
                                 }
