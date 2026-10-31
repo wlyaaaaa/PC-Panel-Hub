@@ -207,6 +207,7 @@ public static class TestStreamCadenceProgram
         Equal("the production command 204 timeout is valid", true,
             SideScreenStreamApp.IsDifferentialSendTimeoutMillisecondsValidForTest(900));
         VerifyBoundedDifferentialSendTimeout();
+        VerifyFullSenderDiagnostics();
         Equal("preview worker accepts the first diagnostic write", true,
             SideScreenStreamApp.TryReservePreviewWorkerForTest());
         Equal("preview worker drops overlapping diagnostic writes", false,
@@ -375,6 +376,74 @@ public static class TestStreamCadenceProgram
             {
                 throw;
             }
+        }
+    }
+
+    public sealed class FakeFullWriter
+    {
+        public string Failure, Calls = "";
+        private int frames;
+        public void Prime() { Visit("prime"); }
+        public void Brightness(byte value) { Visit("brightness"); }
+        public void Full(byte[] data, int length, bool flag) { Visit("full" + (++frames)); }
+        private void Visit(string step)
+        {
+            Calls += step + ",";
+            if (step == Failure)
+                throw new System.IO.IOException("Device Error",
+                    new System.ComponentModel.Win32Exception(31, "driver-fault") { Source = "SyntheticDriver" }) { Source = "VendorShim" };
+        }
+    }
+
+    private static void VerifyFullSenderDiagnostics()
+    {
+        Type sessionType = typeof(TurzxHelperSender.DiffSession);
+        var flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+        string[] failures = { "prime", "brightness", "full2", "" };
+        string[] phases = { "full-prime", "full-brightness", "full-frame-2", "full-complete" };
+        for (int index = 0; index < failures.Length; index++)
+        {
+            var session = (TurzxHelperSender.DiffSession)System.Runtime.Serialization.FormatterServices.GetUninitializedObject(sessionType);
+            var writer = new FakeFullWriter { Failure = failures[index] };
+            foreach (string field in new[] { "_driver", "_serial" }) sessionType.GetField(field, flags).SetValue(session, writer);
+            foreach (string pair in new[] { "_prime:Prime", "_setBrightness:Brightness", "_sendFull:Full" })
+            {
+                string[] names = pair.Split(':');
+                sessionType.GetField(names[0], flags).SetValue(session, typeof(FakeFullWriter).GetMethod(names[1]));
+            }
+            string message;
+            Equal("injected full write verdict " + index, index == 3,
+                session.SendFullWithTimeout(new byte[4], 2000, 2, 7, true, 40, out message));
+            Contains("full write identifies actual step " + index, "phase=" + phases[index] + " ", message);
+            if (index == 3)
+                Equal("full baseline write order and duplicate count remain intact", "prime,brightness,full1,full2,", writer.Calls);
+            else
+            {
+                StartsWith("existing full error prefix remains recognizable", "FULL EXCEPTION - IOException: Device Error;", message);
+                Contains("external exception source survives reflection", "Source=VendorShim", message);
+                Contains("nested exception type is retained", "type=System.ComponentModel.Win32Exception", message);
+                Contains("actual native error code is retained", "NativeErrorCode=31", message);
+                Contains("IOException HRESULT remains separately labelled", "HResult=0x" + new System.IO.IOException().HResult.ToString("X8"), message);
+            }
+        }
+        var bounded = sessionType.GetMethod("RunBoundedSend", flags);
+        for (int variant = 0; variant < 3; variant++)
+        {
+            Exception failure = new System.IO.IOException("ordinary-io");
+            if (variant > 0)
+                for (int depth = 0; depth < 12; depth++)
+                    failure = new Exception(variant == 1 ? "layer" + depth : new string('x', 2000), failure) { Source = new string('s', variant == 1 ? 8 : 900) };
+            Exception captured = failure;
+            object[] args = { new Action(delegate() { throw captured; }), 2000, "DIFF", null };
+            Equal("diagnostic errors preserve failed verdict", false,
+                bounded.Invoke(System.Runtime.Serialization.FormatterServices.GetUninitializedObject(sessionType), args));
+            string message = (string)args[3];
+            if (variant == 0) Equal("ordinary IOException does not invent native code", false, message.Contains("NativeErrorCode="));
+            else Contains("oversized exception information reports truncation", "[truncated", message);
+            if (variant == 1) Contains("deep chain reports depth limit", "[truncated: exception depth]", message);
+            int end = message.IndexOf("; boundedStartUtc=", StringComparison.Ordinal);
+            Equal("exception context stays within its total limit", true, end > 0 && end <= "DIFF EXCEPTION - ".Length + 4096);
+            Equal("exception output never adds a stack trace", false, message.Contains(" at TestStreamCadenceProgram"));
         }
     }
 

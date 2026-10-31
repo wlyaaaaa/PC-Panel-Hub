@@ -486,6 +486,7 @@ namespace TURZX.SideScreen
                 {
                     if (primeBaseline)
                     {
+                        SetSendPhase("full-baseline-check");
                         if (_prime == null)
                         {
                             throw new MissingMethodException(_serial.GetType().FullName, "\u8E62()");
@@ -498,24 +499,32 @@ namespace TURZX.SideScreen
                         // Match the vendor's 8.8-inch baseline lifecycle: raw
                         // 0x2C priming, brightness restore, then duplicate full
                         // command-200 frames before starting command 204.
+                        SetSendPhase("full-prime");
                         _prime.Invoke(_serial, null);
+                        SetSendPhase("full-prime-settle");
                         Thread.Sleep(10);
+                        SetSendPhase("full-brightness");
                         _setBrightness.Invoke(_driver, new object[] { brightness });
+                        SetSendPhase("full-brightness-settle");
                         Thread.Sleep(100);
                     }
 
                     for (int repeat = 0; repeat < repeatCount; repeat++)
                     {
+                        SetSendPhase("full-frame-" + (repeat + 1));
                         _sendFull.Invoke(_driver, new object[] { frameData, frameData.Length, false });
                         if (repeat + 1 < repeatCount && repeatDelayMs > 0)
                         {
+                            SetSendPhase("full-repeat-delay");
                             Thread.Sleep(repeatDelayMs);
                         }
                     }
                     if (primeBaseline)
                     {
+                        SetSendPhase("full-baseline-settle");
                         Thread.Sleep(10);
                     }
+                    SetSendPhase("full-complete");
                 }, timeoutMs, "FULL", out message);
             }
 
@@ -645,10 +654,7 @@ namespace TURZX.SideScreen
 
                 if (workerError != null)
                 {
-                    Exception detail = workerError is TargetInvocationException && workerError.InnerException != null
-                        ? workerError.InnerException
-                        : workerError;
-                    message = operation + " EXCEPTION - " + detail.GetType().Name + ": " + detail.Message +
+                    message = operation + " EXCEPTION - " + DescribeWorkerError(workerError) +
                         "; " + timing + "; " + progress;
                     return false;
                 }
@@ -658,6 +664,35 @@ namespace TURZX.SideScreen
                 // actual boundaries rather than treating elapsed time as cause.
                 message = operation + " OK; " + timing + "; " + progress;
                 return true;
+            }
+
+            private static string ErrorField(string value, int limit)
+            {
+                if (value == null) return "null";
+                bool truncated = value.Length > limit;
+                return value.Substring(0, Math.Min(value.Length, limit)).Replace('\r', ' ').Replace('\n', ' ') +
+                    (truncated ? "[truncated]" : "");
+            }
+
+            private static string DescribeWorkerError(Exception error)
+            {
+                Exception detail = error is TargetInvocationException && error.InnerException != null ? error.InnerException : error;
+                var text = new System.Text.StringBuilder(detail.GetType().Name + ": " + ErrorField(detail.Message, 512) + "; exceptionChain=[");
+                int depth = 0;
+                for (; error != null && depth < 8; error = error.InnerException, depth++)
+                {
+                    if (depth > 0) text.Append(" -> ");
+                    text.Append("type=").Append(ErrorField(error.GetType().FullName, 256))
+                        .Append(" Source=").Append(ErrorField(error.Source, 256))
+                        .Append(" HResult=0x").Append(error.HResult.ToString("X8", System.Globalization.CultureInfo.InvariantCulture))
+                        .Append(" Message=").Append(ErrorField(error.Message, 512));
+                    var native = error as System.ComponentModel.Win32Exception;
+                    if (native != null) text.Append(" NativeErrorCode=").Append(native.NativeErrorCode);
+                }
+                if (error != null) text.Append(" -> [truncated: exception depth]");
+                text.Append(']');
+                const string marker = "[truncated: exception length]";
+                return text.Length <= 4096 ? text.ToString() : text.ToString(0, 4096 - marker.Length) + marker;
             }
 
             private int SendDiffCommand204(byte[] previousFrameData, byte[] currentFrameData, long sequence, bool swapOrder)
