@@ -27,7 +27,8 @@ It intentionally excludes:
 
 - `tools\**\out\`
 - logs and cache files
-- original TURZX vendor binaries
+- anything outside the [public repository boundary](architecture.md#public-repository-boundary);
+  the package copies only tracked files
 - all machine and launch JSON files; only the public-safe
   `tools\turzx_side_screen\config.example.json` is included
 - generated `out`, `bin`, `obj`, and `AppPackages` trees
