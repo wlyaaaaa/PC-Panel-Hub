@@ -432,45 +432,6 @@ internal sealed class CrystalCardWindow : IDisposable
         var visual = item.Request.Visual;
         var narrow = width < 900;
         var padding = narrow ? 30f : 40f;
-        var accent = ParseColor(
-            visual?.AccentHex,
-            Color.FromArgb(244, 112, 240, 178));
-
-        using var dot = new SolidBrush(accent);
-        graphics.FillEllipse(dot, padding, 27, 10, 10);
-        DrawText(
-            graphics,
-            visual?.Eyebrow ?? "验证码 / CODE",
-            new RectangleF(
-                padding + 22,
-                10,
-                width * 0.38f,
-                44),
-            narrow ? 20 : 23,
-            FontStyle.Bold,
-            Color.FromArgb(238, 122, 245, 184));
-
-        var source = string.Join(
-            " · ",
-            new[] { visual?.Subtitle, visual?.Meta }
-                .Where(value => !string.IsNullOrWhiteSpace(value)));
-        if (source.Length > 0)
-        {
-            DrawFittedText(
-                graphics,
-                source,
-                new RectangleF(
-                    width * 0.40f,
-                    10,
-                    width * 0.60f - padding,
-                    44),
-                narrow ? 20 : 22,
-                16,
-                FontStyle.Regular,
-                Color.FromArgb(220, 169, 238, 204),
-                StringAlignment.Far);
-        }
-
         var code = visual?.VerificationCode ?? item.Request.Title;
         var preferredSize = code.Length switch
         {
@@ -480,15 +441,14 @@ internal sealed class CrystalCardWindow : IDisposable
             7 => 100f,
             _ => 92f,
         };
-        var codeTop = narrow ? 48f : 50f;
         DrawFittedText(
             graphics,
             code,
             new RectangleF(
                 padding,
-                codeTop,
+                0,
                 width - padding * 2,
-                Math.Max(1, height - codeTop - 14)),
+                height),
             preferredSize,
             72f,
             FontStyle.Bold,

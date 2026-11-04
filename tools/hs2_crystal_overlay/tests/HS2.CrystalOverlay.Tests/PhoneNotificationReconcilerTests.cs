@@ -176,8 +176,9 @@ public sealed class PhoneNotificationReconcilerTests
         Assert.Equal("482731", first.Title);
         Assert.Null(first.Body);
         Assert.Equal("482731", first.Visual?.VerificationCode);
-        Assert.Equal("腾讯科技", first.Visual?.Subtitle);
-        Assert.Equal("手机桥", first.Visual?.Meta);
+        Assert.Null(first.Visual?.Eyebrow);
+        Assert.Null(first.Visual?.Subtitle);
+        Assert.Null(first.Visual?.Meta);
 
         var next = Assert.Single(reconciler.Reconcile(
             [
@@ -259,7 +260,7 @@ public sealed class PhoneNotificationReconcilerTests
     }
 
     [Fact]
-    public void VerificationCodeInTitleIsNotRepeatedInHeader()
+    public void VerificationCodeInTitleOnlyKeepsDigits()
     {
         var reconciler = new PhoneNotificationSnapshotReconciler(
             TimeSpan.FromMinutes(5));
@@ -277,12 +278,11 @@ public sealed class PhoneNotificationReconcilerTests
             Start + TimeSpan.FromSeconds(2)));
 
         Assert.Equal("123456", request.Visual?.VerificationCode);
-        Assert.Equal("手机桥", request.Visual?.Subtitle);
+        Assert.Equal("123456", request.Title);
+        Assert.Null(request.Body);
+        Assert.Null(request.Visual?.Eyebrow);
+        Assert.Null(request.Visual?.Subtitle);
         Assert.Null(request.Visual?.Meta);
-        Assert.DoesNotContain(
-            "123456",
-            request.Visual?.Subtitle ?? string.Empty,
-            StringComparison.Ordinal);
     }
 
     [Fact]

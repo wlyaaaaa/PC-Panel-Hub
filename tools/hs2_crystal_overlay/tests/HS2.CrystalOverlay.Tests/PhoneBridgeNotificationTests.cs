@@ -82,11 +82,31 @@ public sealed class PhoneBridgeNotificationTests
                 await Send(writer, "explicit", "验证码 123456", "654321");
                 await Until(() => Notifications().Length == 2);
                 Assert.Equal("654321", Notifications()[1].Visual?.VerificationCode);
+                Assert.Equal("654321", Notifications()[1].Title);
+                Assert.Null(Notifications()[1].Body);
+                Assert.Null(Notifications()[1].Visual?.Eyebrow);
+                Assert.Null(Notifications()[1].Visual?.Subtitle);
+                Assert.Null(Notifications()[1].Visual?.Meta);
                 await Send(writer, "fallback", "验证码 443322");
                 await Until(() => Notifications().Length == 3);
                 Assert.Equal("443322", Notifications()[2].Visual?.VerificationCode);
                 await Send(writer, "live", "实时内容");
                 await Until(() => Notifications().Length == 4);
+                await writer.WriteLineAsync(JsonSerializer.Serialize(new
+                {
+                    v = 1, kind = "notification", id = "synthetic-low-battery",
+                    package = "phone.bridge.battery", app = "手机互联",
+                    title = "手机电量低", text = "手机电量剩余 15%，请充电。",
+                    posted_at = DateTimeOffset.Now,
+                }));
+                await Until(() => Notifications().Length == 5);
+                var lowBattery = Notifications()[4];
+                Assert.Equal(OverlayKind.PhoneNotification, lowBattery.Kind);
+                Assert.Equal("手机电量剩余 15%，请充电。", lowBattery.Body);
+                Assert.Equal("手机互联", lowBattery.Visual?.Subtitle);
+                scheduler.Publish(events.First(e => e.Kind == OverlayKind.PhoneConnection && !e.IsActive), now);
+                scheduler.Publish(lowBattery, now);
+                Assert.Equal(lowBattery, Assert.Single(scheduler.GetFrame(now).NotificationCards).Request);
             }
             await Until(() => events.Count(e => e.Kind == OverlayKind.PhoneConnection && e.IsActive) == 2);
             using (var server = Server())
@@ -97,8 +117,8 @@ public sealed class PhoneBridgeNotificationTests
                 await Send(writer, "replay", "断开后重放不重复");
                 await writer.WriteLineAsync("{\"v\":1,\"kind\":\"hello\",\"status\":\"connected\"}");
                 await Send(writer, "reconnected-live", "重新连接后实时内容");
-                await Until(() => Notifications().Length == 5);
-                Assert.Equal("重新连接后实时内容", Notifications()[4].Body);
+                await Until(() => Notifications().Length == 6);
+                Assert.Equal("重新连接后实时内容", Notifications()[5].Body);
                 Assert.Equal(2, events.Count(e => e.Kind == OverlayKind.PhoneConnection && !e.IsActive));
             }
         }

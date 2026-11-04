@@ -295,8 +295,6 @@ public sealed class PhoneNotificationSnapshotReconciler
                     "Verification notification did not contain a code.");
             }
 
-            var codeIsInTitle = ContainsCode(item.Title, code);
-
             return OverlayRequest.Timed(
                 VerificationCodeEventId,
                 OverlayKind.PhoneVerificationCode,
@@ -305,11 +303,6 @@ public sealed class PhoneNotificationSnapshotReconciler
                 body: null,
                 dedupKey: $"verification-code:{code}",
                 visual: new OverlayVisualData(
-                    Eyebrow: "验证码 / CODE",
-                    Subtitle: codeIsInTitle
-                        ? item.AppName
-                        : item.Title,
-                    Meta: codeIsInTitle ? null : item.AppName,
                     AccentHex: "#70F0B2",
                     VerificationCode: code));
         }
@@ -335,12 +328,6 @@ public sealed class PhoneNotificationSnapshotReconciler
 
     private const string VerificationCodeEventId =
         "phone-verification-code";
-
-    private static bool ContainsCode(string value, string code) =>
-        string.Concat(value
-                .Normalize(NormalizationForm.FormKC)
-                .Where(char.IsAsciiDigit))
-            .Contains(code, StringComparison.Ordinal);
 
     private static string TimedEventId(uint id) =>
         $"phone-notification:{id}";
