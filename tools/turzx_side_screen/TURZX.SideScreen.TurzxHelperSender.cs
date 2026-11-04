@@ -276,6 +276,14 @@ namespace TURZX.SideScreen
             private volatile bool _abandoned;
             private volatile SendProgress _sendProgress;
             private volatile SendProgress _conversionProgress;
+            private Action<string> _sendPhaseDiagnostic = null;
+            private CalculationBoundary _diffCalculationBoundary;
+
+            private sealed class CalculationBoundary
+            {
+                public long EnteredTicks;
+                public long ReturnedTicks;
+            }
 
             [DllImport("kernel32.dll", EntryPoint = "GetThreadTimes", SetLastError = true)]
             private static extern bool Win32GetThreadTimes(IntPtr thread, out long created, out long exited, out long kernel, out long user);
@@ -332,6 +340,8 @@ namespace TURZX.SideScreen
 
             private void SetSendPhase(string phase)
             {
+                Action<string> diagnostic = _sendPhaseDiagnostic;
+                if (diagnostic != null) diagnostic(phase);
                 _sendProgress = AdvanceProgress(_sendProgress, phase);
             }
 
@@ -354,7 +364,16 @@ namespace TURZX.SideScreen
 
             private string DescribeSendProgress()
             {
-                return DescribeProgress(_sendProgress);
+                CalculationBoundary calculation = Interlocked.CompareExchange(ref _diffCalculationBoundary, null, null);
+                long returned = calculation == null ? 0 : Interlocked.Read(ref calculation.ReturnedTicks);
+                long entered = calculation == null ? 0 : Interlocked.Read(ref calculation.EnteredTicks);
+                long read = Stopwatch.GetTimestamp();
+                return DescribeProgress(_sendProgress) +
+                    " diffCalculationEntered=" + (entered != 0) +
+                    " diffCalculationReturnObserved=" + (returned != 0) +
+                    " diffCalculationEnteredTicks=" + entered +
+                    " diffCalculationReturnedTicks=" + returned +
+                    " diffCalculationReadTicks=" + read;
             }
 
             public string DescribeLastConversionProgress()
@@ -587,6 +606,7 @@ namespace TURZX.SideScreen
                 // Until the worker publishes its own samples, its phase and
                 // native identity are unknown; never substitute the caller's.
                 _sendProgress = null;
+                Interlocked.Exchange(ref _diffCalculationBoundary, new CalculationBoundary());
                 Exception workerError = null;
                 Thread worker = null;
                 try
@@ -699,9 +719,12 @@ namespace TURZX.SideScreen
             {
                 byte[] from = swapOrder ? currentFrameData : previousFrameData;
                 byte[] to = swapOrder ? previousFrameData : currentFrameData;
+                CalculationBoundary calculation = Interlocked.CompareExchange(ref _diffCalculationBoundary, null, null);
                 SetSendPhase("diff-calculate");
                 int bodyLength;
+                if (calculation != null) Interlocked.Exchange(ref calculation.EnteredTicks, Stopwatch.GetTimestamp());
                 byte[] payload = BuildDifferentialPayload(from, to, out bodyLength);
+                if (calculation != null) Interlocked.Exchange(ref calculation.ReturnedTicks, Stopwatch.GetTimestamp());
                 SetSendPhase("diff-payload-prepare");
                 if (payload == null)
                 {
