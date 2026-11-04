@@ -11,13 +11,11 @@ public sealed class PhoneBatteryTests
     public void DisconnectedOrStaleReading_HidesBattery()
     {
         var stale = new PhoneBatteryReading(
-            PhoneBatteryProvider.AndroidAdb,
             97,
             true,
             true,
             Now - TimeSpan.FromMinutes(2));
         var disconnected = new PhoneBatteryReading(
-            PhoneBatteryProvider.AndroidAdb,
             93,
             false,
             false,

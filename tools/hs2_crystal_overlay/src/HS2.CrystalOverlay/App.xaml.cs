@@ -12,7 +12,6 @@ public partial class App : Application
 
     private MainWindow? window;
     private OverlayController? controller;
-    private PhoneBatterySourceCoordinator? phoneBattery;
     private MediaSessionSource? media;
     private GlanceSourceCoordinator? glance;
     private SteamGameSourceCoordinator? steamGames;
@@ -64,9 +63,6 @@ public partial class App : Application
             window.DispatcherQueue,
             controller.ClearDismissible,
             glance.Toggle);
-        phoneBattery = new PhoneBatterySourceCoordinator(
-            controller,
-            AndroidAdbBatteryProbe.FromUserEnvironment());
         media = new MediaSessionSource(controller);
         steamGames = new SteamGameSourceCoordinator(controller);
         audioDevices = new AudioDeviceSourceCoordinator(controller);
@@ -93,7 +89,6 @@ public partial class App : Application
         audioDevices?.Dispose();
         steamGames?.Dispose();
         media?.Dispose();
-        phoneBattery?.Dispose();
         glance?.Dispose();
         controller?.Dispose();
     }

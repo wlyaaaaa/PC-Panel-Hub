@@ -23,7 +23,6 @@ public enum OverlaySource
     NetEase,
     Steam,
     PhoneBridge,
-    AndroidAdb,
 }
 
 public enum OverlayVisualTier

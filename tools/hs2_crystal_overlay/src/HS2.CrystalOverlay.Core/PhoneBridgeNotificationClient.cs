@@ -20,6 +20,7 @@ public sealed class PhoneBridgeNotificationClient(
         new(StringComparer.Ordinal);
     private uint nextId;
     private bool? connected;
+    private PhoneBatteryReading? battery;
 
     public async Task RunAsync(CancellationToken cancellationToken)
     {
@@ -58,10 +59,12 @@ public sealed class PhoneBridgeNotificationClient(
                             helloReceived = true;
                             failures = 0;
                             SetConnected(message.Status == "connected");
+                            AcceptBattery(message.Battery);
                         }
                         else if (helloReceived && message?.Kind == "status")
                         {
                             SetConnected(message.Status == "connected");
+                            AcceptBattery(message.Battery);
                         }
                         else if (helloReceived && message?.Kind == "notification")
                         {
@@ -82,6 +85,7 @@ public sealed class PhoneBridgeNotificationClient(
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+        finally { ClearBattery(); }
     }
 
     private static BridgeMessage? Parse(string line)
@@ -111,6 +115,8 @@ public sealed class PhoneBridgeNotificationClient(
     private void Expire()
     {
         var now = DateTimeOffset.UtcNow;
+        if (battery is not null && PhoneBatterySelection.Select(
+                battery, now, TimeSpan.FromSeconds(15)) is null) ClearBattery();
         var stale = recent.Where(pair => pair.Value.CreationTime < now - Retention)
             .Select(pair => pair.Key).ToArray();
         foreach (var id in stale) recent.Remove(id);
@@ -125,6 +131,7 @@ public sealed class PhoneBridgeNotificationClient(
 
     private void SetConnected(bool value)
     {
+        if (!value) ClearBattery();
         if (connected == value) return;
         connected = value;
         publish(value
@@ -133,7 +140,41 @@ public sealed class PhoneBridgeNotificationClient(
                 OverlaySource.PhoneBridge, "手机桥未连接"));
     }
 
+    private void AcceptBattery(JsonElement value)
+    {
+        PhoneBatteryReading? reading = null;
+        if (connected == true && value.ValueKind == JsonValueKind.Object &&
+            value.TryGetProperty("level", out var level) && level.ValueKind == JsonValueKind.Number &&
+            level.TryGetInt32(out var percentage) &&
+            value.TryGetProperty("charging", out var charging) &&
+            charging.ValueKind is JsonValueKind.True or JsonValueKind.False &&
+            value.TryGetProperty("read_at", out var readAt) &&
+            readAt.ValueKind == JsonValueKind.String && readAt.GetString() is { } timestamp &&
+            (timestamp.EndsWith('Z') || timestamp.Length >= 6 &&
+                (timestamp[^6] is '+' or '-') && timestamp[^3] == ':') &&
+            readAt.TryGetDateTimeOffset(out var observedAt))
+        {
+            reading = PhoneBatterySelection.Select(
+                new PhoneBatteryReading(percentage, charging.GetBoolean(), true, observedAt),
+                DateTimeOffset.UtcNow, TimeSpan.FromSeconds(15));
+        }
+        if (reading is null) { ClearBattery(); return; }
+        var changed = battery?.Percentage != reading.Percentage || battery?.IsCharging != reading.IsCharging;
+        battery = reading;
+        if (changed) publish(OverlayRequest.Active(
+            "phone-battery", OverlayKind.PhoneBattery, OverlaySource.PhoneBridge,
+            $"{reading.Percentage}%", visual: new OverlayVisualData(IsCharging: reading.IsCharging)));
+    }
+
+    private void ClearBattery()
+    {
+        if (battery is null) return;
+        battery = null;
+        publish(OverlayRequest.End("phone-battery", OverlayKind.PhoneBattery, OverlaySource.PhoneBridge));
+    }
+
     private sealed record BridgeMessage(
         int V, string? Kind, string? Status, string? Id, string? Package,
-        string? App, string? Title, string? Text, string? Code, DateTimeOffset PostedAt);
+        string? App, string? Title, string? Text, string? Code, DateTimeOffset PostedAt,
+        JsonElement Battery);
 }

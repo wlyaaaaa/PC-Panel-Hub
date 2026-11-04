@@ -1,18 +1,10 @@
 namespace HS2.CrystalOverlay.Core;
 
-public enum PhoneBatteryProvider
-{
-    AndroidAdb,
-}
-
 public sealed record PhoneBatteryReading(
-    PhoneBatteryProvider Provider,
     int Percentage,
     bool? IsCharging,
     bool IsConnected,
-    DateTimeOffset ObservedAt,
-    string? Evidence = null,
-    DateTimeOffset? ConfirmedAt = null);
+    DateTimeOffset ObservedAt);
 
 public static class PhoneBatterySelection
 {
@@ -34,8 +26,7 @@ public static class PhoneBatterySelection
             return false;
         }
 
-        var freshnessAt = reading.ConfirmedAt ?? reading.ObservedAt;
-        var age = now - freshnessAt;
+        var age = now - reading.ObservedAt;
         return age >= TimeSpan.FromSeconds(-5) && age <= maximumAge;
     }
 }

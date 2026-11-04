@@ -1132,7 +1132,6 @@ internal sealed class CrystalCardWindow : IDisposable
         OverlaySource.NetEase => "网易云音乐",
         OverlaySource.Steam => "STEAM",
         OverlaySource.PhoneBridge => "手机桥",
-        OverlaySource.AndroidAdb => "Android ADB",
         _ => "WINDOWS",
     };
 
