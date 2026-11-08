@@ -884,6 +884,104 @@ function Save-HS2UsbTopologyBinding {
     }
 }
 
+function Initialize-HS2DeviceNativeMethods {
+    if (-not ('TURZX.SideScreen.HS2DeviceNativeMethods' -as [type])) {
+        Add-Type -TypeDefinition @"
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Text;
+namespace TURZX.SideScreen {
+    public sealed class HS2NativeDevice {
+        public string InstanceId, ParentInstanceId, Status, LocationInfo;
+        public int ProblemCode;
+        public bool Present;
+    }
+    public static class HS2DeviceNativeMethods {
+        [StructLayout(LayoutKind.Sequential)] struct DeviceInfo {
+            public int Size; public Guid ClassGuid; public uint DevInst; public IntPtr Reserved;
+        }
+        [DllImport("setupapi.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+        static extern IntPtr SetupDiGetClassDevs(IntPtr c,string e,IntPtr w,uint f);
+        [DllImport("setupapi.dll", SetLastError=true)]
+        static extern bool SetupDiEnumDeviceInfo(IntPtr s,uint i,ref DeviceInfo d);
+        [DllImport("setupapi.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+        static extern bool SetupDiGetDeviceInstanceId(IntPtr s,ref DeviceInfo d,StringBuilder b,int n,out int r);
+        [DllImport("setupapi.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+        static extern bool SetupDiGetDeviceRegistryProperty(IntPtr s,ref DeviceInfo d,uint p,out uint t,byte[] b,uint n,out uint r);
+        [DllImport("setupapi.dll")] static extern bool SetupDiDestroyDeviceInfoList(IntPtr s);
+        [DllImport("cfgmgr32.dll")] static extern int CM_Get_DevNode_Status(out uint st,out uint p,uint d,uint f);
+        [DllImport("cfgmgr32.dll")] static extern int CM_Get_Parent(out uint p,uint d,uint f);
+        [DllImport("cfgmgr32.dll", CharSet=CharSet.Unicode)]
+        static extern int CM_Get_Device_ID(uint d,StringBuilder id,int n,uint f);
+        static bool Match(string id,string[] patterns) {
+            foreach(var p in patterns) {
+                if(id.StartsWith(p.TrimEnd('*'),StringComparison.OrdinalIgnoreCase)) return true;
+            }
+            return false;
+        }
+        static string Location(IntPtr set,ref DeviceInfo d) {
+            uint t,r; var bytes=new byte[1024];
+            if(!SetupDiGetDeviceRegistryProperty(set,ref d,13,out t,bytes,(uint)bytes.Length,out r)) {
+                int error=Marshal.GetLastWin32Error();
+                if(error==13) return ""; // Property absent: same as null cast to string in the PnP path.
+                if(error!=122) throw new Win32Exception(error);
+                bytes=new byte[r];
+                if(!SetupDiGetDeviceRegistryProperty(set,ref d,13,out t,bytes,(uint)bytes.Length,out r))
+                    throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+            return Encoding.Unicode.GetString(bytes,0,(int)r).TrimEnd('\0');
+        }
+        public static HS2NativeDevice[] GetPresentDevices(string[] patterns) {
+            // DIGCF_PRESENT | DIGCF_ALLCLASSES: no historical phantom devnodes.
+            var set=SetupDiGetClassDevs(IntPtr.Zero,null,IntPtr.Zero,6);
+            if(set==IntPtr.Zero || set.ToInt64()==-1) throw new Win32Exception(Marshal.GetLastWin32Error());
+            var list=new List<HS2NativeDevice>();
+            try {
+                for(uint i=0;;i++) {
+                    var d=new DeviceInfo { Size=Marshal.SizeOf(typeof(DeviceInfo)) };
+                    if(!SetupDiEnumDeviceInfo(set,i,ref d)) {
+                        int error=Marshal.GetLastWin32Error();
+                        if(error==259) break;
+                        throw new Win32Exception(error);
+                    }
+                    var id=new StringBuilder(512); int required;
+                    if(!SetupDiGetDeviceInstanceId(set,ref d,id,id.Capacity,out required))
+                        throw new Win32Exception(Marshal.GetLastWin32Error());
+                    if(!Match(id.ToString(),patterns)) continue;
+                    uint status,problem,parent;
+                    if(CM_Get_DevNode_Status(out status,out problem,d.DevInst,0)!=0 ||
+                        problem!=0 || (status & 0x400)!=0 || (status & 0x8)==0)
+                        throw new InvalidOperationException("Use PnP for unavailable or problem-device status.");
+                    var parentId=new StringBuilder(512);
+                    if(CM_Get_Parent(out parent,d.DevInst,0)!=0 ||
+                        CM_Get_Device_ID(parent,parentId,parentId.Capacity,0)!=0)
+                        throw new InvalidOperationException("Device parent unavailable.");
+                    list.Add(new HS2NativeDevice {
+                        InstanceId=id.ToString(), ParentInstanceId=parentId.ToString(),
+                        ProblemCode=0, Present=true, Status="OK", LocationInfo=Location(set,ref d)
+                    });
+                }
+                return list.ToArray();
+            }
+            finally { SetupDiDestroyDeviceInfoList(set); }
+        }
+    }
+}
+"@
+    }
+    return ('TURZX.SideScreen.HS2DeviceNativeMethods' -as [type])
+}
+
+function Get-HS2NativePresentDevices {
+    param([Parameter(Mandatory = $true)][string[]]$InstancePatterns)
+    try {
+        $native = Initialize-HS2DeviceNativeMethods
+        return @($native::GetPresentDevices($InstancePatterns))
+    }
+    catch { return $null } # Preserve the original PnP path on any native failure.
+}
 function Get-HS2PnpPropertyValue {
     param(
         [Parameter(Mandatory = $true)][string]$InstanceId,
@@ -903,9 +1001,22 @@ function Get-HS2PnpPropertyValue {
 }
 
 function Get-HS2UsbRecoverySnapshot {
+    param([switch]$UsePnp)
     # Get-PnpDevice -PresentOnly can still return a historical disconnected
     # devnode.  Hardware recovery must use DEVPKEY_Device_IsPresent instead of
     # inferring physical presence from that cmdlet's result set.
+    $nativeDevices = if (-not $UsePnp) { Get-HS2NativePresentDevices -InstancePatterns @(
+        "USB\VID_1A86&PID_8091\*", "USB\VID_0416&PID_8051\*",
+        "USB\VID_1A86&PID_AD23&MI_00\*", "USB\VID_1A86&PID_AD23\*",
+        "USB\VID_1CBE&PID_A068\*", "USB\VID_A108&PID_EAEF\*",
+        "USB\VID_0000&PID_0002\*") }
+    if ($null -ne $nativeDevices) {
+        return [pscustomobject]@{
+            Hubs = @($nativeDevices | Where-Object { [string]$_.InstanceId -like "USB\VID_1A86&PID_8091\*" })
+            Children = @($nativeDevices | Where-Object { [string]$_.InstanceId -like "USB\VID_0000&PID_0002\*" })
+            Devices = @($nativeDevices)
+        }
+    }
     $candidateDevices = @(
         Get-PnpDevice -PresentOnly -ErrorAction Stop | Where-Object {
             [string]$_.InstanceId -like "USB\VID_1A86&PID_8091\*" -or

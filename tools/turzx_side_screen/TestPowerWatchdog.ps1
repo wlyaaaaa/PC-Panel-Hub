@@ -2199,6 +2199,32 @@ finally {
     Remove-Item Function:\Get-PnpDeviceProperty -Force
 }
 
+# Native failure must take the original PnP path; successful native mapping must preserve fields.
+& {
+    $expected = [pscustomobject]@{InstanceId='USB\VID_1A86&PID_8091\test';
+        ParentInstanceId='USB\parent';ProblemCode=0;Present=$true;Status='OK';LocationInfo='Port_#0002'}
+    function Initialize-HS2DeviceNativeMethods { throw 'synthetic native load failure' }
+    function Get-PnpDevice { [CmdletBinding()]param([switch]$PresentOnly) $expected }
+    function Get-PnpDeviceProperty {
+        [CmdletBinding()]param($InstanceId,$KeyName)
+        $map=@{'DEVPKEY_Device_Parent'='USB\parent';'DEVPKEY_Device_ProblemCode'=0;
+            'DEVPKEY_Device_IsPresent'=$true;'DEVPKEY_Device_LocationInfo'='Port_#0002'}
+        [pscustomobject]@{Data=$map[$KeyName]}
+    }
+    $fallback = Get-HS2UsbRecoverySnapshot
+    if (@($fallback.Devices).Count -ne 1) { throw 'Native failure did not fall back to PnP.' }
+    function Get-HS2NativePresentDevices { param($InstancePatterns) $expected }
+    function Get-PnpDevice { throw 'Successful native snapshot must not invoke PnP.' }
+    $mapped = Get-HS2UsbRecoverySnapshot
+    foreach ($field in @('InstanceId','ParentInstanceId','ProblemCode','Present','Status','LocationInfo')) {
+        if ([string]$fallback.Devices[0].$field -cne [string]$mapped.Devices[0].$field) {
+            throw "Native field mapping changed: $field"
+        }
+    }
+    if (@($mapped.Hubs).Count -ne 1 -or @($mapped.Children).Count -ne 0) {
+        throw 'Native snapshot changed hub/child grouping.'
+    }
+}
 $activeRecoveryText = Get-Content -Raw -LiteralPath $activeRecoveryPolicy
 if ($activeRecoveryText -notmatch [regex]::Escape('USB\VID_1A86&PID_AD23&MI_00\*')) {
     throw "HS2 USB recovery snapshots must retain the AD23 MI_00 display interface."
