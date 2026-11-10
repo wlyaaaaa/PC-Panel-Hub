@@ -208,6 +208,47 @@ function Get-HS2BoundDeviceCode10Decision {
     }
 }
 
+function Test-WallpaperEngineLayoutAligned {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Monitors,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Windows
+    )
+    if ($Monitors.Count -eq 0 -or $Monitors.Count -ne $Windows.Count) { return $false }
+    $remaining = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($window in $Windows) { $remaining.Add($window) }
+    foreach ($monitor in $Monitors) {
+        $matches = @($remaining | Where-Object {
+            [Math]::Abs([long]$_.Left - [long]$monitor.Left) -le 2 -and
+            [Math]::Abs([long]$_.Top - [long]$monitor.Top) -le 2 -and
+            [Math]::Abs([long]$_.Right - [long]$monitor.Right) -le 2 -and
+            [Math]::Abs([long]$_.Bottom - [long]$monitor.Bottom) -le 2
+        })
+        if ($matches.Count -ne 1) { return $false }
+        [void]$remaining.Remove($matches[0])
+    }
+    return $true
+}
+
+function Get-WallpaperEngineKeepAliveDecision {
+    param(
+        [int]$ProcessCount,
+        [double]$HungSeconds,
+        [double]$MismatchSeconds,
+        [int]$FaultyShutdown,
+        [double]$SecondsSinceRestart,
+        [bool]$EpisodeRestarted
+    )
+    if ($ProcessCount -gt 1) { return 'ambiguous' }
+    if ($ProcessCount -eq 0 -and $FaultyShutdown -ne 1) { return 'manual-exit' }
+    $reason = if ($ProcessCount -eq 0) { 'crashed' }
+        elseif ($HungSeconds -ge 60) { 'hung' }
+        elseif ($MismatchSeconds -ge 60) { 'mismatch' }
+        else { return 'healthy' }
+    if ($EpisodeRestarted) { return 'already-attempted' }
+    if ($SecondsSinceRestart -lt 900) { return 'cooldown' }
+    return $reason
+}
+
 function Get-WallpaperEngineTopologyFingerprint {
     param(
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Monitors

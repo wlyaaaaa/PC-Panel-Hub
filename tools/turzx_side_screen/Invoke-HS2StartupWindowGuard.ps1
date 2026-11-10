@@ -63,13 +63,21 @@ function Get-RunningWallpaperClient {
     }
     catch { return $null }
 }
+function Get-WallpaperDesktopShell {
+    $application = [Activator]::CreateInstance([Type]::GetTypeFromProgID('Shell.Application'))
+    $windows = $application.Windows()
+    [int]$desktopHandle = 0
+    $desktop = $windows.FindWindowSW(0, 0, 8, [ref]$desktopHandle, 1)
+    if ($null -eq $desktop) { throw 'Desktop Explorer shell unavailable.' }
+    return $desktop.Document.Application
+}
 function Resume-ExistingWallpaper {
     param([Parameter(Mandatory=$true)]$Client)
     # Only the running user's existing engine; never start a missing app, stop it,
     # change its selected content, or continuously override a manual pause.
     $shell = $null
     try {
-        $shell = [Activator]::CreateInstance([Type]::GetTypeFromProgID('Shell.Application'))
+        $shell = Get-WallpaperDesktopShell
         $shell.ShellExecute($Client.Path, '-control play', (Split-Path -Parent $Client.Path), 'open', 0)
         return 'play-dispatched'
     }
@@ -77,6 +85,37 @@ function Resume-ExistingWallpaper {
     finally {
         if ($null -ne $shell) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell) }
     }
+}
+
+function Restart-WallpaperEngine {
+    param([AllowNull()]$Client)
+    $shell = $null
+    try {
+        $session = [Diagnostics.Process]::GetCurrentProcess().SessionId
+        $targets = @(Get-Process -Name wallpaper32,wallpaper64 -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -eq $session })
+        if ($targets.Count -eq 0) {
+            if ((Get-ItemPropertyValue -LiteralPath 'HKCU:\Software\WallpaperEngine' -Name faultyShutdown) -ne 1) { return 'restart-manual-exit' }
+            $executable = Get-ItemPropertyValue -LiteralPath 'HKCU:\Software\WallpaperEngine' -Name installPath
+        }
+        elseif ($null -ne $Client) {
+            if ($targets.Count -ne 1 -or $targets[0].Id -ne $Client.Id -or
+                $targets[0].StartTime.ToUniversalTime().Ticks -ne $Client.StartTicks) { return 'restart-target-not-unique' }
+            $executable = $targets[0].Path
+        }
+        else { return 'restart-target-not-unique' }
+        if ([IO.Path]::GetFileName($executable) -ine 'wallpaper64.exe' -or -not (Test-Path -LiteralPath $executable -PathType Leaf)) { return 'restart-path-unavailable' }
+        $shell = Get-WallpaperDesktopShell
+        if ($targets.Count -eq 1) {
+            Stop-Process -InputObject $targets[0] -Force -ErrorAction Stop
+            if (-not $targets[0].WaitForExit(3000)) { return 'restart-exit-timeout' }
+        }
+        Set-ItemProperty -LiteralPath 'HKCU:\Software\WallpaperEngine' -Name faultyShutdown -Value 0 -ErrorAction Stop
+        $shell.ShellExecute($executable, '-silent', (Split-Path -Parent $executable), 'open', 0)
+        $script:knownWallpaperClient = $null
+        return 'restart-dispatched'
+    }
+    catch { return ('restart-failed: ' + $_.Exception.Message) }
+    finally { if ($null -ne $shell) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell) } }
 }
 
 # Reuse the existing startup helper for the parent's whole lifetime. No service,
@@ -96,6 +135,27 @@ $wallpaperStatus = 'waiting-for-running-engine'
 $totalMoves = 0
 $recentActions = @()
 $wallpaperResumeCount = 0
+$wallpaperRestartTopology = ''
+$wallpaperRestarted = $false
+$wallpaperLastRestartUtc = [DateTime]::MinValue
+$wallpaperMismatchSince = [DateTime]::MinValue
+$wallpaperHungSince = [DateTime]::MinValue
+$wallpaperHungOwner = ''
+$wallpaperLayoutStatus = 'waiting-for-render-windows'
+$wallpaperRestartReason = ''
+$wallpaperRestartResult = ''
+$wallpaperRestartCount = 0
+try {
+    if (Test-Path -LiteralPath $ResultPath) {
+        $previous = Get-Content -Raw -LiteralPath $ResultPath | ConvertFrom-Json
+        $wallpaperLastRestartUtc = [DateTime]::Parse($previous.WallpaperLastRestartUtc).ToUniversalTime()
+        $wallpaperRestartTopology = [string]$previous.WallpaperRestartTopology
+        $wallpaperRestartCount = [int]$previous.WallpaperRestartCount
+        $wallpaperRestarted = [bool]$previous.WallpaperRestartAttempted -and [long]$previous.WallpaperRecoveryEpoch -eq $ParentStartTimeUtcTicks
+        $wallpaperRestartReason = [string]$previous.WallpaperRestartReason
+        $wallpaperRestartResult = [string]$previous.WallpaperRestartResult
+    }
+} catch { } # Older state files have no restart history.
 $script:hs2GuardArguments = @{}
 function Invoke-RememberedHS2WindowGuard {
     $result = Invoke-HS2ExclusiveWindowGuard @script:hs2GuardArguments
@@ -129,6 +189,7 @@ try {
             if ($recentActions.Count -gt 20) { $recentActions = @($recentActions | Select-Object -Last 20) }
             $monitors = @($native::CaptureMonitors())
             $topology = Get-WallpaperEngineTopologyFingerprint -Monitors $monitors
+            $topology += '|' + ((@($monitors | ForEach-Object { '{0},{1},{2},{3}' -f $_.Left,$_.Top,$_.Right,$_.Bottom } | Sort-Object)) -join ';')
             $client = Get-RunningWallpaperClient
             $episode = if ($null -eq $client -or $monitors.Count -eq 0) { '' } else { '{0}|{1}' -f $client.Id,$topology }
             $now = [DateTime]::UtcNow
@@ -138,6 +199,7 @@ try {
                 $wallpaperAttempts = 0
                 $wallpaperNextAttempt = $now.AddSeconds(2)
                 $wallpaperStatus = if ($episode) { 'topology-stabilizing' } else { 'waiting-for-running-engine' }
+                $wallpaperMismatchSince = [DateTime]::MinValue
             }
             if ($episode -and $wallpaperStatus -cne 'play-dispatched' -and
                 $wallpaperAttempts -lt 3 -and $now -ge $wallpaperNextAttempt) {
@@ -145,6 +207,37 @@ try {
                 $wallpaperStatus = Resume-ExistingWallpaper -Client $client
                 if ($wallpaperStatus -eq 'play-dispatched') { $wallpaperResumeCount++ }
                 $wallpaperNextAttempt = $now.AddSeconds(10 * $wallpaperAttempts)
+            }
+            if ($topology -cne $wallpaperRestartTopology) {
+                $wallpaperRestartTopology = $topology
+                $wallpaperRestarted = $wallpaperRestarted -and $wallpaperRestartResult -cne 'restart-verified'
+                $wallpaperMismatchSince = [DateTime]::MinValue
+            }
+            $renderWindows = @(if ($null -ne $client) { $native::CaptureWallpaperWindows($client.Id) })
+            $layoutAligned = Test-WallpaperEngineLayoutAligned -Monitors $monitors -Windows $renderWindows
+            $hungOwner = if ($null -eq $client) { '' } else { '{0}|{1}' -f $client.Id,$client.StartTicks }
+            if ($hungOwner -cne $wallpaperHungOwner) { $wallpaperHungOwner = $hungOwner; $wallpaperHungSince = [DateTime]::MinValue }
+            $uiHung = $null -ne $client -and $native::WallpaperUiHung($client.Id)
+            if (-not $uiHung) { $wallpaperHungSince = [DateTime]::MinValue }
+            elseif ($wallpaperHungSince -eq [DateTime]::MinValue) { $wallpaperHungSince = $now }
+            if ($layoutAligned -or $null -eq $client -or $monitors.Count -eq 0 -or $wallpaperAttempts -eq 0) { $wallpaperMismatchSince = [DateTime]::MinValue }
+            elseif ($wallpaperMismatchSince -eq [DateTime]::MinValue) { $wallpaperMismatchSince = $now }
+            $processCount = @(Get-Process -Name wallpaper32,wallpaper64 -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -eq [Diagnostics.Process]::GetCurrentProcess().SessionId }).Count
+            if ($processCount -eq 1 -and $null -eq $client) { $processCount = 2 } # Unreadable identity is not a crash.
+            $faultyShutdown = Get-ItemPropertyValue -LiteralPath 'HKCU:\Software\WallpaperEngine' -Name faultyShutdown -ErrorAction SilentlyContinue
+            $decision = Get-WallpaperEngineKeepAliveDecision -ProcessCount $processCount -FaultyShutdown ([int]$faultyShutdown) `
+                -HungSeconds $(if ($wallpaperHungSince -eq [DateTime]::MinValue) { 0 } else { ($now-$wallpaperHungSince).TotalSeconds }) `
+                -MismatchSeconds $(if ($wallpaperMismatchSince -eq [DateTime]::MinValue) { 0 } else { ($now-$wallpaperMismatchSince).TotalSeconds }) `
+                -SecondsSinceRestart ($now-$wallpaperLastRestartUtc).TotalSeconds -EpisodeRestarted $wallpaperRestarted
+            $wallpaperLayoutStatus = $decision
+            if ($decision -in @('hung','mismatch','crashed')) {
+                $wallpaperRestarted = $true; $wallpaperLastRestartUtc = $now; $wallpaperRestartCount++
+                $wallpaperRestartReason = $decision
+                $wallpaperRestartResult = Restart-WallpaperEngine -Client $client
+            }
+            elseif ($wallpaperRestartResult -in @('restart-dispatched','restart-pending')) {
+                $wallpaperRestartResult = if ($processCount -eq 1 -and $layoutAligned -and -not $uiHung) { 'restart-verified' }
+                    elseif (($now-$wallpaperLastRestartUtc).TotalSeconds -lt 90) { 'restart-pending' } else { 'restart-unverified' }
             }
             $signature = '{0}|{1}|{2}|{3}|{4}|{5}' -f $hs2.Status,$vdd.Status,
                 $totalMoves,@($hs2.FailedActions).Count,@($vdd.FailedActions).Count,$wallpaperStatus
@@ -165,6 +258,12 @@ try {
                     RecentActions=@($recentActions)
                     WallpaperStatus=$wallpaperStatus; WallpaperResumeCount=$wallpaperResumeCount
                     WallpaperAttempts=$wallpaperAttempts
+                    WallpaperLayoutStatus=$wallpaperLayoutStatus; WallpaperLayoutAligned=$layoutAligned
+                    WallpaperUiHung=$uiHung; WallpaperRestartReason=$wallpaperRestartReason; WallpaperRestartResult=$wallpaperRestartResult
+                    WallpaperRestartCount=$wallpaperRestartCount; WallpaperLastRestartUtc=$wallpaperLastRestartUtc.ToString('o')
+                    WallpaperRestartTopology=$wallpaperRestartTopology
+                    WallpaperRestartAttempted=$wallpaperRestarted
+                    WallpaperRecoveryEpoch=$ParentStartTimeUtcTicks
                 })
                 $lastSignature=$signature; $lastWriteUtc=$now
             }
@@ -175,6 +274,10 @@ try {
                 ObservedAtUtc=[DateTime]::UtcNow.ToString('o')
                 ProcessId=$PID; ParentProcessId=$ParentProcessId; PolicySha256=$policyHash
                 ErrorType=$_.Exception.GetType().FullName; Error=$_.Exception.Message
+                WallpaperLastRestartUtc=$wallpaperLastRestartUtc.ToString('o'); WallpaperRestartTopology=$wallpaperRestartTopology
+                WallpaperRestartAttempted=$wallpaperRestarted; WallpaperRestartCount=$wallpaperRestartCount
+                WallpaperRestartReason=$wallpaperRestartReason; WallpaperRestartResult=$wallpaperRestartResult
+                WallpaperRecoveryEpoch=$ParentStartTimeUtcTicks
             })
             Start-Sleep -Seconds 1
         }
@@ -186,6 +289,10 @@ finally {
         Schema='turzx.hs2-startup-window-guard.v1'; Status='complete'
         ObservedAtUtc=[DateTime]::UtcNow.ToString('o'); ProcessId=$PID
         Reason=if (Test-ParentAlive) { 'startup-window-complete' } else { 'parent-exited' }
+        WallpaperLastRestartUtc=$wallpaperLastRestartUtc.ToString('o'); WallpaperRestartTopology=$wallpaperRestartTopology
+        WallpaperRestartAttempted=$wallpaperRestarted; WallpaperRestartCount=$wallpaperRestartCount
+        WallpaperRestartReason=$wallpaperRestartReason; WallpaperRestartResult=$wallpaperRestartResult
+        WallpaperRecoveryEpoch=$ParentStartTimeUtcTicks
     })
     $lease.ReleaseMutex(); $lease.Dispose()
 }

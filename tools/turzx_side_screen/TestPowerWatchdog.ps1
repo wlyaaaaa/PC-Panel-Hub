@@ -188,6 +188,55 @@ if (-not $liveMttBinding.Found -or
     throw "Wallpaper recovery must project the live MTT PnP shape through presence/problem/HardwareIds properties."
 }
 
+$wallpaperCurrentLayout = @(
+    [pscustomobject]@{ Left=0; Top=0; Right=2880; Bottom=1800 },
+    [pscustomobject]@{ Left=2880; Top=0; Right=5168; Bottom=1048 }
+)
+$wallpaperStaleLayout = @(
+    [pscustomobject]@{ Left=0; Top=0; Right=3840; Bottom=2160 },
+    [pscustomobject]@{ Left=3840; Top=0; Right=6720; Bottom=1800 },
+    [pscustomobject]@{ Left=6720; Top=0; Right=9008; Bottom=1048 }
+)
+if ((Test-WallpaperEngineLayoutAligned -Monitors $wallpaperCurrentLayout -Windows $wallpaperStaleLayout) -or
+    (Test-WallpaperEngineLayoutAligned -Monitors $wallpaperCurrentLayout -Windows @()) -or
+    (Test-WallpaperEngineLayoutAligned -Monitors @() -Windows @())) {
+    throw 'Stale three-display wallpaper bounds and missing render windows must not match the current two displays.'
+}
+$wallpaperNearLayout = @(
+    [pscustomobject]@{ Left=2882; Top=0; Right=5170; Bottom=1048 },
+    [pscustomobject]@{ Left=0; Top=0; Right=2880; Bottom=1800 }
+)
+if (-not (Test-WallpaperEngineLayoutAligned -Monitors $wallpaperCurrentLayout -Windows $wallpaperCurrentLayout) -or
+    -not (Test-WallpaperEngineLayoutAligned -Monitors $wallpaperCurrentLayout -Windows $wallpaperNearLayout)) {
+    throw 'Wallpaper bounds must match one-to-one regardless of enumeration order, with at most two pixels tolerance.'
+}
+$wallpaperNearLayout[0].Right++
+if ((Test-WallpaperEngineLayoutAligned -Monitors $wallpaperCurrentLayout -Windows $wallpaperNearLayout) -or
+    (Test-WallpaperEngineLayoutAligned -Monitors $wallpaperCurrentLayout -Windows @($wallpaperCurrentLayout[0], $wallpaperCurrentLayout[0]))) {
+    throw 'Out-of-tolerance or duplicated wallpaper rectangles must not count as aligned.'
+}
+
+$wallpaperKeepAliveCases = @(
+    @{ Count=1; Hung=60; Mismatch=0; Faulty=0; Since=900; Attempted=$false; Expected='hung' },
+    @{ Count=1; Hung=0; Mismatch=60; Faulty=0; Since=900; Attempted=$false; Expected='mismatch' },
+    @{ Count=0; Hung=0; Mismatch=0; Faulty=1; Since=900; Attempted=$false; Expected='crashed' },
+    @{ Count=0; Hung=60; Mismatch=60; Faulty=0; Since=900; Attempted=$false; Expected='manual-exit' },
+    @{ Count=0; Hung=0; Mismatch=0; Faulty=2; Since=900; Attempted=$false; Expected='manual-exit' },
+    @{ Count=1; Hung=0; Mismatch=60; Faulty=1; Since=900; Attempted=$false; Expected='mismatch' },
+    @{ Count=1; Hung=60; Mismatch=60; Faulty=0; Since=899; Attempted=$false; Expected='cooldown' },
+    @{ Count=1; Hung=0; Mismatch=60; Faulty=0; Since=900; Attempted=$true; Expected='already-attempted' },
+    @{ Count=2; Hung=60; Mismatch=60; Faulty=1; Since=900; Attempted=$false; Expected='ambiguous' },
+    @{ Count=1; Hung=59; Mismatch=59; Faulty=1; Since=0; Attempted=$true; Expected='healthy' }
+)
+foreach ($case in $wallpaperKeepAliveCases) {
+    $decision = Get-WallpaperEngineKeepAliveDecision -ProcessCount $case.Count `
+        -HungSeconds $case.Hung -MismatchSeconds $case.Mismatch -FaultyShutdown $case.Faulty `
+        -SecondsSinceRestart $case.Since -EpisodeRestarted $case.Attempted
+    if ($decision -cne $case.Expected) {
+        throw "Wallpaper keepalive decision expected $($case.Expected), got $decision."
+    }
+}
+
 # Wallpaper render recovery must observe only the active monitor identity and
 # primary assignment.  HDR is deliberately not part of the fingerprint: a
 # normal HDR toggle must not restart rendering.

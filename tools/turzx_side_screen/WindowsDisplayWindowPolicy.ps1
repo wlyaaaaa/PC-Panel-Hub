@@ -286,6 +286,11 @@ namespace TURZX.SideScreen
             IntPtr data);
 
         [DllImport("user32.dll")]
+        private static extern bool EnumChildWindows(IntPtr parent, WindowEnumerationCallback callback, IntPtr data);
+        [DllImport("user32.dll")]
+        private static extern bool IsHungAppWindow(IntPtr window);
+
+        [DllImport("user32.dll")]
         private static extern bool IsWindowVisible(IntPtr window);
 
         [DllImport("user32.dll")]
@@ -434,6 +439,46 @@ namespace TURZX.SideScreen
                 }
             }
             return identities.ToArray();
+        }
+
+        public static bool WallpaperUiHung(int ownerProcessId)
+        {
+            bool hung = false;
+            WindowEnumerationCallback capture = delegate(IntPtr window, IntPtr data) {
+                uint processId;
+                GetWindowThreadProcessId(window, out processId);
+                var className = new StringBuilder(256);
+                if (processId == ownerProcessId) GetClassName(window, className, className.Capacity);
+                if (className.ToString() == "WPEEventWindow" && IsHungAppWindow(window)) hung = true;
+                return true;
+            };
+            EnumWindows(capture, IntPtr.Zero); GC.KeepAlive(capture);
+            return hung;
+        }
+
+        public static WindowGuardMonitorSnapshot[] CaptureWallpaperWindows(int ownerProcessId)
+        {
+            var windows = new List<WindowGuardMonitorSnapshot>();
+            WindowEnumerationCallback capture = delegate(IntPtr window, IntPtr data) {
+                uint processId;
+                GetWindowThreadProcessId(window, out processId);
+                if (processId != ownerProcessId) return true;
+                var className = new StringBuilder(256);
+                GetClassName(window, className, className.Capacity);
+                Rect rect;
+                if (className.ToString() == "WPEDesktopDX11Window" && GetWindowRect(window, out rect))
+                    windows.Add(new WindowGuardMonitorSnapshot { Handle=window.ToInt64(),
+                        Left=rect.Left, Top=rect.Top, Right=rect.Right, Bottom=rect.Bottom });
+                return true;
+            };
+            WindowEnumerationCallback roots = delegate(IntPtr window, IntPtr data) {
+                capture(window, data);
+                EnumChildWindows(window, capture, IntPtr.Zero);
+                return true;
+            };
+            EnumWindows(roots, IntPtr.Zero);
+            GC.KeepAlive(roots); GC.KeepAlive(capture);
+            return windows.ToArray();
         }
 
         public static WindowGuardWindowSnapshot[] CaptureWindows(
