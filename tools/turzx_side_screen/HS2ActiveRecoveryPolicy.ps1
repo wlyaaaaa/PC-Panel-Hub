@@ -234,12 +234,15 @@ function Get-WallpaperEngineKeepAliveDecision {
         [int]$ProcessCount,
         [double]$HungSeconds,
         [double]$MismatchSeconds,
+        [double]$MissingSeconds,
         [int]$FaultyShutdown,
         [double]$SecondsSinceRestart,
         [bool]$EpisodeRestarted
     )
     if ($ProcessCount -gt 1) { return 'ambiguous' }
     if ($ProcessCount -eq 0 -and $FaultyShutdown -ne 1) { return 'manual-exit' }
+    # A self-restart or a logon start briefly has no process; only a lasting absence is a crash.
+    if ($ProcessCount -eq 0 -and $MissingSeconds -lt 60) { return 'healthy' }
     $reason = if ($ProcessCount -eq 0) { 'crashed' }
         elseif ($HungSeconds -ge 60) { 'hung' }
         elseif ($MismatchSeconds -ge 60) { 'mismatch' }

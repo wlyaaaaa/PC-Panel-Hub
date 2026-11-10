@@ -226,11 +226,13 @@ $wallpaperKeepAliveCases = @(
     @{ Count=1; Hung=60; Mismatch=60; Faulty=0; Since=899; Attempted=$false; Expected='cooldown' },
     @{ Count=1; Hung=0; Mismatch=60; Faulty=0; Since=900; Attempted=$true; Expected='already-attempted' },
     @{ Count=2; Hung=60; Mismatch=60; Faulty=1; Since=900; Attempted=$false; Expected='ambiguous' },
-    @{ Count=1; Hung=59; Mismatch=59; Faulty=1; Since=0; Attempted=$true; Expected='healthy' }
+    @{ Count=1; Hung=59; Mismatch=59; Faulty=1; Since=0; Attempted=$true; Expected='healthy' },
+    @{ Count=0; Hung=0; Mismatch=0; Faulty=1; Since=900; Attempted=$false; Missing=59; Expected='healthy' }
 )
 foreach ($case in $wallpaperKeepAliveCases) {
     $decision = Get-WallpaperEngineKeepAliveDecision -ProcessCount $case.Count `
         -HungSeconds $case.Hung -MismatchSeconds $case.Mismatch -FaultyShutdown $case.Faulty `
+        -MissingSeconds $(if ($case.ContainsKey('Missing')) { $case.Missing } else { 60 }) `
         -SecondsSinceRestart $case.Since -EpisodeRestarted $case.Attempted
     if ($decision -cne $case.Expected) {
         throw "Wallpaper keepalive decision expected $($case.Expected), got $decision."

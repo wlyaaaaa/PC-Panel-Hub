@@ -141,6 +141,7 @@ $wallpaperLastRestartUtc = [DateTime]::MinValue
 $wallpaperMismatchSince = [DateTime]::MinValue
 $wallpaperHungSince = [DateTime]::MinValue
 $wallpaperHungOwner = ''
+$wallpaperMissingSince = [DateTime]::MinValue
 $wallpaperLayoutStatus = 'waiting-for-render-windows'
 $wallpaperRestartReason = ''
 $wallpaperRestartResult = ''
@@ -224,10 +225,13 @@ try {
             elseif ($wallpaperMismatchSince -eq [DateTime]::MinValue) { $wallpaperMismatchSince = $now }
             $processCount = @(Get-Process -Name wallpaper32,wallpaper64 -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -eq [Diagnostics.Process]::GetCurrentProcess().SessionId }).Count
             if ($processCount -eq 1 -and $null -eq $client) { $processCount = 2 } # Unreadable identity is not a crash.
+            if ($processCount -ne 0) { $wallpaperMissingSince = [DateTime]::MinValue }
+            elseif ($wallpaperMissingSince -eq [DateTime]::MinValue) { $wallpaperMissingSince = $now }
             $faultyShutdown = Get-ItemPropertyValue -LiteralPath 'HKCU:\Software\WallpaperEngine' -Name faultyShutdown -ErrorAction SilentlyContinue
             $decision = Get-WallpaperEngineKeepAliveDecision -ProcessCount $processCount -FaultyShutdown ([int]$faultyShutdown) `
                 -HungSeconds $(if ($wallpaperHungSince -eq [DateTime]::MinValue) { 0 } else { ($now-$wallpaperHungSince).TotalSeconds }) `
                 -MismatchSeconds $(if ($wallpaperMismatchSince -eq [DateTime]::MinValue) { 0 } else { ($now-$wallpaperMismatchSince).TotalSeconds }) `
+                -MissingSeconds $(if ($wallpaperMissingSince -eq [DateTime]::MinValue) { 0 } else { ($now-$wallpaperMissingSince).TotalSeconds }) `
                 -SecondsSinceRestart ($now-$wallpaperLastRestartUtc).TotalSeconds -EpisodeRestarted $wallpaperRestarted
             $wallpaperLayoutStatus = $decision
             if ($decision -in @('hung','mismatch','crashed')) {
@@ -238,6 +242,9 @@ try {
             elseif ($wallpaperRestartResult -in @('restart-dispatched','restart-pending')) {
                 $wallpaperRestartResult = if ($processCount -eq 1 -and $layoutAligned -and -not $uiHung) { 'restart-verified' }
                     elseif (($now-$wallpaperLastRestartUtc).TotalSeconds -lt 90) { 'restart-pending' } else { 'restart-unverified' }
+                # Keep-alive: a verified recovery re-arms later faults (still 15 minutes apart);
+                # only an unverified recovery stops further restarts until a new watchdog start.
+                if ($wallpaperRestartResult -eq 'restart-verified') { $wallpaperRestarted = $false }
             }
             $signature = '{0}|{1}|{2}|{3}|{4}|{5}' -f $hs2.Status,$vdd.Status,
                 $totalMoves,@($hs2.FailedActions).Count,@($vdd.FailedActions).Count,$wallpaperStatus
