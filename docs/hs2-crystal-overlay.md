@@ -198,6 +198,7 @@ pwsh -NoProfile -File tools/hs2_crystal_overlay/Install-HS2Overlay.ps1 `
   stop` / `play` 作完整渲染重绑定。它不打开 Wallpaper GUI、不写 Wallpaper 配置，
   也不从 Highest watchdog 启动常驻的高权限渲染进程。
   桌面连续性守护为壁纸软件保活：界面挂起或渲染错位/缺失持续 60 秒、或进程消失 60 秒且 faultyShutdown=1 时恢复，两次至少间隔 15 分钟；恢复读回正常后以后的故障照样处理，恢复未读回正常则本次看门狗运行内不再重启；只清除 faultyShutdown，经桌面 Explorer 非提权启动 `wallpaper64.exe -silent` 避开安全启动，正常托盘退出不拉起。
+  本机已在壁纸软件里关闭“防止崩溃”（`config.json` 的 `safemode=false`，本人 2026-11-10 要求开机异常也不弹前台窗口）：上次异常退出后开机或重开都直接加载壁纸，不再停在安全启动确认框；之后的崩溃或挂起由本保活兜底。若在壁纸软件里重新打开该选项，开机遇到上次异常退出时会重新弹框。
   它只结束当前会话唯一且身份已核对的壁纸进程，不改壁纸设置；已有状态文件记录保活时间、原因（hung/mismatch/crashed）、窗口对齐及界面挂起读回和结果，失败后不循环重启。
 - 若已绑定的 LIAN LI 设备出现 Code 10，watchdog 立即失败关闭并给出断电后检查
   HS2 USB 排针、线缆和辅助供电的提示；不会自动重启 Hub、移除设备或扫描 PnP，

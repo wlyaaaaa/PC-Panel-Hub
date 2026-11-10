@@ -202,7 +202,14 @@ function Stop-RecordedWatchdogProcess {
     Write-StopLog ("stopping recorded watchdog PID={0} identity={1}" -f `
             $recordedPid,
             $(if ($commandIdentityMatches) { "command-line" } else { "process-tree" }))
-    Stop-Process -Id $recordedPid -Force -ErrorAction Stop
+    try {
+        Stop-Process -Id $recordedPid -Force -ErrorAction Stop
+    }
+    catch [Microsoft.PowerShell.Commands.ProcessCommandException] {
+        # schtasks /End can retire the watchdog between the snapshot and this call.
+        if ($null -ne (Get-Process -Id $recordedPid -ErrorAction SilentlyContinue)) { throw }
+        Write-StopLog ("recorded watchdog PID={0} already exited" -f $recordedPid)
+    }
 
     $deadline = [DateTime]::UtcNow.AddSeconds(10)
     do {
