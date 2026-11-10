@@ -274,6 +274,7 @@ namespace TURZX.SideScreen
                             {
                                 frameWatch.Stop();
                                 WriteHeartbeat(options, frame, sent, failed, consecutiveSendFailures, lastFullFrame, periodMs, fetchMs, renderMs, sendAttempted, sendMs, frameWatch.ElapsedMilliseconds, 0, snapshotStatus, "fatal", frameError, frameTransport);
+                                WriteSerialFailureEvidence(options, diffSession, frameError);
                                 Console.Error.WriteLine("stream fatal: consecutive send failures reached " + consecutiveSendFailures + "; exiting so watchdog can reopen " + options.Port);
                                 return 1;
                             }
@@ -305,6 +306,13 @@ namespace TURZX.SideScreen
 
             Console.WriteLine("TURZX stream stopped: renderedOrSent=" + sent + ", failed=" + failed + ", elapsedMs=" + total.ElapsedMilliseconds);
             return failed == 0 ? 0 : 1;
+        }
+
+        private static void WriteSerialFailureEvidence(StreamOptions options, TurzxHelperSender.DiffSession session, string failure)
+        {
+            if (session == null || string.IsNullOrWhiteSpace(options.PreviewDir)) return;
+            try { session.WriteSerialFailureEvidence(Path.Combine(options.PreviewDir, "serial-native-failure.json"), failure); }
+            catch (Exception error) { Console.Error.WriteLine("serial evidence write failed: " + error.Message); }
         }
 
         internal static Snapshot SelectSnapshotAfterFetchFailureForTest(Snapshot lastSnapshot, Exception error, out string status)

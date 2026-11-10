@@ -158,9 +158,16 @@ try {
     if ($Diff) { $argsList += "--diff" }
     if ($AllowUnverifiedDifferentialProtocol) { $argsList += "--allow-unverified-diff" }
     Write-StreamStartupStage 'stream-execute-start'
+    $streamStartedUtc = [DateTimeOffset]::UtcNow.ToString('o')
     & $exePath @argsList
     if ($LASTEXITCODE -ne 0) {
-        throw "stream failed with exit code $LASTEXITCODE"
+        $streamExitCode = $LASTEXITCODE
+        try {
+            & pwsh -NoProfile -File (Join-Path $scriptDir 'PublishSerialFailureEvidence.ps1') `
+                -EvidencePath (Join-Path $PreviewDir 'serial-native-failure.json') -NotBefore $streamStartedUtc
+        }
+        catch { Write-Warning ("serial evidence publish failed: " + $_.Exception.Message) }
+        throw "stream failed with exit code $streamExitCode"
     }
 }
 finally {

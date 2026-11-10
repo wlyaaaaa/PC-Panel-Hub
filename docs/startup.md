@@ -250,3 +250,9 @@ Create shortcuts again manually:
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\create-desktop-shortcut.ps1
 ```
+
+## Native serial failure evidence
+
+Each differential session keeps four original exceptions from its exact serial I/O thread in memory. On a subsequent `Device Error`, the main thread saves their types, HRESULTs, original stacks and native call sites in `serial-native-failure.json` under the preview directory. A still-alive thread is retained with its actual state: the library can mark its I/O loop stopped before the thread returns. These are related observations, not a proven root cause; normal close errors and computation stalls are outside this recording.
+
+An optional local `out/serial-evidence-owner.json` binds `item_id`, `repo_root` and `owner_entry` to an existing owner item. After a failed stream exits, `PublishSerialFailureEvidence.ps1` archives and formally reviews only new exception/code/call-site combinations, preserving the item's other verification fields. PID, session and time changes alone do not publish again. The binding, recordings and logs remain local. Removing the binding stops owner-item publication; reverting the source change and allowing the next natural start removes recording. No additional task or polling process is installed.

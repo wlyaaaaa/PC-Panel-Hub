@@ -8,6 +8,127 @@ using System.Threading;
 
 namespace TURZX.SideScreen
 {
+    // Related exceptions from this serial session are evidence, not a root-cause claim.
+    internal sealed class SerialFailureEvidence : IDisposable
+    {
+        private readonly string _threadName;
+        private readonly string _sessionId = Guid.NewGuid().ToString("D");
+        private readonly Entry[] _entries = new Entry[4];
+        private int _next;
+        private volatile bool _disposed;
+        [ThreadStatic] private static bool _recording;
+        [DllImport("kernel32.dll")] private static extern uint GetCurrentThreadId();
+
+        private sealed class Entry
+        {
+            internal readonly Thread Thread;
+            internal readonly int ManagedTid, HResult;
+            internal readonly uint NativeTid;
+            internal readonly int? NativeError;
+            internal readonly string Type, Message, Stack, ObservedUtc;
+            internal readonly string NativeSite = "unknown";
+            internal readonly int NativeIlOffset = -1;
+            internal Entry(Exception exception)
+            {
+                Thread = System.Threading.Thread.CurrentThread;
+                ManagedTid = Thread.ManagedThreadId;
+                NativeTid = GetCurrentThreadId();
+                HResult = exception.HResult;
+                System.ComponentModel.Win32Exception win32 = exception as System.ComponentModel.Win32Exception;
+                NativeError = win32 != null ? (int?)win32.NativeErrorCode :
+                    (HResult & unchecked((int)0xffff0000)) == unchecked((int)0x80070000) ? (int?)(HResult & 0xffff) : null;
+                Type = exception.GetType().FullName;
+                Message = Limit(exception.Message, 512);
+                Stack = Limit(exception.StackTrace, 4096);
+                StackFrame[] frames = new StackTrace(exception, false).GetFrames();
+                foreach (StackFrame frame in frames ?? new StackFrame[0])
+                {
+                    MethodBase method = frame.GetMethod();
+                    if (method == null || method.DeclaringType == null || !method.DeclaringType.FullName.StartsWith("RJCP.", StringComparison.Ordinal)) continue;
+                    NativeSite = method.DeclaringType.FullName + "." + method.Name;
+                    NativeIlOffset = frame.GetILOffset();
+                    break;
+                }
+                ObservedUtc = DateTime.UtcNow.ToString("o");
+            }
+        }
+
+        internal SerialFailureEvidence(string port)
+        {
+            _threadName = "SerialPortStream_" + port;
+            AppDomain.CurrentDomain.FirstChanceException += OnException;
+        }
+
+        private void OnException(object sender, System.Runtime.ExceptionServices.FirstChanceExceptionEventArgs args)
+        {
+            if (_disposed || _recording || Thread.CurrentThread.Name != _threadName) return;
+            _recording = true;
+            try
+            {
+                Entry entry = new Entry(args.Exception);
+                Interlocked.Exchange(ref _entries[(Interlocked.Increment(ref _next) - 1) & 3], entry);
+            }
+            catch { }
+            finally { _recording = false; }
+        }
+
+        internal bool WriteStopped(string path, string failure)
+        {
+            if (failure == null || failure.IndexOf("Device Error", StringComparison.OrdinalIgnoreCase) < 0) return false;
+            var exceptions = new System.Collections.Generic.List<string>();
+            for (int i = 0; i < _entries.Length; i++)
+            {
+                Entry entry = Interlocked.CompareExchange(ref _entries[i], null, null);
+                if (entry == null) continue;
+                bool threadExited = !entry.Thread.IsAlive;
+                exceptions.Add("{\"type\":" + Quote(entry.Type) + ",\"hresult\":" + entry.HResult +
+                    ",\"message\":" + Quote(entry.Message) + ",\"stack\":" + Quote(entry.Stack) +
+                    ",\"native_site\":" + Quote(entry.NativeSite) + ",\"native_il_offset\":" + entry.NativeIlOffset +
+                    ",\"native_error\":" + (entry.NativeError.HasValue ? entry.NativeError.Value.ToString(System.Globalization.CultureInfo.InvariantCulture) : "null") +
+                    ",\"managed_tid\":" + entry.ManagedTid + ",\"native_tid\":" + entry.NativeTid +
+                    ",\"observed_utc\":" + Quote(entry.ObservedUtc) + ",\"thread_exited\":" + (threadExited ? "true}" : "false}"));
+            }
+            if (exceptions.Count == 0) return false;
+            string json = "{\"schema\":\"pcpanel.serial-native-failure.v1\",\"session_id\":" + Quote(_sessionId) +
+                ",\"failure\":" + Quote(failure) + ",\"exceptions\":[" + string.Join(",", exceptions) +
+                "],\"recorded_utc\":" + Quote(DateTime.UtcNow.ToString("o")) + ",\"process_id\":" + Process.GetCurrentProcess().Id + "}";
+            string destination = System.IO.Path.GetFullPath(path);
+            System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(destination));
+            string temporary = destination + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            try
+            {
+                System.IO.File.WriteAllText(temporary, json, new System.Text.UTF8Encoding(false));
+                if (System.IO.File.Exists(destination)) System.IO.File.Replace(temporary, destination, null);
+                else System.IO.File.Move(temporary, destination);
+            }
+            finally { if (System.IO.File.Exists(temporary)) System.IO.File.Delete(temporary); }
+            return true;
+        }
+
+        private static string Limit(string value, int length)
+        {
+            return value == null ? "" : value.Length <= length ? value : value.Substring(0, length);
+        }
+
+        private static string Quote(string value)
+        {
+            var json = new System.Text.StringBuilder("\"");
+            foreach (char ch in value ?? "")
+            {
+                if (ch == '\\' || ch == '"') json.Append('\\').Append(ch);
+                else if (ch < 32) json.Append("\\u").Append(((int)ch).ToString("x4"));
+                else json.Append(ch);
+            }
+            return json.Append('"').ToString();
+        }
+
+        public void Dispose()
+        {
+            _disposed = true;
+            AppDomain.CurrentDomain.FirstChanceException -= OnException;
+        }
+    }
+
     public static class TurzxHelperSender
     {
         public const int Width = 480;
@@ -278,6 +399,7 @@ namespace TURZX.SideScreen
             private volatile SendProgress _conversionProgress;
             private Action<string> _sendPhaseDiagnostic = null;
             private CalculationBoundary _diffCalculationBoundary;
+            private readonly SerialFailureEvidence _serialFailureEvidence;
 
             private sealed class CalculationBoundary
             {
@@ -436,40 +558,54 @@ namespace TURZX.SideScreen
                     throw new MissingMethodException(_serial.GetType().FullName, "\u8A54(string)");
                 }
 
-                bool opened = (bool)open.Invoke(_serial, new object[] { comPort });
-                if (!opened)
+                _serialFailureEvidence = new SerialFailureEvidence(comPort);
+                try
                 {
-                    throw new InvalidOperationException("TURZX serial helper could not open " + comPort);
-                }
+                    bool opened = (bool)open.Invoke(_serial, new object[] { comPort });
+                    if (!opened)
+                    {
+                        throw new InvalidOperationException("TURZX serial helper could not open " + comPort);
+                    }
 
-                _sendFull = driverType.GetMethod("\u8A54", BindingFlags.Instance | BindingFlags.Public, null, new[] { typeof(byte[]), typeof(int), typeof(bool) }, null);
-                if (_sendFull == null)
+                    _sendFull = driverType.GetMethod("\u8A54", BindingFlags.Instance | BindingFlags.Public, null, new[] { typeof(byte[]), typeof(int), typeof(bool) }, null);
+                    if (_sendFull == null)
+                    {
+                        throw new MissingMethodException(driverType.FullName, "\u8A54(byte[],int,bool)");
+                    }
+
+                    _sendDiff = driverType.GetMethod("\u88FA", BindingFlags.Instance | BindingFlags.Public, null, new[] { typeof(byte[]), typeof(byte[]), typeof(long), typeof(bool) }, null);
+                    if (_sendDiff == null)
+                    {
+                        throw new MissingMethodException(driverType.FullName, "\u88FA(byte[],byte[],long,bool)");
+                    }
+
+                    _sendCommand = _serial.GetType().GetMethod("\u8A54", BindingFlags.Instance | BindingFlags.Public, null, new[] { typeof(int), typeof(int), typeof(byte[]), typeof(byte) }, null);
+                    if (_sendCommand == null)
+                    {
+                        throw new MissingMethodException(_serial.GetType().FullName, "\u8A54(int,int,byte[],byte)");
+                    }
+
+                    _sendBody = _serial.GetType().GetMethod("\u8A54", BindingFlags.Instance | BindingFlags.Public, null, new[] { typeof(byte[]), typeof(int) }, null);
+                    if (_sendBody == null)
+                    {
+                        throw new MissingMethodException(_serial.GetType().FullName, "\u8A54(byte[],int)");
+                    }
+
+                    _prime = _serial.GetType().GetMethod("\u8E62", BindingFlags.Instance | BindingFlags.Public, null, Type.EmptyTypes, null);
+                    _setBrightness = driverType.GetMethod("\u931D", BindingFlags.Instance | BindingFlags.Public, null, new[] { typeof(byte) }, null);
+
+                    _close = _serial.GetType().GetMethod("\u8FBC", BindingFlags.Instance | BindingFlags.Public, null, Type.EmptyTypes, null);
+                }
+                catch
                 {
-                    throw new MissingMethodException(driverType.FullName, "\u8A54(byte[],int,bool)");
+                    _serialFailureEvidence.Dispose();
+                    throw;
                 }
+            }
 
-                _sendDiff = driverType.GetMethod("\u88FA", BindingFlags.Instance | BindingFlags.Public, null, new[] { typeof(byte[]), typeof(byte[]), typeof(long), typeof(bool) }, null);
-                if (_sendDiff == null)
-                {
-                    throw new MissingMethodException(driverType.FullName, "\u88FA(byte[],byte[],long,bool)");
-                }
-
-                _sendCommand = _serial.GetType().GetMethod("\u8A54", BindingFlags.Instance | BindingFlags.Public, null, new[] { typeof(int), typeof(int), typeof(byte[]), typeof(byte) }, null);
-                if (_sendCommand == null)
-                {
-                    throw new MissingMethodException(_serial.GetType().FullName, "\u8A54(int,int,byte[],byte)");
-                }
-
-                _sendBody = _serial.GetType().GetMethod("\u8A54", BindingFlags.Instance | BindingFlags.Public, null, new[] { typeof(byte[]), typeof(int) }, null);
-                if (_sendBody == null)
-                {
-                    throw new MissingMethodException(_serial.GetType().FullName, "\u8A54(byte[],int)");
-                }
-
-                _prime = _serial.GetType().GetMethod("\u8E62", BindingFlags.Instance | BindingFlags.Public, null, Type.EmptyTypes, null);
-                _setBrightness = driverType.GetMethod("\u931D", BindingFlags.Instance | BindingFlags.Public, null, new[] { typeof(byte) }, null);
-
-                _close = _serial.GetType().GetMethod("\u8FBC", BindingFlags.Instance | BindingFlags.Public, null, Type.EmptyTypes, null);
+            public bool WriteSerialFailureEvidence(string path, string failure)
+            {
+                return _serialFailureEvidence != null && _serialFailureEvidence.WriteStopped(path, failure);
             }
 
             public byte[] Convert(Bitmap bitmap)
@@ -768,6 +904,7 @@ namespace TURZX.SideScreen
 
             public void Dispose()
             {
+                if (_serialFailureEvidence != null) _serialFailureEvidence.Dispose();
                 if (_disposed)
                 {
                     return;
