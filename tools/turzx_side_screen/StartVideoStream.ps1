@@ -159,14 +159,22 @@ try {
     if ($AllowUnverifiedDifferentialProtocol) { $argsList += "--allow-unverified-diff" }
     Write-StreamStartupStage 'stream-execute-start'
     $streamStartedUtc = [DateTimeOffset]::UtcNow.ToString('o')
-    & $exePath @argsList
-    if ($LASTEXITCODE -ne 0) {
+    $streamExitCode = $null
+    try {
+        & $exePath @argsList
         $streamExitCode = $LASTEXITCODE
-        try {
-            & pwsh -NoProfile -File (Join-Path $scriptDir 'PublishSerialFailureEvidence.ps1') `
-                -EvidencePath (Join-Path $PreviewDir 'serial-native-failure.json') -NotBefore $streamStartedUtc
+    }
+    finally {
+        # Windows PowerShell can throw on merged native stderr before returning an exit code.
+        if ($streamExitCode -ne 0) {
+            try {
+                & pwsh -NoProfile -File (Join-Path $scriptDir 'PublishSerialFailureEvidence.ps1') `
+                    -EvidencePath (Join-Path $PreviewDir 'serial-native-failure.json') -NotBefore $streamStartedUtc
+            }
+            catch { Write-Warning ("serial evidence publish failed: " + $_.Exception.Message) }
         }
-        catch { Write-Warning ("serial evidence publish failed: " + $_.Exception.Message) }
+    }
+    if ($streamExitCode -ne 0) {
         throw "stream failed with exit code $streamExitCode"
     }
 }

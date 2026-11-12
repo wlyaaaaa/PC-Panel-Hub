@@ -127,6 +127,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $side 'TestSerial
 if ($LASTEXITCODE -ne 0) { throw 'TestSerialFailureEvidence.ps1 failed' }
 pwsh -NoProfile -File (Join-Path $side 'TestPublishSerialFailureEvidence.ps1')
 if ($LASTEXITCODE -ne 0) { throw 'TestPublishSerialFailureEvidence.ps1 failed' }
+pwsh -NoProfile -File (Join-Path $side 'TestStreamFailurePublication.ps1')
+if ($LASTEXITCODE -ne 0) { throw 'TestStreamFailurePublication.ps1 failed' }
 
 powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Root "scripts\TestRuntimeReliability.ps1") -Root $Root
 if ($LASTEXITCODE -ne 0) { throw "TestRuntimeReliability.ps1 failed" }
