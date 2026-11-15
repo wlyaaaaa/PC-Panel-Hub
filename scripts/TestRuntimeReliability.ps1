@@ -1048,6 +1048,20 @@ try {
     if (-not $slotHealth.Healthy -or $slotHealth.Reason -notmatch "stream-heartbeat-b.json") {
         throw "Watchdog did not recover from a locked legacy heartbeat via the alternate slot: $($slotHealth.Reason)"
     }
+    # A live publisher may retain write access while allowing a shared reader.
+    $publisherHandle = [IO.File]::Open($slotBHeartbeat, [IO.FileMode]::Open,
+        [IO.FileAccess]::ReadWrite, ([IO.FileShare]::Read -bor [IO.FileShare]::Delete))
+    try {
+        $sharedHealth = Get-StreamHeartbeatHealth
+        if (-not $sharedHealth.Healthy) { throw "Shared heartbeat read failed: $($sharedHealth.Reason)" }
+    }
+    finally { $publisherHandle.Dispose() }
+    $exclusiveHandle = [IO.File]::Open($slotBHeartbeat, [IO.FileMode]::Open,
+        [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+    $exclusiveHandle.Dispose()
+    if ($heartbeatFunction.Extent.Text -notmatch '\[IO\.FileShare\]::ReadWrite\s+-bor\s+\[IO\.FileShare\]::Delete') {
+        throw "Heartbeat readers must permit atomic replacement while reading."
+    }
     Set-Content -LiteralPath $slotBHeartbeat -Value '{"frame":41,"status":"ok","snapshot_status":"stale:TimeoutException","error":null,"transport_mode":"verified_full_200","send_attempted":true,"send_ms":40,"elapsed_ms":80,"period_ms":3000}' -Encoding UTF8
     (Get-Item -LiteralPath $slotBHeartbeat).LastWriteTimeUtc = [DateTime]::UtcNow
     $staleSnapshotHealth = Get-StreamHeartbeatHealth

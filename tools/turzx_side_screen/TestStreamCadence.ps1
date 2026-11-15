@@ -343,7 +343,8 @@ public static class TestStreamCadenceProgram
             new Action(delegate() { System.Threading.Thread.Sleep(200); }),
             20,
             "DIFF",
-            null
+            null,
+            false
         };
         System.Diagnostics.Stopwatch watch = System.Diagnostics.Stopwatch.StartNew();
         bool completed = (bool)boundedSend.Invoke(session, arguments);
@@ -391,66 +392,42 @@ public static class TestStreamCadenceProgram
     {
         Type sessionType = typeof(TurzxHelperSender.DiffSession);
         var flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
-        for (int variant = 0; variant < 3; variant++)
+        foreach (string phase in new[] { "diff-calculate", "command-204-header", "command-204-body" })
         {
             var session = (TurzxHelperSender.DiffSession)System.Runtime.Serialization.FormatterServices.GetUninitializedObject(sessionType);
             var writer = new FakeDiffWriter();
             sessionType.GetField("_serial", flags).SetValue(session, writer);
             sessionType.GetField("_sendCommand", flags).SetValue(session, typeof(FakeDiffWriter).GetMethod("Command"));
             sessionType.GetField("_sendBody", flags).SetValue(session, typeof(FakeDiffWriter).GetMethod("Body"));
-            int result;
-            string message;
-            if (variant == 2)
-            {
-                Equal("normal real differential path succeeds", true,
-                    session.SendDiffWithTimeout(new byte[64], new byte[64], 0, false, false, 900, out result, out message));
-                Contains("normal calculation entered", "diffCalculationEntered=True", message);
-                Contains("normal calculation returned", "diffCalculationReturnObserved=True", message);
-                long enteredTicks = Int64.Parse(System.Text.RegularExpressions.Regex.Match(message, @"diffCalculationEnteredTicks=(\d+)").Groups[1].Value);
-                long returnedTicks = Int64.Parse(System.Text.RegularExpressions.Regex.Match(message, @"diffCalculationReturnedTicks=(\d+)").Groups[1].Value);
-                long readTicks = Int64.Parse(System.Text.RegularExpressions.Regex.Match(message, @"diffCalculationReadTicks=(\d+)").Groups[1].Value);
-                Equal("normal raw calculation ticks ordered", true, enteredTicks > 0 && enteredTicks <= returnedTicks && returnedTicks <= readTicks);
-                Console.WriteLine("OK real diff calculation normal return and raw tick order");
-                writer.Finished = false;
-            }
-            string blockedPhase = variant == 1 ? "diff-payload-prepare" : "diff-calculate";
-            using (var entered = new ManualResetEvent(false))
             using (var release = new ManualResetEvent(false))
             {
                 Thread worker = null;
-                Action<string> diagnostic = delegate(string phase)
+                Action<string> diagnostic = delegate(string current)
                 {
-                    if (phase != blockedPhase) return;
+                    if (current != phase) return;
+                    if (phase == "diff-calculate") { Thread.Sleep(1100); return; }
                     worker = Thread.CurrentThread;
-                    entered.Set();
-                    if (!release.WaitOne(5000)) throw new Exception("diagnostic barrier release deadline");
+                    release.WaitOne(5000);
                 };
                 sessionType.GetField("_sendPhaseDiagnostic", flags).SetValue(session, diagnostic);
+                int result;
+                string message;
                 try
                 {
-                    var watch = Stopwatch.StartNew();
-                    Equal("diagnostic-blocked real differential path times out " + variant, false,
+                    bool calculated = phase == "diff-calculate";
+                    Equal("calculation pause preserves port; blocked serial still times out " + phase, calculated,
                         session.SendDiffWithTimeout(new byte[64], new byte[64], 0, false, false, 900, out result, out message));
-                    watch.Stop();
-                    Equal("diagnostic barrier was reached " + variant, true, entered.WaitOne(0));
-                    Contains("diagnostic timeout preserves 900ms budget " + variant, "DIFF TIMEOUT after 900 ms", message);
-                    Equal("diagnostic timeout waits for budget " + variant, true, watch.ElapsedMilliseconds >= 800);
-                    Equal("diagnostic timeout abandons session " + variant, true, sessionType.GetField("_abandoned", flags).GetValue(session));
-                    Contains("calculation entry evidence " + variant, "diffCalculationEntered=" + (variant == 1), message);
-                    Contains("calculation return evidence " + variant, "diffCalculationReturnObserved=" + (variant == 1), message);
-                    if (variant == 1) Contains("old phase can outlive actual calculation return", "phase=diff-calculate ", message);
-                    else
-                    {
-                        Contains("new operation cleared earlier entry marker " + variant, "diffCalculationEnteredTicks=0", message);
-                        Contains("new operation cleared earlier return marker " + variant, "diffCalculationReturnedTicks=0", message);
-                    }
-                    Console.WriteLine("OK real diff diagnostic barrier " + blockedPhase + " variant=" + variant + " " + message);
+                    Equal("only unfinished serial writers are abandoned " + phase, !calculated,
+                        sessionType.GetField("_abandoned", flags).GetValue(session));
+                    Equal("timed-out serial writer cannot be reopened", false, session.CanReopenAfterFailure);
+                    Contains("actual calculation returned before serial deadline", "diffCalculationReturnObserved=True", message);
+                    if (calculated) Equal("long calculation still sends", true, writer.Finished);
+                    else Contains("serial I/O keeps 900ms deadline", "DIFF TIMEOUT after 900 ms", message);
                 }
                 finally
                 {
                     release.Set();
-                    Equal("released fake writer worker exits " + variant, true, worker != null && worker.Join(3000));
-                    Equal("released fake writer completed " + variant, true, writer.Finished);
+                    if (worker != null) Equal("abandoned test writer exits", true, worker.Join(3000));
                 }
             }
         }
@@ -491,6 +468,7 @@ public static class TestStreamCadenceProgram
             string message;
             Equal("injected full write verdict " + index, index == 3,
                 session.SendFullWithTimeout(new byte[4], 2000, 2, 7, true, 40, out message));
+            Equal("joined failures can safely close; success does not request recovery", index != 3, session.CanReopenAfterFailure);
             Contains("full write identifies actual step " + index, "phase=" + phases[index] + " ", message);
             if (index == 3)
                 Equal("full baseline write order and duplicate count remain intact", "prime,brightness,full1,full2,", writer.Calls);
@@ -511,7 +489,7 @@ public static class TestStreamCadenceProgram
                 for (int depth = 0; depth < 12; depth++)
                     failure = new Exception(variant == 1 ? "layer" + depth : new string('x', 2000), failure) { Source = new string('s', variant == 1 ? 8 : 900) };
             Exception captured = failure;
-            object[] args = { new Action(delegate() { throw captured; }), 2000, "DIFF", null };
+            object[] args = { new Action(delegate() { throw captured; }), 2000, "DIFF", null, false };
             Equal("diagnostic errors preserve failed verdict", false,
                 bounded.Invoke(System.Runtime.Serialization.FormatterServices.GetUninitializedObject(sessionType), args));
             string message = (string)args[3];

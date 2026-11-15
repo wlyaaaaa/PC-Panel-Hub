@@ -266,6 +266,17 @@ namespace TURZX.SideScreen
                         {
                             consecutiveSendFailures++;
                             Console.WriteLine("frame " + frame + " consecutiveSendFailures=" + consecutiveSendFailures);
+                            if (options.HybridRefresh && diffSession != null &&
+                                diffSession.CanReopenAfterFailure && consecutiveSendFailures == 1)
+                            {
+                                WriteSerialFailureEvidence(options, diffSession, frameError);
+                                diffSession.Dispose();
+                                diffSession = new TurzxHelperSender.DiffSession(options.Root, options.Port, options.DevCode);
+                                previousFrameData = null;
+                                diffSequence = 0;
+                                Console.WriteLine("serial recovery: reopened " + options.Port + "; next frame restores full baseline");
+                                continue;
+                            }
                             if (ShouldAbortAfterSendFailure(
                                 options.HybridRefresh,
                                 sendAttempted,

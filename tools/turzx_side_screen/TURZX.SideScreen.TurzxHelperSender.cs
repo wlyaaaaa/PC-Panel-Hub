@@ -400,6 +400,40 @@ namespace TURZX.SideScreen
             private Action<string> _sendPhaseDiagnostic = null;
             private CalculationBoundary _diffCalculationBoundary;
             private readonly SerialFailureEvidence _serialFailureEvidence;
+            private bool _completedSendFailed;
+            internal bool CanReopenAfterFailure { get { return !_abandoned && _completedSendFailed; } }
+
+            [StructLayout(LayoutKind.Sequential)]
+            private struct CommTimeouts
+            {
+                public uint ReadInterval, ReadMultiplier, ReadConstant, WriteMultiplier, WriteConstant;
+            }
+            [DllImport("kernel32.dll", SetLastError = true)]
+            private static extern bool GetCommTimeouts(Microsoft.Win32.SafeHandles.SafeFileHandle handle, out CommTimeouts value);
+            [DllImport("kernel32.dll", SetLastError = true)]
+            private static extern bool SetCommTimeouts(Microsoft.Win32.SafeHandles.SafeFileHandle handle, ref CommTimeouts value);
+
+            private void ConfigureNativeWriteTimeout()
+            {
+                const BindingFlags fields = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+                object stream = _serial.GetType().GetFields(fields)
+                    .Single(f => f.FieldType.FullName == "RJCP.IO.Ports.SerialPortStream").GetValue(_serial);
+                object native = stream.GetType().GetField("m_NativeSerial", fields).GetValue(stream);
+                var handle = (Microsoft.Win32.SafeHandles.SafeFileHandle)native.GetType()
+                    .GetField("m_ComPortHandle", fields).GetValue(native);
+                CommTimeouts before, after;
+                if (!GetCommTimeouts(handle, out before)) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+                after = before;
+                // RJCP 2.4's independent 500ms driver deadline kills its I/O
+                // thread on error 121. Allow a brief USB stall without doing so.
+                after.WriteConstant = 2000;
+                after.WriteMultiplier = 0;
+                if (!SetCommTimeouts(handle, ref after) || !GetCommTimeouts(handle, out after))
+                    throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+                if (after.WriteConstant != 2000 || after.WriteMultiplier != 0)
+                    throw new InvalidOperationException("Native serial write timeout readback failed.");
+                Console.WriteLine("serial native write timeout: " + before.WriteConstant + " -> " + after.WriteConstant + "ms; read timeouts preserved");
+            }
 
             private sealed class CalculationBoundary
             {
@@ -559,6 +593,7 @@ namespace TURZX.SideScreen
                 }
 
                 _serialFailureEvidence = new SerialFailureEvidence(comPort);
+                _close = _serial.GetType().GetMethod("\u8FBC", BindingFlags.Instance | BindingFlags.Public, null, Type.EmptyTypes, null);
                 try
                 {
                     bool opened = (bool)open.Invoke(_serial, new object[] { comPort });
@@ -566,6 +601,8 @@ namespace TURZX.SideScreen
                     {
                         throw new InvalidOperationException("TURZX serial helper could not open " + comPort);
                     }
+
+                    ConfigureNativeWriteTimeout();
 
                     _sendFull = driverType.GetMethod("\u8A54", BindingFlags.Instance | BindingFlags.Public, null, new[] { typeof(byte[]), typeof(int), typeof(bool) }, null);
                     if (_sendFull == null)
@@ -599,6 +636,7 @@ namespace TURZX.SideScreen
                 catch
                 {
                     _serialFailureEvidence.Dispose();
+                    if (_close != null) _close.Invoke(_serial, null);
                     throw;
                 }
             }
@@ -719,20 +757,29 @@ namespace TURZX.SideScreen
                 if (timeoutMs <= 0) throw new ArgumentOutOfRangeException("timeoutMs");
 
                 int localResult = 0;
+                // Calculation and scheduling pauses are not serial I/O. Do not
+                // abandon a healthy port before any bytes have been submitted.
+                byte[] payload = null;
+                int bodyLength = 0;
+                if (!flag)
+                {
+                    _diffCalculationBoundary = new CalculationBoundary();
+                    payload = PrepareDifferentialPayload(previousFrameData, currentFrameData, swapOrder, out bodyLength);
+                }
                 bool ok = RunBoundedSend(delegate()
                 {
-                    localResult = SendDiff(
+                    localResult = !flag ? SendDiffCommand204(payload, bodyLength, sequence) : SendDiff(
                         previousFrameData,
                         currentFrameData,
                         sequence,
                         swapOrder,
                         flag);
-                }, timeoutMs, "DIFF", out message);
+                }, timeoutMs, "DIFF", out message, !flag);
                 result = localResult;
                 return ok;
             }
 
-            private bool RunBoundedSend(Action send, int timeoutMs, string operation, out string message)
+            private bool RunBoundedSend(Action send, int timeoutMs, string operation, out string message, bool calculationPrepared = false)
             {
                 Stopwatch boundedWatch = Stopwatch.StartNew();
                 DateTime boundedStartUtc = DateTime.UtcNow;
@@ -742,7 +789,8 @@ namespace TURZX.SideScreen
                 // Until the worker publishes its own samples, its phase and
                 // native identity are unknown; never substitute the caller's.
                 _sendProgress = null;
-                Interlocked.Exchange(ref _diffCalculationBoundary, new CalculationBoundary());
+                if (!calculationPrepared) Interlocked.Exchange(ref _diffCalculationBoundary, new CalculationBoundary());
+                _completedSendFailed = false;
                 Exception workerError = null;
                 Thread worker = null;
                 try
@@ -810,6 +858,7 @@ namespace TURZX.SideScreen
 
                 if (workerError != null)
                 {
+                    _completedSendFailed = true;
                     message = operation + " EXCEPTION - " + DescribeWorkerError(workerError) +
                         "; " + timing + "; " + progress;
                     return false;
@@ -853,11 +902,17 @@ namespace TURZX.SideScreen
 
             private int SendDiffCommand204(byte[] previousFrameData, byte[] currentFrameData, long sequence, bool swapOrder)
             {
+                int length;
+                byte[] payload = PrepareDifferentialPayload(previousFrameData, currentFrameData, swapOrder, out length);
+                return SendDiffCommand204(payload, length, sequence);
+            }
+
+            private byte[] PrepareDifferentialPayload(byte[] previousFrameData, byte[] currentFrameData, bool swapOrder, out int bodyLength)
+            {
                 byte[] from = swapOrder ? currentFrameData : previousFrameData;
                 byte[] to = swapOrder ? previousFrameData : currentFrameData;
                 CalculationBoundary calculation = Interlocked.CompareExchange(ref _diffCalculationBoundary, null, null);
                 SetSendPhase("diff-calculate");
-                int bodyLength;
                 if (calculation != null) Interlocked.Exchange(ref calculation.EnteredTicks, Stopwatch.GetTimestamp());
                 byte[] payload = BuildDifferentialPayload(from, to, out bodyLength);
                 if (calculation != null) Interlocked.Exchange(ref calculation.ReturnedTicks, Stopwatch.GetTimestamp());
@@ -886,7 +941,11 @@ namespace TURZX.SideScreen
                 payload[bodyLength] = 0xEF;
                 payload[bodyLength + 1] = 0x69;
                 bodyLength += 2;
+                return payload;
+            }
 
+            private int SendDiffCommand204(byte[] payload, int bodyLength, long sequence)
+            {
                 byte[] header = new byte[8];
                 uint seq = unchecked((uint)sequence);
                 header[0] = (byte)((seq >> 24) & 0xFF);

@@ -1878,7 +1878,18 @@ function Get-StreamHeartbeatHealth {
         }
 
         try {
-            $heartbeat = Get-Content -Raw -LiteralPath $item.FullName | ConvertFrom-Json
+            $heartbeatStream = [IO.File]::Open($item.FullName, [IO.FileMode]::Open,
+                [IO.FileAccess]::Read, ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+            $heartbeatReader = $null
+            try {
+                $heartbeatReader = [IO.StreamReader]::new($heartbeatStream)
+                $heartbeatText = $heartbeatReader.ReadToEnd()
+            }
+            finally {
+                if ($null -ne $heartbeatReader) { $heartbeatReader.Dispose() }
+                $heartbeatStream.Dispose()
+            }
+            $heartbeat = $heartbeatText | ConvertFrom-Json
             if ($null -eq $heartbeat.frame -or [int64]$heartbeat.frame -le 0) {
                 $invalidReasons += ("frame-invalid {0}" -f $item.Name)
                 continue
