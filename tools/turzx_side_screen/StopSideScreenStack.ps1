@@ -294,9 +294,10 @@ foreach ($parentPid in $streamParents) {
         Write-StopLog ("not stopping unverified stream parent PID={0}" -f $parentPid)
         continue
     }
+    if (-not (Test-MetricsProcessActive -ProcessId ([int]$parentPid))) { continue }
     try {
         Write-StopPhase 'parent-identity-cim-start'
-        $fresh = Get-CimInstance Win32_Process -Filter ("ProcessId={0}" -f [int]$parentPid) -ErrorAction Stop
+        $fresh = Get-CimInstance Win32_Process -Filter ("ProcessId={0}" -f [int]$parentPid) -OperationTimeoutSec $ProcessSnapshotTimeoutSeconds -ErrorAction Stop
         Write-StopPhase 'parent-identity-cim-done'
         if (-not (Test-OwnedStreamParent -Candidate $fresh -SideRoot $side) -or
             $fresh.CreationDate -ne $prior[0].CreationDate -or
@@ -310,9 +311,13 @@ foreach ($parentPid in $streamParents) {
 
 # Hard fallback stays exact-PID and exact project image. A machine-wide /IM or
 # tree kill can affect another task; it is not a valid COM-ownership proof.
-Write-StopPhase 'fresh-stream-cim-start'
-$freshStreams = @(Get-CimInstance Win32_Process -Filter "Name='TURZX.SideScreen.Stream.exe'" -ErrorAction Stop)
-Write-StopPhase 'fresh-stream-cim-done'
+$freshStreams = @()
+if (@(Get-Process 'TURZX.SideScreen.Stream*' -ErrorAction SilentlyContinue).Count -gt 0) {
+    Write-StopPhase 'fresh-stream-cim-start'
+    $freshStreams = @(Get-CimInstance Win32_Process -Filter "Name='TURZX.SideScreen.Stream.exe'" -OperationTimeoutSec $ProcessSnapshotTimeoutSeconds -ErrorAction Stop)
+    Write-StopPhase 'fresh-stream-cim-done'
+}
+else { Write-StopPhase 'fresh-stream-cim-skipped-no-stream' }
 foreach ($stream in $freshStreams) {
     if ([string]$stream.CommandLine -notlike $sidePattern -or
         [string]$stream.ExecutablePath -notlike ($side + '\*')) { continue }

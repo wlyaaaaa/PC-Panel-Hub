@@ -1692,6 +1692,8 @@ function Set-TurzxChildHeartbeatStartupWindow {
     $script:metricsRecoveryStarts = 0
     $script:turzxStackChild = $Child
     $script:childHeartbeatObserved = $false
+    $script:streamHeartbeatFrame = 0
+    $script:streamHeartbeatProgressMs = 0L
     if ($null -eq $Child) {
         $script:childHeartbeatStartupDeadlineMilliseconds = $null
         return $null
@@ -1870,6 +1872,8 @@ function Get-StreamHeartbeatHealth {
     }
 
     $invalidReasons = @()
+    $readBusy = $false
+    $readBusyOnly = $true
     foreach ($item in $candidates) {
         $ageSeconds = ([DateTime]::UtcNow - $item.LastWriteTimeUtc).TotalSeconds
         if ($ageSeconds -gt $HeartbeatStaleSeconds) {
@@ -1891,6 +1895,7 @@ function Get-StreamHeartbeatHealth {
             }
             $heartbeat = $heartbeatText | ConvertFrom-Json
             if ($null -eq $heartbeat.frame -or [int64]$heartbeat.frame -le 0) {
+                $readBusyOnly = $false
                 $invalidReasons += ("frame-invalid {0}" -f $item.Name)
                 continue
             }
@@ -1983,19 +1988,26 @@ function Get-StreamHeartbeatHealth {
                     }
                 }
             }
+            $nowMs = Get-TurzxMonotonicMilliseconds
+            $advanced = [int64]$heartbeat.frame -gt $script:streamHeartbeatFrame
+            if ($advanced) {
+                $script:streamHeartbeatFrame = [int64]$heartbeat.frame
+                $script:streamHeartbeatProgressMs = $nowMs
+            }
+            $idleMs = $nowMs - $script:streamHeartbeatProgressMs
+            if ($idleMs -ge ($HeartbeatStaleSeconds * 1000L)) {
+                return [pscustomobject]@{ Healthy = $false; Reason = "frame-not-advancing frame=$($heartbeat.frame) idleMs=$idleMs" }
+            }
+            $timingWarning = $null
             if ($sendMs -gt $sendLimitMs) {
-                return [pscustomobject]@{
-                    Healthy = $false
-                    Reason = ("send-overrun sendMs={0} limitMs={1}" -f $sendMs, $sendLimitMs)
-                }
+                $timingWarning = "send-overrun sendMs=$sendMs limitMs=$sendLimitMs"
             }
             if ($elapsedMs -gt $HeartbeatMaxElapsedMs -or
                 $periodMs -gt $HeartbeatMaxPeriodMs) {
-                return [pscustomobject]@{
-                    Healthy = $false
-                    Reason = ("frame-overrun elapsedMs={0}/{1} periodMs={2}/{3}" -f `
-                        $elapsedMs, $HeartbeatMaxElapsedMs, $periodMs, $HeartbeatMaxPeriodMs)
-                }
+                $timingWarning = "frame-overrun elapsedMs=$elapsedMs/$HeartbeatMaxElapsedMs periodMs=$periodMs/$HeartbeatMaxPeriodMs"
+            }
+            if ($timingWarning -and $advanced) {
+                Write-WatchdogLog "heartbeat progress resumed frame=$($heartbeat.frame) timing=$timingWarning; restart suppressed"
             }
             return [pscustomobject]@{
                 Healthy = $true
@@ -2004,10 +2016,20 @@ function Get-StreamHeartbeatHealth {
             }
         }
         catch {
+            $cause = $_.Exception.GetBaseException()
+            if ($cause -is [IO.IOException] -and ($cause.HResult -band 0xffff) -in @(32, 33)) { $readBusy = $true }
+            else { $readBusyOnly = $false }
             $invalidReasons += ("invalid {0}: {1}" -f $item.Name, $_.Exception.Message)
         }
     }
 
+    # A sharing violation says nothing about frame progress. Keep the existing
+    # 15-second deadline from the last observed advancing frame, without renewing it.
+    $nowMs = Get-TurzxMonotonicMilliseconds
+    if ($readBusy -and $readBusyOnly -and $script:streamHeartbeatFrame -gt 0 -and
+        ($nowMs - $script:streamHeartbeatProgressMs) -lt ($HeartbeatStaleSeconds * 1000L)) {
+        return [pscustomobject]@{ Healthy = $false; Pending = $true; Reason = ($invalidReasons -join "; ") }
+    }
     return [pscustomobject]@{
         Healthy = $false
         Reason = ($invalidReasons -join "; ")
@@ -2095,6 +2117,7 @@ foreach ($eventSourceId in @($powerSourceId, $shutdownSourceId)) {
 Stop-OtherWatchdogs -Reason "watchdog-start"
 Remove-Item -LiteralPath $pausedPath -Force -ErrorAction SilentlyContinue
 Write-WatchdogLog "cleared paused flag at watchdog start"
+Write-WatchdogLog ("TURZX heartbeat policy=frame-progress staleSeconds={0} overruns=diagnostic read-busy=deferred" -f $HeartbeatStaleSeconds)
 
 $powerSubscription = $null
 $shutdownSubscription = $null
@@ -2294,6 +2317,11 @@ try {
         }
         elseif (Test-TurzxChildHeartbeatStartupDeadline) {
             $heartbeatHealth = Get-StreamHeartbeatHealth
+            if ($heartbeatHealth.PSObject.Properties['Pending'] -and $heartbeatHealth.Pending) {
+                Write-WatchdogLog ("heartbeat read deferred; awaiting frame progress: {0}" -f $heartbeatHealth.Reason)
+                $heartbeatFailures = 0
+                continue
+            }
             if ($heartbeatHealth.Healthy) {
                 $previousSnapshotStaleHeartbeats = $snapshotStaleHeartbeats
                 $snapshotDecision = Get-TurzxSnapshotStaleDecision `

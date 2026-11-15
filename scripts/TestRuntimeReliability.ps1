@@ -306,6 +306,28 @@ if ($processSnapshotFunction.Extent.Text -notmatch [regex]::Escape('-OperationTi
     }
 }
 
+foreach ($query in $stopAst.FindAll({param($node) $node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'Get-CimInstance'}, $true)) {
+    if (@($query.CommandElements | Where-Object { $_ -is [Management.Automation.Language.CommandParameterAst] -and $_.ParameterName -eq 'OperationTimeoutSec' }).Count -ne 1) { throw 'Every stop-path CIM query needs an operation timeout.' }
+}
+$freshStreamQuery = $stopAst.EndBlock.Statements | Where-Object {
+    $_ -is [Management.Automation.Language.IfStatementAst] -and $_.Extent.Text -match 'fresh-stream-cim-start'
+}
+& {
+    $script:hasStream=$false; $script:cimCalls=0; $ProcessSnapshotTimeoutSeconds=7; $freshStreams=@()
+    function Write-StopPhase {param($Phase)}
+    function Get-Process { [CmdletBinding()]param($Name) if ($script:hasStream) { [pscustomobject]@{Id=62532} } }
+    function Get-CimInstance {
+        [CmdletBinding()]param($ClassName,$Filter,$OperationTimeoutSec)
+        if ($Filter -ne "Name='TURZX.SideScreen.Stream.exe'" -or $OperationTimeoutSec -ne 7) { throw 'Remaining-stream lookup must retain its exact image and timeout.' }
+        $script:cimCalls++; [pscustomobject]@{ProcessId=62532}
+    }
+    . ([scriptblock]::Create($freshStreamQuery.Extent.Text))
+    if ($script:cimCalls -ne 0) { throw 'Already exited streams must not incur another CIM lookup.' }
+    $script:hasStream=$true
+    . ([scriptblock]::Create($freshStreamQuery.Extent.Text))
+    if ($script:cimCalls -ne 1 -or $freshStreams.Count -ne 1) { throw 'A remaining stream still needs fresh identity evidence before fallback.' }
+}
+
 $matchingStopFunction = $stopAst.Find({param($node)
     $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Stop-MatchingProcess'
 }, $true)
@@ -919,6 +941,7 @@ $heartbeatFunction = $watchdogAst.Find(
 if ($null -eq $heartbeatFunction) {
     throw "Watchdog must define Get-StreamHeartbeatHealth."
 }
+. ([scriptblock]::Create($monotonicClockFunction.Extent.Text))
 . ([scriptblock]::Create($heartbeatFunction.Extent.Text))
 
 $snapshotDecisionFunction = $watchdogAst.Find(
@@ -1013,6 +1036,11 @@ foreach ($pattern in @(
     if ($script:metricsRecoveryStarts -ne 0 -or $consecutiveFailures -ne 0 -or $script:stackRestarts -ne 1) { throw 'A fresh snapshot must clear collector and stack recovery history.' }
     $nextStatus='throw'; $script:metricsRecoveryStarts=1; $script:metricsLastAttemptUtc=[DateTime]::UtcNow.AddSeconds(-31)
     if ((Invoke-TurzxMetricsRecovery) -or $script:metricsRecoveryStarts -ne 0) { throw 'Failed maintenance must break successful restart sequence.' }
+    function Get-StreamHeartbeatHealth { [pscustomobject]@{Healthy=$false; Pending=$true; Reason='sharing-conflict'} }
+    $heartbeatFailures=2
+    foreach($read in 1..3){ . $healthStep; throw 'A pending read must skip unhealthy counting for this pass.' }
+    if($heartbeatFailures -ne 0 -or $script:stackRestarts -ne 1){throw 'Deferred reads must not accumulate a full-stack restart.'}
+
 }
 
 $heartbeatTestRoot = Join-Path ([IO.Path]::GetTempPath()) ("turzx-heartbeat-slots-{0}" -f [guid]::NewGuid().ToString("N"))
@@ -1022,6 +1050,9 @@ $slotAHeartbeat = Join-Path $heartbeatTestRoot "stream-heartbeat-a.json"
 $slotBHeartbeat = Join-Path $heartbeatTestRoot "stream-heartbeat-b.json"
 $heartbeatPaths = @($legacyHeartbeat, $slotAHeartbeat, $slotBHeartbeat)
 $HeartbeatStaleSeconds = 15
+$script:streamHeartbeatFrame = 0; $script:streamHeartbeatProgressMs = 0L
+$script:heartbeatWarnings=@()
+function Write-WatchdogLog { param([string]$Message) $script:heartbeatWarnings += $Message }
 $HeartbeatMaxSendMs = 10000
 $HeartbeatMaxElapsedMs = 12000
 $HeartbeatMaxPeriodMs = 15000
@@ -1110,8 +1141,8 @@ try {
     Set-Content -LiteralPath $slotBHeartbeat -Value '{"frame":44,"status":"ok","error":null,"transport_mode":"hybrid_diff_204_full_200","frame_transport":"diff_204","last_full_frame":1,"full_resync_every_frames":900,"send_attempted":true,"send_ms":901,"elapsed_ms":940,"period_ms":1000}' -Encoding UTF8
     (Get-Item -LiteralPath $slotBHeartbeat).LastWriteTimeUtc = [DateTime]::UtcNow
     $hybridDiffOverrunHealth = Get-StreamHeartbeatHealth
-    if ($hybridDiffOverrunHealth.Healthy -or $hybridDiffOverrunHealth.Reason -notmatch "send-overrun") {
-        throw "Watchdog must apply the dedicated 900ms budget to a hybrid command-204 frame."
+    if (-not $hybridDiffOverrunHealth.Healthy -or -not ($script:heartbeatWarnings -match "send-overrun sendMs=901 limitMs=900")) {
+        throw "The dedicated diff budget must warn while a completed advancing frame remains healthy."
     }
 
     Set-Content -LiteralPath $slotBHeartbeat -Value '{"frame":45,"status":"ok","error":null,"transport_mode":"hybrid_diff_204_full_200","frame_transport":"full_200","last_full_frame":45,"full_resync_every_frames":900,"send_attempted":true,"send_ms":4600,"elapsed_ms":4800,"period_ms":5000}' -Encoding UTF8
@@ -1139,16 +1170,50 @@ try {
     Set-Content -LiteralPath $slotBHeartbeat -Value '{"frame":43,"status":"ok","error":null,"transport_mode":"verified_full_200","send_attempted":true,"send_ms":10001,"elapsed_ms":10100,"period_ms":3000}' -Encoding UTF8
     (Get-Item -LiteralPath $slotBHeartbeat).LastWriteTimeUtc = [DateTime]::UtcNow
     $slowSendHealth = Get-StreamHeartbeatHealth
-    if ($slowSendHealth.Healthy -or $slowSendHealth.Reason -notmatch "send-overrun") {
-        throw "Watchdog must reject a full-frame send that exceeded the bounded send budget."
+    if (-not $slowSendHealth.Healthy) {
+        throw "A completed successful send overrun must not restart a progressing stream."
     }
 
     Set-Content -LiteralPath $slotBHeartbeat -Value '{"frame":44,"status":"ok","error":null,"transport_mode":"verified_full_200","send_attempted":true,"send_ms":2300,"elapsed_ms":12001,"period_ms":15001}' -Encoding UTF8
     (Get-Item -LiteralPath $slotBHeartbeat).LastWriteTimeUtc = [DateTime]::UtcNow
     $slowFrameHealth = Get-StreamHeartbeatHealth
-    if ($slowFrameHealth.Healthy -or $slowFrameHealth.Reason -notmatch "frame-overrun") {
-        throw "Watchdog must reject a frame loop that was starved beyond its timing budget."
+    if (-not $slowFrameHealth.Healthy) {
+        throw "A published successful frame after starvation has already resumed."
     }
+
+    # Replay 18:23: all slots unreadable, frame2699 resumes after 19.363s,
+    # the same heartbeat stays visible during a six-second full send, then 2701.
+    $script:streamHeartbeatFrame=2698; $script:streamHeartbeatProgressMs=Get-TurzxMonotonicMilliseconds
+    $holders=@()
+    foreach($path in $heartbeatPaths){if(-not (Test-Path $path)){Set-Content $path -Value "{}" -Encoding UTF8}}
+    try {
+        foreach($path in $heartbeatPaths){$holders += [IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)}
+        $busy=Get-StreamHeartbeatHealth
+        if (-not $busy.Pending) { throw 'Brief read conflict must defer, not claim a stuck stream.' }
+        $holders[0].Dispose();Set-Content $heartbeatPaths[0] -Value '{broken' -Encoding UTF8
+        $mixed=Get-StreamHeartbeatHealth
+        if($mixed.Healthy -or $mixed.PSObject.Properties['Pending']){throw 'A sharing conflict must not mask a separate malformed JSON slot.'}
+        $holders[0]=[IO.File]::Open($heartbeatPaths[0],[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
+
+        $script:streamHeartbeatProgressMs -= 16000
+        $expired=Get-StreamHeartbeatHealth
+        if ($expired.Healthy -or $expired.PSObject.Properties['Pending']) { throw 'Read conflicts cannot renew the no-progress deadline.' }
+    } finally {foreach($holder in $holders){$holder.Dispose()}}
+    $healthyFrame=@{frame=2699;status='ok';error=$null;transport_mode='verified_full_200';send_attempted=$true;send_ms=5;elapsed_ms=1743;period_ms=19363}
+    $healthyFrame|ConvertTo-Json|Set-Content $slotBHeartbeat -Encoding UTF8
+    if (-not (Get-StreamHeartbeatHealth).Healthy) { throw 'Frame2699 proves progress after the stall.' }
+    $script:streamHeartbeatProgressMs -= 6000
+    if (-not (Get-StreamHeartbeatHealth).Healthy) { throw 'An in-flight six-second full frame must not amplify the old overrun.' }
+    $healthyFrame.frame=2701;$healthyFrame.period_ms=1000
+    $healthyFrame|ConvertTo-Json|Set-Content $slotBHeartbeat -Encoding UTF8
+    if (-not (Get-StreamHeartbeatHealth).Healthy) { throw 'Frame2701 must clear the earlier stall.' }
+    $script:streamHeartbeatProgressMs -= 16000
+    $healthyFrame|ConvertTo-Json|Set-Content $slotBHeartbeat -Encoding UTF8
+    $frozen=Get-StreamHeartbeatHealth
+    if ($frozen.Healthy -or $frozen.Reason -notmatch 'frame-not-advancing') { throw 'A freshly rewritten but unchanged frame must still restart.' }
+    $healthyFrame.status='fatal'
+    $healthyFrame|ConvertTo-Json|Set-Content $slotBHeartbeat -Encoding UTF8
+    if ((Get-StreamHeartbeatHealth).Reason -notmatch 'frame-status=fatal') { throw 'Progress grace must never hide a fatal heartbeat.' }
 }
 finally {
     Remove-Item -LiteralPath $heartbeatTestRoot -Recurse -Force -ErrorAction SilentlyContinue
