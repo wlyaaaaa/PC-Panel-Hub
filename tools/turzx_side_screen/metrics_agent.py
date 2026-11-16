@@ -26,6 +26,7 @@ from urllib.parse import quote, urlencode, urlsplit
 import urllib.request
 import warnings
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from panel_live import publish_live
 
 
 DEFAULT_HOST = "127.0.0.1"
@@ -467,6 +468,7 @@ def _build_snapshot_unlocked(*, nonblocking_gpu: bool = False) -> dict[str, Any]
         snapshot["alert"]["level"] = "warn"
         snapshot["alert"]["message"] = "/".join(stale_hardware) + "部分指标为上次数据"
     _maybe_write_data_trust_log(snapshot)
+    publish_live(snapshot)
     return snapshot
 
 

@@ -6,4 +6,4 @@
 - **坏了怎么提醒我：**已配置只读[每晚自检](E:/PCConfig/docs/runtime/nightly-project-checks.md)，仅覆盖登记的检查命令；其他问题仍直接跟 AI 说。
 - **让 AI 做什么：**请 AI 检查两块屏的状态和日志，按故障范围修复，并在实体屏上确认结果。
 
-安装、修复和配置见 [启动与恢复](docs/startup.md)；曲面屏功能见 [曲面屏说明](docs/hs2-crystal-overlay.md)。
+安装、修复和配置见 [启动与恢复](docs/startup.md)；曲面屏功能见 [曲面屏说明](docs/hs2-crystal-overlay.md)；实况接线与按需取数见 [实况数据](docs/live-data.md)。
