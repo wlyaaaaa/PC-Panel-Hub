@@ -133,6 +133,8 @@ $wallpaperAttempts = 0
 $wallpaperNextAttempt = [DateTime]::MinValue
 $wallpaperStatus = 'waiting-for-running-engine'
 $totalMoves = 0
+$hs2TotalMoves = 0
+$hs2LastMoveUtc = $null
 $recentActions = @()
 $wallpaperResumeCount = 0
 $wallpaperRestartTopology = ''
@@ -173,6 +175,9 @@ try {
             $hs2 = Invoke-RememberedHS2WindowGuard
             $vdd = Invoke-VddWindowReturnGuard
             $totalMoves += @($hs2.AppliedActions).Count + @($vdd.AppliedActions).Count
+            $hs2Moves = @($hs2.AppliedActions | Where-Object Action -eq 'Move')
+            $hs2TotalMoves += $hs2Moves.Count
+            if ($hs2Moves.Count -gt 0) { $hs2LastMoveUtc = [DateTime]::UtcNow.ToString('o') }
             foreach ($source in @(@{ Name='hs2'; Actions=@($hs2.AppliedActions)+@($hs2.BackoffEvents) },
                                   @{ Name='vdd'; Actions=@($vdd.AppliedActions) })) {
                 foreach ($action in $source.Actions) {
@@ -262,6 +267,7 @@ try {
                     AppliedCount=@($hs2.AppliedActions).Count+@($vdd.AppliedActions).Count
                     FailedCount=@($hs2.FailedActions).Count+@($vdd.FailedActions).Count
                     VddVerifiedCount=$vdd.VerifiedCount; TotalMoves=$totalMoves
+                    HS2TotalMoves=$hs2TotalMoves; HS2LastMoveUtc=$hs2LastMoveUtc
                     RecentActions=@($recentActions)
                     WallpaperStatus=$wallpaperStatus; WallpaperResumeCount=$wallpaperResumeCount
                     WallpaperAttempts=$wallpaperAttempts

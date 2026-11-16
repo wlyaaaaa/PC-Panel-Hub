@@ -38,8 +38,10 @@ try {
     $script:device.ConfigManagerErrorCode=43
     Assert-Rejected { Get-TurzxVerifiedSerialEndpoint -Port COM12 }
 
-    # An installed Hybrid task must not swallow an explicit FullFrame request
-    # through the old watchdog's singleton mutex and report success.
+    # An installed Hybrid task must reject FullFrame before launching a watchdog.
+    # Copy the real entry with elevation mocked so providers stay in this process.
+    Copy-Item -LiteralPath (Join-Path $Root 'scripts\start.ps1') -Destination $configDir
+    [IO.File]::WriteAllText((Join-Path $configDir 'Elevation.ps1'), 'function Test-ProjectAdministrator { return $true }')
     [IO.File]::WriteAllText((Join-Path $configDir 'config.json'), '{"serial":{"port":"COM12"}}')
     Copy-Item -LiteralPath (Join-Path $Root 'tools\turzx_side_screen\PanelDevicePolicy.ps1') -Destination $configDir
     foreach ($name in @('StartSideScreenWatchdog.ps1','StopSideScreenStack.ps1')) {
@@ -50,7 +52,7 @@ try {
         return [pscustomobject]@{ Actions = @([pscustomobject]@{ Arguments = '-Port COM12 -HybridRefresh' }); State = 'Running' }
     }
     $modeRejected = $false
-    try { & (Join-Path $Root 'scripts\start.ps1') -Root $testRoot -FullFrame }
+    try { & (Join-Path $configDir 'start.ps1') -Root $testRoot -FullFrame }
     catch { $modeRejected = $_.Exception.Message -like '*different refresh*mode.*' }
     if (-not $modeRejected) { throw 'Explicit mode mismatch must fail before attempting a duplicate watchdog.' }
     Write-Host 'Panel configuration and serial identity checks passed (synthetic devices only).'
