@@ -10,7 +10,10 @@
     {"id":"moves","label":"这一轮把误跑到曲面屏的窗口挪走","source":"panel.live","pointer":"/metrics/moves","time":"/guard_at","mode":"live","unit":"次","public":"same","stale_after":30,"note":"回答：它替我省了多少事？旧状态只存 HS2 与 VDD 合计且历史已截断时给 null，需原窗口保护生产器输出 HS2 单独计数。", "unknown_text": "以前的记录没把曲面屏单独算。"},
     {"id":"last_move","label":"最近一次挪窗","source":"panel.live","pointer":"/metrics/last_move","time":"/guard_at","mode":"live","unit":"","public":"same","note":"回答：最近还在帮忙吗？无新动作时事件时刻保持。"},
     {"id":"wallpaper","label":"最近一次救回动态壁纸","source":"panel.live","pointer":"/metrics/wallpaper","time":"/guard_at","mode":"live","unit":"","public":"same","note":"回答：壁纸掉了它救过没有？只列 restart-verified；验证的是进程与布局。"},
-    {"id":"hs2_content","label":"现有观测","source":"panel.static","pointer":"/metrics/hs2_note","mode":"static","unit":"","public":"same","note":"只说明现有观测边界，不把程序在运行当成实体屏验收。"},
+    {"id":"hs2_count","label":"曲面屏此刻的卡片","source":"panel.overlay","pointer":"/count","time":"/at","mode":"live","unit":"张","public":"same","stale_after":5,"unknown_text":"尚无浮层快照；正式安装并重启新浮层后开始提供。"},
+    {"id":"hs2_cards","label":"每张是哪一种","source":"panel.overlay","pointer":"/cards","time":"/at","mode":"live","shape":"list","unit":"张","public":"same","stale_after":5,"unknown_text":"尚无浮层快照，不能从进程状态推测。"},
+    {"id":"hs2_updated","label":"曲面屏最近一次刷新","source":"panel.overlay","pointer":"/at","time":"/at","mode":"live","unit":"","public":"same","stale_after":5,"unknown_text":"尚无浮层刷新时刻。"},
+    {"id":"hs2_music","label":"正在显示的音乐","source":"panel.overlay","pointer":"/music","time":"/at","mode":"live","shape":"list","unit":"张","public":"owner","stale_after":5},
     {"id":"fetch_ms","label":"取数","source":"panel.live","pointer":"/frame_timing/fetch_ms","time":"/stream_at","mode":"live","unit":"毫秒","public":"same","stale_after":5},
     {"id":"render_ms","label":"绘制","source":"panel.live","pointer":"/frame_timing/render_ms","time":"/stream_at","mode":"live","unit":"毫秒","public":"same","stale_after":5},
     {"id":"send_ms","label":"发送","source":"panel.live","pointer":"/frame_timing/send_ms","time":"/stream_at","mode":"live","unit":"毫秒","public":"same","stale_after":5},
@@ -34,7 +37,7 @@
   "sections": [
     {"id":"turzx","label":"机箱竖屏","metrics":["updated","sent","failed","readings"],"about":"它现在还在送画面吗，读数有没有缺失？","note":"送失败 0 次不等于屏从没黑过；没有设备接收确认。CPU、显卡、网络的读数归电脑页。"},
     {"id":"window-guard","label":"替你收拾的","metrics":["moves","last_move","wallpaper"],"about":"它替我省了多少操作？","note":"计已执行动作，同一扇窗口可能被挪多次；窗口保护重启从 0 数，只计曲面屏，排除 VDD。"},
-    {"id":"hs2","label":"曲面屏","metrics":["hs2_content"],"note":""},
+    {"id":"hs2","label":"曲面屏","metrics":["hs2_count","hs2_cards","hs2_updated","hs2_music"],"note":"含时钟与手机电量常驻块；尚无快照时各项留空，正式安装并重启新浮层后开始提供，不从进程状态推测。"},
     {"id":"frame-timing","label":"刷新拆解","metrics":["fetch_ms","render_ms","send_ms","elapsed_ms","sleep_ms"],"about":"它画得慢，还是主动等下一秒？","note":"只有心跳最近一帧，不是长期趋势或平均性能；总工作还含阶段间开销。"},
     {"id":"more-data","label":"更多数据","metrics":["period_ms","preview","fallback","missing_fields","self_score","fps_status","weather_status","wallpaper_restarts","recent_moves","docs_files","code_files","docs_chars_raw","code_chars","code_words"],"about":"好奇：运行细节和项目规模。","note":"明细点开再看；静态数按需更新，无内容变化不刷新取数时刻。"}
   ],

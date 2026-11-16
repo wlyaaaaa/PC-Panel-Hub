@@ -32,6 +32,7 @@ internal sealed class OverlayController : IOverlayPublisher, IDisposable
     private int lastDriftMinute = -1;
     private int consecutiveRenderFailures;
     private DateTimeOffset lastRenderFailureLog = DateTimeOffset.MinValue;
+    private DateTimeOffset lastLiveSnapshot = DateTimeOffset.MinValue;
     private bool disposed;
 
     internal OverlayController(
@@ -191,6 +192,16 @@ internal sealed class OverlayController : IOverlayPublisher, IDisposable
         lastDeckPlan = plan;
         RenderCards(cards, plan.Cards, now);
         RenderDirect(frame.DirectItems, plan.DirectRegion, now);
+        if (now - lastLiveSnapshot >= TimeSpan.FromSeconds(1))
+        {
+            lastLiveSnapshot = now;
+            try
+            {
+                var path = Path.Combine(Windows.Storage.ApplicationData.Current.LocalFolder.Path, "live.snapshot.json");
+                OverlayLiveSnapshot.Write(path, cards.Where(item => bindings.ContainsKey(item.Request.EventId)).Concat(frame.DirectItems), now);
+            }
+            catch (Exception) { /* Snapshot I/O must not interrupt display updates. */ }
+        }
     }
 
     private void RenderCards(

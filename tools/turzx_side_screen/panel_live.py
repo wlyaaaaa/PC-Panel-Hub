@@ -85,7 +85,7 @@ def publish_static(root):
     size = {"at": at, "docs_chars": sum(map(words, docs)), "code_lines": sum(len(t.splitlines()) for t in code),
             "code_chars": sum(len(re.sub(r"\s", "", t)) for t in code)}
     metrics = {"docs_files": len(docs), "code_files": len(code), "docs_chars_raw": sum(len(re.sub(r"\s", "", t)) for t in docs),
-               "code_words": sum(map(words, code)), "hs2_note": "曲面屏暂时只看得到在不在运行，显示了什么还没数。"}
+               "code_words": sum(map(words, code)), "hs2_note": "曲面屏卡片与刷新时刻由浮层快照提供；未安装新浮层时留空，不以进程状态推测。"}
     write_json(path, {"v": 1, "at": at, "scope": "按需重算 Git 跟踪的自有文档与源码，含测试；排除配置、依赖、生成物和厂商文件。字数按汉字与连续英文数字下划线串计。",
                       "fingerprint": digest.hexdigest(), "metrics": metrics, "size": size})
 
