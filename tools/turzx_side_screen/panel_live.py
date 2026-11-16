@@ -53,7 +53,7 @@ def project_live(snapshot, output):
     metrics["preview"] = {"text": "有一张预览" if preview_at else "没有预览文件", "count": int(preview_at is not None), "generated_at": preview_at}
     return {"v": 1, "at": snapshot.get("health", {}).get("generated_at"),
             "stream_at": heartbeat.get("utc"), "guard_at": guard.get("ObservedAtUtc"), "preview_at": preview_at,
-            "scope": "主机写出不等于实体屏收到；计数限当前进程；旧窗口状态混有 VDD 且历史截断时不猜 HS2 总数。",
+            "scope": "",
             "frame_timing": {key: heartbeat.get(key) for key in ("fetch_ms", "render_ms", "send_ms", "elapsed_ms", "sleep_ms", "period_ms")},
             "metrics": metrics, "artifacts": [{"at": preview_at, "kind": "image", "title": "机箱屏此刻的画面", "status": "completed", "public": "owner", "open": {"source": "panel.preview"}}] if preview_at else []}
 
