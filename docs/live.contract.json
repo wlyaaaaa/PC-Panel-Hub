@@ -7,7 +7,7 @@
     {"id":"sent","label":"这一轮没重启、已连续送出","source":"panel.live","pointer":"/metrics/sent","time":"/stream_at","mode":"live","unit":"幅","public":"same","stale_after":5,"note":"回答：修完以后还会不会动不动整套重启？启动时刻未记录，不把帧数折算成精确运行时长。"},
     {"id":"failed","label":"这一轮送失败","source":"panel.live","pointer":"/metrics/failed","time":"/stream_at","mode":"live","unit":"次","public":"same","stale_after":5,"note":"回答：最近又出错没有？"},
     {"id":"readings","label":"屏上读数缺了几类／过期几类","source":"panel.live","pointer":"/metrics/readings","mode":"live","unit":"","public":"same","stale_after":5,"note":"回答：眼前这些数字能不能信？计类别，不是缺字段数。"},
-    {"id":"moves","label":"这一轮把误跑到曲面屏的窗口挪走","source":"panel.live","pointer":"/metrics/moves","time":"/guard_at","mode":"live","unit":"次","public":"same","stale_after":30,"note":"回答：它替我省了多少事？旧状态只存 HS2 与 VDD 合计且历史已截断时给 null，需原窗口保护生产器输出 HS2 单独计数。", "unknown_text": "旧记录未单独累计曲面屏。"},
+    {"id":"moves","label":"这一轮把误跑到曲面屏的窗口挪走","source":"panel.live","pointer":"/metrics/moves","time":"/guard_at","mode":"live","unit":"次","public":"same","stale_after":30,"note":"回答：它替我省了多少事？旧状态只存 HS2 与 VDD 合计且历史已截断时给 null，需原窗口保护生产器输出 HS2 单独计数。", "unknown_text": "以前的记录没把曲面屏单独算。"},
     {"id":"last_move","label":"最近一次挪窗","source":"panel.live","pointer":"/metrics/last_move","time":"/guard_at","mode":"live","unit":"","public":"same","note":"回答：最近还在帮忙吗？无新动作时事件时刻保持。"},
     {"id":"wallpaper","label":"最近一次救回动态壁纸","source":"panel.live","pointer":"/metrics/wallpaper","time":"/guard_at","mode":"live","unit":"","public":"same","note":"回答：壁纸掉了它救过没有？只列 restart-verified；验证的是进程与布局。"},
     {"id":"hs2_content","label":"现有观测","source":"panel.static","pointer":"/metrics/hs2_note","mode":"static","unit":"","public":"same","note":"只说明现有观测边界，不把程序在运行当成实体屏验收。"},
