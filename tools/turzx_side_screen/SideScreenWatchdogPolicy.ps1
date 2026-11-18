@@ -15,10 +15,12 @@ function Get-TurzxSerialEndpointRecoveryDecision {
         [int]$FailureThreshold = 3,
 
         [ValidateRange(30, 3600)]
-        [int]$RetrySeconds = 300
+        [int]$RetrySeconds = 300,
+
+        [switch]$EndpointFault
     )
 
-    if ($ConsecutiveBrightnessFailures -lt $FailureThreshold) {
+    if (-not $EndpointFault -and $ConsecutiveBrightnessFailures -lt $FailureThreshold) {
         return [pscustomobject]@{
             Action = "None"
             RetryAfterSeconds = 0

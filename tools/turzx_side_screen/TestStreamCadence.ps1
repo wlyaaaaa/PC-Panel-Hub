@@ -252,6 +252,12 @@ public static class TestStreamCadenceProgram
             }
             string slotBPath = System.IO.Path.Combine(atomicDir, "stream-heartbeat-b.json");
             Equal("odd frames use heartbeat slot B", "{\"frame\":3,\"status\":\"ok\"}", System.IO.File.ReadAllText(slotBPath));
+
+            var heartbeat = typeof(SideScreenStreamApp).GetMethod("WriteHeartbeat", System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
+            Type optionsType = heartbeat.GetParameters()[0].ParameterType;
+            object streamOptions = optionsType.GetMethod("Parse").Invoke(null, new object[] { new[] { "--hybrid-refresh", "--preview-dir", atomicDir } });
+            heartbeat.Invoke(null, new object[] { streamOptions, 4, 1, 1, 1, 1, 1000L, 0L, 0L, true, 900L, 900L, 0, "ok", "fatal", "timeout", "diff_204", true });
+            Contains("terminal heartbeat carries the serial fault", "\"serial_fault\": \"endpoint-unresponsive\"", System.IO.File.ReadAllText(slotAPath));
         }
         finally
         {
@@ -351,6 +357,8 @@ public static class TestStreamCadenceProgram
         watch.Stop();
         Equal("blocked command 204 returns a timeout result", false, completed);
         Contains("command 204 timeout names its budget", "TIMEOUT after 20 ms", (string)arguments[3]);
+        Equal("pre-write timeout does not implicate the serial endpoint", false,
+            ((TurzxHelperSender.DiffSession)session).EndpointUnresponsive);
         if (watch.ElapsedMilliseconds >= 150)
         {
             throw new Exception("bounded command 204 did not return promptly: " + watch.ElapsedMilliseconds + "ms");
@@ -384,15 +392,16 @@ public static class TestStreamCadenceProgram
     public sealed class FakeDiffWriter
     {
         public bool Finished;
-        public void Command(int command, int length, byte[] header, byte flag) { }
-        public void Body(byte[] data, int length) { Finished = true; }
+        public Action<string> BeforeWrite;
+        public void Command(int command, int length, byte[] header, byte flag) { BeforeWrite("command-204-header"); }
+        public void Body(byte[] data, int length) { BeforeWrite("command-204-body"); Finished = true; }
     }
 
     private static void VerifyDiffCalculationBoundaries()
     {
         Type sessionType = typeof(TurzxHelperSender.DiffSession);
         var flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
-        foreach (string phase in new[] { "diff-calculate", "command-204-header", "command-204-body" })
+        foreach (string phase in new[] { "diff-calculate", "command-204-header", "command-204-body", "vendor-device-error" })
         {
             var session = (TurzxHelperSender.DiffSession)System.Runtime.Serialization.FormatterServices.GetUninitializedObject(sessionType);
             var writer = new FakeDiffWriter();
@@ -402,12 +411,17 @@ public static class TestStreamCadenceProgram
             using (var release = new ManualResetEvent(false))
             {
                 Thread worker = null;
-                Action<string> diagnostic = delegate(string current)
+                writer.BeforeWrite = delegate(string current)
                 {
+                    if (phase == "vendor-device-error" && current == "command-204-header")
+                        throw new System.IO.IOException("Device Error") { Source = "UsbMonitorL" };
                     if (current != phase) return;
-                    if (phase == "diff-calculate") { Thread.Sleep(1100); return; }
                     worker = Thread.CurrentThread;
                     release.WaitOne(5000);
+                };
+                Action<string> diagnostic = delegate(string current)
+                {
+                    if (current == "diff-calculate" && current == phase) Thread.Sleep(1100);
                 };
                 sessionType.GetField("_sendPhaseDiagnostic", flags).SetValue(session, diagnostic);
                 int result;
@@ -417,11 +431,13 @@ public static class TestStreamCadenceProgram
                     bool calculated = phase == "diff-calculate";
                     Equal("calculation pause preserves port; blocked serial still times out " + phase, calculated,
                         session.SendDiffWithTimeout(new byte[64], new byte[64], 0, false, false, 900, out result, out message));
-                    Equal("only unfinished serial writers are abandoned " + phase, !calculated,
+                    Equal("unsafe serial sessions are abandoned " + phase, !calculated,
                         sessionType.GetField("_abandoned", flags).GetValue(session));
-                    Equal("timed-out serial writer cannot be reopened", false, session.CanReopenAfterFailure);
+                    Equal("unsafe serial sessions cannot be reopened", false, session.CanReopenAfterFailure);
+                    Equal("only a blocked or failed actual write marks the endpoint unresponsive " + phase, !calculated, session.EndpointUnresponsive);
                     Contains("actual calculation returned before serial deadline", "diffCalculationReturnObserved=True", message);
                     if (calculated) Equal("long calculation still sends", true, writer.Finished);
+                    else if (phase == "vendor-device-error") Contains("vendor header error survives reflection", "Source=UsbMonitorL HResult=0x80131620 Message=Device Error", message);
                     else Contains("serial I/O keeps 900ms deadline", "DIFF TIMEOUT after 900 ms", message);
                 }
                 finally
@@ -440,12 +456,20 @@ public static class TestStreamCadenceProgram
         public void Prime() { Visit("prime"); }
         public void Brightness(byte value) { Visit("brightness"); }
         public void Full(byte[] data, int length, bool flag) { Visit("full" + (++frames)); }
+        public void Close() { throw new Exception("terminal fault entered vendor Close"); }
         private void Visit(string step)
         {
             Calls += step + ",";
-            if (step == Failure)
-                throw new System.IO.IOException("Device Error",
-                    new System.ComponentModel.Win32Exception(31, "driver-fault") { Source = "SyntheticDriver" }) { Source = "VendorShim" };
+            if (step != Failure) return;
+            if (step == "full1" || step == "full2")
+            {
+                var io = new Thread(RJCP.IO.Ports.Native.Windows.CommOverlappedIo.Fail) { Name = "SerialPortStream_TEST" };
+                io.Start();
+                if (!io.Join(2000)) throw new Exception("I/O thread did not exit");
+                throw new System.IO.IOException("Device Error") { Source = step == "full2" ? "RJCP.SerialPortStream" : "VendorShim" };
+            }
+            throw new System.IO.IOException("Device Error",
+                new System.ComponentModel.Win32Exception(step == "prime" ? 121 : 31, "driver-fault") { Source = "SyntheticDriver" }) { Source = "VendorShim" };
         }
     }
 
@@ -453,33 +477,40 @@ public static class TestStreamCadenceProgram
     {
         Type sessionType = typeof(TurzxHelperSender.DiffSession);
         var flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
-        string[] failures = { "prime", "brightness", "full2", "" };
-        string[] phases = { "full-prime", "full-brightness", "full-frame-2", "full-complete" };
+        string[] failures = { "prime", "brightness", "full1", "full2", "" };
+        string[] phases = { "full-prime", "full-brightness", "full-frame-1", "full-frame-2", "full-complete" };
         for (int index = 0; index < failures.Length; index++)
         {
             var session = (TurzxHelperSender.DiffSession)System.Runtime.Serialization.FormatterServices.GetUninitializedObject(sessionType);
             var writer = new FakeFullWriter { Failure = failures[index] };
+            var evidence = new SerialFailureEvidence(index == 2 ? "TEST" : "OTHER");
+            sessionType.GetField("_serialFailureEvidence", flags).SetValue(session, evidence);
             foreach (string field in new[] { "_driver", "_serial" }) sessionType.GetField(field, flags).SetValue(session, writer);
-            foreach (string pair in new[] { "_prime:Prime", "_setBrightness:Brightness", "_sendFull:Full" })
+            foreach (string pair in new[] { "_prime:Prime", "_setBrightness:Brightness", "_sendFull:Full", "_close:Close" })
             {
                 string[] names = pair.Split(':');
                 sessionType.GetField(names[0], flags).SetValue(session, typeof(FakeFullWriter).GetMethod(names[1]));
             }
             string message;
-            Equal("injected full write verdict " + index, index == 3,
+            bool ok = failures[index] == "";
+            bool terminal = !ok && index != 1;
+            Equal("injected full write verdict " + index, ok,
                 session.SendFullWithTimeout(new byte[4], 2000, 2, 7, true, 40, out message));
-            Equal("joined failures can safely close; success does not request recovery", index != 3, session.CanReopenAfterFailure);
+            Equal("reflected 121, a dead I/O thread and RJCP Device Error mark terminal", terminal, session.EndpointUnresponsive);
+            Equal("only ordinary joined failures keep the process-local reopen", index == 1, session.CanReopenAfterFailure);
             Contains("full write identifies actual step " + index, "phase=" + phases[index] + " ", message);
-            if (index == 3)
+            if (ok)
                 Equal("full baseline write order and duplicate count remain intact", "prime,brightness,full1,full2,", writer.Calls);
-            else
+            else if (index < 2)
             {
                 StartsWith("existing full error prefix remains recognizable", "FULL EXCEPTION - IOException: Device Error;", message);
                 Contains("external exception source survives reflection", "Source=VendorShim", message);
                 Contains("nested exception type is retained", "type=System.ComponentModel.Win32Exception", message);
-                Contains("actual native error code is retained", "NativeErrorCode=31", message);
+                Contains("actual native error code is retained", "NativeErrorCode=" + (index == 0 ? 121 : 31), message);
                 Contains("IOException HRESULT remains separately labelled", "HResult=0x" + new System.IO.IOException().HResult.ToString("X8"), message);
             }
+            if (terminal) session.Dispose();
+            evidence.Dispose();
         }
         var bounded = sessionType.GetMethod("RunBoundedSend", flags);
         for (int variant = 0; variant < 3; variant++)
@@ -608,6 +639,18 @@ public static class TestStreamCadenceProgram
         if (actual == null || actual.IndexOf(expectedText, StringComparison.Ordinal) < 0)
         {
             throw new Exception(name + ": expected text " + expectedText + ", got " + actual);
+        }
+    }
+}
+
+namespace RJCP.IO.Ports.Native.Windows
+{
+    internal static class CommOverlappedIo
+    {
+        internal static void Fail()
+        {
+            try { System.Runtime.InteropServices.Marshal.ThrowExceptionForHR(unchecked((int)0x80070079)); }
+            catch (System.Runtime.InteropServices.COMException) { }
         }
     }
 }

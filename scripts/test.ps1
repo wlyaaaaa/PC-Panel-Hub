@@ -103,7 +103,7 @@ $vendorAssembly = @("TURZX.weatherfix.metrics.exe", "TURZX.exe") |
     Where-Object { Test-Path -LiteralPath (Join-Path $Root $_) -PathType Leaf } |
     Select-Object -First 1
 if ($vendorAssembly) {
-    powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $side "TestDiffPayload.ps1") -VendorRoot $Root
+    powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $side "TestDiffPayload.ps1") -VendorRoot $Root -WorkRoot (Join-Path $side 'out\tests')
     if ($LASTEXITCODE -ne 0) { throw "TestDiffPayload.ps1 failed" }
     powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $side "TestDiffProbe.ps1") -Root $Root
     if ($LASTEXITCODE -ne 0) { throw "TestDiffProbe.ps1 failed" }
@@ -113,6 +113,8 @@ if ($vendorAssembly) {
 
 powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $side "TestPowerWatchdog.ps1") -Root $Root
 if ($LASTEXITCODE -ne 0) { throw "TestPowerWatchdog.ps1 failed" }
+powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Root 'scripts\TestTurzxSerialFaultRecovery.ps1') -Root $Root
+if ($LASTEXITCODE -ne 0) { throw 'TestTurzxSerialFaultRecovery.ps1 failed' }
 
 powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Root "scripts\TestShortcutScripts.ps1") -Root $Root
 if ($LASTEXITCODE -ne 0) { throw "TestShortcutScripts.ps1 failed" }

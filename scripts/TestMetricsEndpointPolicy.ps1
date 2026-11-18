@@ -5,13 +5,11 @@ try {
  . (Join-Path (Split-Path $PSScriptRoot -Parent) 'tools\turzx_side_screen\MetricsEndpointPolicy.ps1')
 } finally { Remove-Item -LiteralPath Function:\Add-Type }
 if(-not(Test-MetricsProcessActive -ProcessId $PID)){throw 'Current real process must be alive'}
-$hostProcess=[Diagnostics.Process]::GetCurrentProcess()
-try { $hostExecutable=$hostProcess.MainModule.FileName } finally { $hostProcess.Dispose() }
-$startInfo=[Diagnostics.ProcessStartInfo]::new($hostExecutable)
+$startInfo=[Diagnostics.ProcessStartInfo]::new((Join-Path $env:SystemRoot 'System32\cmd.exe'))
 $startInfo.UseShellExecute=$false
 $startInfo.CreateNoWindow=$true
 $startInfo.WindowStyle=[Diagnostics.ProcessWindowStyle]::Hidden
-$startInfo.Arguments='-NoProfile -NonInteractive -Command "exit 259"'
+$startInfo.Arguments='/d /c exit 259'
 $child=[Diagnostics.Process]::Start($startInfo)
 try {
  $heldHandle=$child.Handle # Keep the completed process registered while checking its completion.

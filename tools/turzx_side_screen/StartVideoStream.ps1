@@ -15,6 +15,7 @@
     [switch]$Sample,
     [switch]$DryRun,
     [switch]$KeepMetrics,
+    [switch]$SkipMetricsMaintenance,
     [switch]$HybridRefresh,
     [switch]$Diff,
     [switch]$AllowUnverifiedDifferentialProtocol
@@ -137,7 +138,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 $agentProcess = $null
-if (!$Sample -and !$DryRun) {
+if (!$Sample -and !$DryRun -and !$SkipMetricsMaintenance) {
     Write-StreamStartupStage 'metrics-ready-maintenance-start'
     try {
         if (-not (Test-MetricsEndpointReady)) {

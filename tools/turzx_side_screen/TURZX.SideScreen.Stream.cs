@@ -266,7 +266,9 @@ namespace TURZX.SideScreen
                         {
                             consecutiveSendFailures++;
                             Console.WriteLine("frame " + frame + " consecutiveSendFailures=" + consecutiveSendFailures);
-                            if (options.HybridRefresh && diffSession != null &&
+                            bool terminalSerialFault = options.HybridRefresh && sendAttempted &&
+                                diffSession != null && diffSession.EndpointUnresponsive;
+                            if (!terminalSerialFault && options.HybridRefresh && diffSession != null &&
                                 diffSession.CanReopenAfterFailure && consecutiveSendFailures == 1)
                             {
                                 WriteSerialFailureEvidence(options, diffSession, frameError);
@@ -277,14 +279,14 @@ namespace TURZX.SideScreen
                                 Console.WriteLine("serial recovery: reopened " + options.Port + "; next frame restores full baseline");
                                 continue;
                             }
-                            if (ShouldAbortAfterSendFailure(
+                            if (terminalSerialFault || ShouldAbortAfterSendFailure(
                                 options.HybridRefresh,
                                 sendAttempted,
                                 consecutiveSendFailures,
                                 options.MaxConsecutiveSendFailures))
                             {
                                 frameWatch.Stop();
-                                WriteHeartbeat(options, frame, sent, failed, consecutiveSendFailures, lastFullFrame, periodMs, fetchMs, renderMs, sendAttempted, sendMs, frameWatch.ElapsedMilliseconds, 0, snapshotStatus, "fatal", frameError, frameTransport);
+                                WriteHeartbeat(options, frame, sent, failed, consecutiveSendFailures, lastFullFrame, periodMs, fetchMs, renderMs, sendAttempted, sendMs, frameWatch.ElapsedMilliseconds, 0, snapshotStatus, "fatal", frameError, frameTransport, terminalSerialFault);
                                 WriteSerialFailureEvidence(options, diffSession, frameError);
                                 Console.Error.WriteLine("stream fatal: consecutive send failures reached " + consecutiveSendFailures + "; exiting so watchdog can reopen " + options.Port);
                                 return 1;
@@ -847,7 +849,8 @@ namespace TURZX.SideScreen
             string snapshotStatus,
             string frameStatus,
             string frameError,
-            string frameTransport)
+            string frameTransport,
+            bool terminalSerialFault = false)
         {
             if (options == null || string.IsNullOrWhiteSpace(options.PreviewDir))
             {
@@ -861,6 +864,7 @@ namespace TURZX.SideScreen
             AppendJsonProperty(json, "status", frameStatus, true);
             AppendJsonProperty(json, "snapshot_status", snapshotStatus, true);
             AppendJsonProperty(json, "error", frameError, true);
+            if (terminalSerialFault) AppendJsonProperty(json, "serial_fault", "endpoint-unresponsive", true);
             AppendJsonProperty(json, "transport_mode", ResolveTransportMode(options.HybridRefresh, options.UseDiff), true);
             AppendJsonProperty(json, "frame_transport", frameTransport, true);
             AppendJsonProperty(json, "frame", frame, true);

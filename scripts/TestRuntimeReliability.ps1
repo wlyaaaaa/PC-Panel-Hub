@@ -499,8 +499,10 @@ foreach ($pattern in @(
 
 & {
     $startStack=$restartAst.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst]},$true) | Where-Object Name -eq 'Start-Stack'
-    $prepare=[scriptblock]::Create(($startStack.Body.EndBlock.Statements[0..1].Extent.Text -join "`n"))
+    $prepare=[scriptblock]::Create($startStack.Body.EndBlock.Statements[0].Extent.Text)
     function Stop-Stack {param($Reason,[switch]$KeepMetrics) $script:keptMetrics=$KeepMetrics.IsPresent}
+    function Set-TurzxPanelBrightness {param($Brightness) $true}
+    $StreamOnly=$false; $ActiveBrightness=170
     foreach ($Reason in @('heartbeat-unhealthy','failure-circuit/heartbeat-stalls','restart-request','snapshot-stale-after-metrics-restarts','failure-circuit/snapshot-stale-after-metrics-restarts')) {
         . $prepare
         $expected=$Reason -in @('heartbeat-unhealthy','failure-circuit/heartbeat-stalls')
@@ -1007,9 +1009,9 @@ foreach ($pattern in @(
     . ([scriptblock]::Create(($functions | Where-Object Name -eq 'Invoke-TurzxMetricsRecovery').Extent.Text))
     . ([scriptblock]::Create($startupWindowFunction.Extent.Text))
     $healthBody = $watchdogAst.FindAll({param($n) $n -is [Management.Automation.Language.IfStatementAst]}, $true) |
-        Where-Object { $_.Clauses[0].Item1.Extent.Text -eq '$child.HasExited' }
+        Where-Object { $_.Clauses[0].Item1.Extent.Text -eq '$childExited' }
     $healthBody = $healthBody.Clauses[1].Item2.Extent.Text
-    $healthStep = [scriptblock]::Create($healthBody.Substring(1, $healthBody.Length - 2))
+    $healthStep = [scriptblock]::Create('$heartbeatHealth = Get-StreamHeartbeatHealth' + "`n" + $healthBody.Substring(1, $healthBody.Length - 2))
     function Get-TurzxMonotonicMilliseconds { 0 }
     function Get-StreamHeartbeatHealth { [pscustomobject]@{Healthy=$true; SnapshotStatus=$snapshotStatus; Reason='ok'} }
     function Invoke-TurzxMetricsAgentMaintenance {

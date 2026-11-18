@@ -25,6 +25,7 @@ namespace TURZX.SideScreen
             internal readonly int ManagedTid, HResult;
             internal readonly uint NativeTid;
             internal readonly int? NativeError;
+            internal readonly long ObservedAt = Stopwatch.GetTimestamp();
             internal readonly string Type, Message, Stack, ObservedUtc;
             internal readonly string NativeSite = "unknown";
             internal readonly int NativeIlOffset = -1;
@@ -70,6 +71,18 @@ namespace TURZX.SideScreen
             }
             catch { }
             finally { _recording = false; }
+        }
+
+        internal bool HasFailedIoSince(long startedAt)
+        {
+            for (int i = 0; i < _entries.Length; i++)
+            {
+                Entry entry = Interlocked.CompareExchange(ref _entries[i], null, null);
+                if (entry != null && entry.ObservedAt >= startedAt &&
+                    entry.NativeSite.StartsWith("RJCP.IO.Ports.Native.Windows.CommOverlappedIo.", StringComparison.Ordinal) &&
+                    (entry.NativeError == 121 || !entry.Thread.IsAlive)) return true;
+            }
+            return false;
         }
 
         internal bool WriteStopped(string path, string failure)
@@ -401,6 +414,8 @@ namespace TURZX.SideScreen
             private CalculationBoundary _diffCalculationBoundary;
             private readonly SerialFailureEvidence _serialFailureEvidence;
             private bool _completedSendFailed;
+            private volatile bool _diffWriteActive;
+            internal bool EndpointUnresponsive { get; private set; }
             internal bool CanReopenAfterFailure { get { return !_abandoned && _completedSendFailed; } }
 
             [StructLayout(LayoutKind.Sequential)]
@@ -782,6 +797,7 @@ namespace TURZX.SideScreen
             private bool RunBoundedSend(Action send, int timeoutMs, string operation, out string message, bool calculationPrepared = false)
             {
                 Stopwatch boundedWatch = Stopwatch.StartNew();
+                long startedAt = Stopwatch.GetTimestamp();
                 DateTime boundedStartUtc = DateTime.UtcNow;
                 DateTime threadStartUtc;
                 DateTime threadStartedUtc;
@@ -833,6 +849,11 @@ namespace TURZX.SideScreen
                 // Preserve abandonment before diagnostics can throw: a writer
                 // that timed out must never have its COM object closed/reused.
                 if (!joined) _abandoned = true;
+                bool diff = operation == "DIFF";
+                EndpointUnresponsive = (!joined && diff && _diffWriteActive) ||
+                    (joined && workerError != null && (IsEndpointError(workerError, diff) ||
+                    (_serialFailureEvidence != null && _serialFailureEvidence.HasFailedIoSince(startedAt))));
+                if (EndpointUnresponsive) _abandoned = true;
                 joinWatch.Stop();
                 DateTime joinReturnUtc = DateTime.UtcNow;
                 WorkerIdentity started = Interlocked.CompareExchange(ref workerIdentity, null, null);
@@ -869,6 +890,19 @@ namespace TURZX.SideScreen
                 // actual boundaries rather than treating elapsed time as cause.
                 message = operation + " OK; " + timing + "; " + progress;
                 return true;
+            }
+
+            private static bool IsEndpointError(Exception error, bool diff)
+            {
+                for (; error != null; error = error.InnerException)
+                {
+                    var native = error as System.ComponentModel.Win32Exception;
+                    if ((native != null && native.NativeErrorCode == 121) || error.HResult == unchecked((int)0x80070079)) return true;
+                    if (error is System.IO.IOException && error.Message == "Device Error" &&
+                        (error.Source == "RJCP.SerialPortStream" || error.Source == "UsbMonitorL")) return true;
+                    if (diff && error is TimeoutException && error.Source == "RJCP.SerialPortStream") return true;
+                }
+                return false;
             }
 
             private static string ErrorField(string value, int limit)
@@ -954,11 +988,18 @@ namespace TURZX.SideScreen
                 header[3] = (byte)(seq & 0xFF);
 
                 SetSendPhase("command-204-header");
-                _sendCommand.Invoke(_serial, new object[] { 204, bodyLength, header, (byte)0 });
+                InvokeDiffWrite(_sendCommand, new object[] { 204, bodyLength, header, (byte)0 });
                 SetSendPhase("command-204-body");
-                _sendBody.Invoke(_serial, new object[] { payload, bodyLength });
+                InvokeDiffWrite(_sendBody, new object[] { payload, bodyLength });
                 SetSendPhase("diff-complete");
                 return bodyLength;
+            }
+
+            private void InvokeDiffWrite(MethodInfo method, object[] args)
+            {
+                _diffWriteActive = true;
+                try { method.Invoke(_serial, args); }
+                finally { _diffWriteActive = false; }
             }
 
             public void Dispose()

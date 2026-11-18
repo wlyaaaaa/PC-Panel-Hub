@@ -12,6 +12,7 @@
     [int64]$MaxStreamLogBytes = 5242880,
     [ValidateRange(1, 32)][int]$LogBackupCount = 3,
     [switch]$HybridRefresh,
+    [switch]$StreamOnly,
     [switch]$Worker
 )
 
@@ -141,53 +142,57 @@ function Stop-ProcessByCommandLine {
         }
 }
 
-Write-StackLog ("starting stack root={0} port={1} interval={2} hybrid={3}" -f $Root, $Port, $IntervalMs, $HybridRefresh.IsPresent)
+Write-StackLog ("starting stack root={0} port={1} interval={2} hybrid={3} streamOnly={4}" -f `
+    $Root, $Port, $IntervalMs, $HybridRefresh.IsPresent, $StreamOnly.IsPresent)
 
-# Keep the custom side-screen stack authoritative.
-Get-Process "TURZX", "TURZX.weatherfix", "TURZX.weatherfix.metrics" -ErrorAction SilentlyContinue |
-    Stop-Process -Force -ErrorAction SilentlyContinue
+$python = $null
+if (-not $StreamOnly) {
+    # Keep the custom side-screen stack authoritative.
+    Get-Process "TURZX", "TURZX.weatherfix", "TURZX.weatherfix.metrics" -ErrorAction SilentlyContinue |
+        Stop-Process -Force -ErrorAction SilentlyContinue
 
-Stop-ProcessByCommandLine -NamePattern "python*" -CommandPattern "*turzx_side_screen\top_processes_helper.py*"
-Stop-ProcessByCommandLine -NamePattern "python*" -CommandPattern "*turzx_weather_shim\turzx_weather_shim.py*"
-Stop-ProcessByCommandLine -NamePattern "TURZX.SideScreen.Stream.exe" -CommandPattern "*turzx_side_screen*"
+    Stop-ProcessByCommandLine -NamePattern "python*" -CommandPattern "*turzx_side_screen\top_processes_helper.py*"
+    Stop-ProcessByCommandLine -NamePattern "python*" -CommandPattern "*turzx_weather_shim\turzx_weather_shim.py*"
+    Stop-ProcessByCommandLine -NamePattern "TURZX.SideScreen.Stream.exe" -CommandPattern "*turzx_side_screen*"
 
-$python = Find-Python
-Write-StackLog ("python selected path={0} timeauditModulesRequired={1}" -f $python, (
-    -not [string]::IsNullOrWhiteSpace($env:TIMEAUDIT_DSN) -or
-    (-not [string]::IsNullOrWhiteSpace($env:TIMEAUDIT_DB_PASSWORD) -and -not [string]::IsNullOrWhiteSpace($env:TIMEAUDIT_DB_USER))
-))
-$weatherShim = Join-Path $Root "tools\turzx_weather_shim\turzx_weather_shim.py"
-$weatherDir = Split-Path -Parent $weatherShim
-$weatherConfig = Join-Path $Root 'tools\turzx_side_screen\config.json'
-$weatherStdout = Join-Path $outDir 'weather-shim.stdout.log'
-$weatherStderr = Join-Path $outDir 'weather-shim.stderr.log'
-$weatherArgs = @('-u', $weatherShim, '--host', '127.0.0.1', '--port', '18080')
-if (Test-Path -LiteralPath $weatherConfig -PathType Leaf) {
-    $weatherArgs += @('--config', $weatherConfig)
+    $python = Find-Python
+    Write-StackLog ("python selected path={0} timeauditModulesRequired={1}" -f $python, (
+        -not [string]::IsNullOrWhiteSpace($env:TIMEAUDIT_DSN) -or
+        (-not [string]::IsNullOrWhiteSpace($env:TIMEAUDIT_DB_PASSWORD) -and -not [string]::IsNullOrWhiteSpace($env:TIMEAUDIT_DB_USER))
+    ))
+    $weatherShim = Join-Path $Root "tools\turzx_weather_shim\turzx_weather_shim.py"
+    $weatherDir = Split-Path -Parent $weatherShim
+    $weatherConfig = Join-Path $Root 'tools\turzx_side_screen\config.json'
+    $weatherStdout = Join-Path $outDir 'weather-shim.stdout.log'
+    $weatherStderr = Join-Path $outDir 'weather-shim.stderr.log'
+    $weatherArgs = @('-u', $weatherShim, '--host', '127.0.0.1', '--port', '18080')
+    if (Test-Path -LiteralPath $weatherConfig -PathType Leaf) {
+        $weatherArgs += @('--config', $weatherConfig)
+    }
+    $weatherProcess = Start-HiddenProcess -FilePath $python `
+        -ArgumentList $weatherArgs -WorkingDirectory $weatherDir `
+        -RedirectStandardOutput $weatherStdout -RedirectStandardError $weatherStderr
+    if ($weatherProcess.WaitForExit(1000)) {
+        $reason = @(Get-Content -LiteralPath $weatherStderr -Tail 2 -ErrorAction SilentlyContinue) -join ' '
+        if ([string]::IsNullOrWhiteSpace($reason)) { $reason = "exit code $($weatherProcess.ExitCode)" }
+        Write-StackLog "weather shim exited during startup: $reason"
+    } else {
+        Write-StackLog ("weather shim started pid={0}" -f $weatherProcess.Id)
+    }
+
+    Start-HiddenProcess -FilePath $python `
+        -ArgumentList @((Join-Path $scriptDir "top_processes_helper.py"), "--cache-path", (Join-Path $outDir "top-processes.json"), "--interval-seconds", "3", "--limit", "5") `
+        -WorkingDirectory $scriptDir | Out-Null
+    Write-StackLog "top processes helper launched"
+
+    Start-Sleep -Milliseconds 900
 }
-$weatherProcess = Start-HiddenProcess -FilePath $python `
-    -ArgumentList $weatherArgs -WorkingDirectory $weatherDir `
-    -RedirectStandardOutput $weatherStdout -RedirectStandardError $weatherStderr
-if ($weatherProcess.WaitForExit(1000)) {
-    $reason = @(Get-Content -LiteralPath $weatherStderr -Tail 2 -ErrorAction SilentlyContinue) -join ' '
-    if ([string]::IsNullOrWhiteSpace($reason)) { $reason = "exit code $($weatherProcess.ExitCode)" }
-    Write-StackLog "weather shim exited during startup: $reason"
-} else {
-    Write-StackLog ("weather shim started pid={0}" -f $weatherProcess.Id)
-}
-
-Start-HiddenProcess -FilePath $python `
-    -ArgumentList @((Join-Path $scriptDir "top_processes_helper.py"), "--cache-path", (Join-Path $outDir "top-processes.json"), "--interval-seconds", "3", "--limit", "5") `
-    -WorkingDirectory $scriptDir | Out-Null
-Write-StackLog "top processes helper launched"
-
-Start-Sleep -Milliseconds 900
 
 $streamScript = Join-Path $scriptDir "StartVideoStream.ps1"
 try {
     # HybridRefresh is explicit and reversible: it uses a vendor-shaped command-200
     # baseline plus bounded command-204 deltas. The default remains full command 200.
-    & $streamScript -Root $Root -Port $Port -IntervalMs $IntervalMs -Frames 0 -SendTimeoutMs $SendTimeoutMs -DiffSendTimeoutMs $DiffSendTimeoutMs -MaxConsecutiveSendFailures $MaxConsecutiveSendFailures -FullResyncEveryFrames $FullResyncEveryFrames -BaselineBrightness $BaselineBrightness -PreviewIntervalSeconds $PreviewIntervalSeconds -PythonPath $python -HybridRefresh:$HybridRefresh -KeepMetrics *>&1 |
+    & $streamScript -Root $Root -Port $Port -IntervalMs $IntervalMs -Frames 0 -SendTimeoutMs $SendTimeoutMs -DiffSendTimeoutMs $DiffSendTimeoutMs -MaxConsecutiveSendFailures $MaxConsecutiveSendFailures -FullResyncEveryFrames $FullResyncEveryFrames -BaselineBrightness $BaselineBrightness -PreviewIntervalSeconds $PreviewIntervalSeconds -PythonPath $python -HybridRefresh:$HybridRefresh -KeepMetrics -SkipMetricsMaintenance:$StreamOnly *>&1 |
         ForEach-Object {
             Write-BoundedLogLine -Path $stdoutPath -Message ([string]$_) -MaxBytes $MaxStreamLogBytes -BackupCount $LogBackupCount
         }
