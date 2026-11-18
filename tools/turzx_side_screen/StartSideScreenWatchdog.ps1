@@ -20,7 +20,7 @@
     [ValidateRange(3000, 60000)][int]$HeartbeatMaxSendMs = 10000,
     [ValidateRange(3000, 120000)][int]$HeartbeatMaxElapsedMs = 12000,
     [ValidateRange(3000, 120000)][int]$HeartbeatMaxPeriodMs = 15000,
-    [int]$HeartbeatStartupGraceSeconds = 60,
+    [int]$HeartbeatStartupGraceSeconds = 150,
     [int]$ShutdownStartupGraceSeconds = 180,
     [int]$MaxConsecutiveHeartbeatFailures = 3,
     [ValidateRange(2, 20)][int]$MaxConsecutiveSnapshotStaleHeartbeats = 5,

@@ -2402,7 +2402,7 @@ foreach ($pattern in @(
     "restart request detected"
     "Get-TurzxShutdownEventDecision"
     "ShutdownStartupGraceSeconds"
-    "HeartbeatStartupGraceSeconds = 60"
+    "HeartbeatStartupGraceSeconds = 150"
     "FailureCircuitBreakerSeconds = 30"
     "failure circuit open"
     "failure circuit closed"
