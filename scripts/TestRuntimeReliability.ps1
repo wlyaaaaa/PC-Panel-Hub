@@ -217,7 +217,6 @@ if ($watchdogStart -notmatch [regex]::Escape('Claim-TurzxRestartRequest -Path $r
     throw "A failed manual restart request must be consumed once and rejoin the existing cooldown path."
 }
 foreach ($pattern in @(
-    'if ($null -eq $child)',
     'Invoke-TurzxStackRestartAttempt',
     'stack restart deferred'
 )) {
@@ -287,22 +286,40 @@ if ($processSnapshotFunction.Extent.Text -notmatch [regex]::Escape('-OperationTi
     throw "StopSideScreenStack must pass its bounded timeout to Get-CimInstance."
 }
 & {
-    $script:capturedCimTimeoutSeconds = $null
+    $side = "E:\owner's [%]\tools\turzx_side_screen"
+    $weather = 'E:\test\turzx_weather_shim'
+    $IncludeWatchdog = $false
     function Write-StopLog { param([string]$Message) }
     function Get-CimInstance {
         [CmdletBinding()]
         param(
             [string]$ClassName,
+            [string]$Filter,
+            [string[]]$Property,
             [uint32]$OperationTimeoutSec
         )
         $script:capturedCimTimeoutSeconds = $OperationTimeoutSec
+        $script:capturedCimFilter = $Filter
+        $script:capturedCimProperty = $Property
         throw "synthetic CIM provider timeout"
     }
 
     . ([scriptblock]::Create($processSnapshotFunction.Extent.Text))
-    $snapshot = @(Get-TurzxProcessSnapshot -TimeoutSeconds 7)
+    $snapshot = @(Get-TurzxProcessSnapshot -TimeoutSeconds 7 -RecordedIds @(62532))
     if ($snapshot.Count -ne 0 -or $script:capturedCimTimeoutSeconds -ne 7) {
         throw "A failed bounded process snapshot must fall back to an empty safe snapshot."
+    }
+    if ($script:capturedCimFilter -notlike '*ProcessId=62532' -or
+        -not $script:capturedCimFilter.Contains("CommandLine LIKE '%E:\\owner\'s [[][%]]\\tools\\turzx[_]side[_]screen\\%'") -or
+        ($script:capturedCimProperty -join ',') -ne 'Name,ProcessId,ParentProcessId,CommandLine,CreationDate,ExecutablePath') {
+        throw 'The snapshot must query only project candidates and project identity columns.'
+    }
+    $activeStackGuard = $stopAst.EndBlock.Statements | Where-Object { $_.Extent.Text -match '^if .*\$recordedStackId.*\{' -and $_.Extent.Text -match 'Cannot verify active recorded stack process' }
+    function Get-Process { [CmdletBinding()]param([int]$Id) if ($Id -eq 62532) { [pscustomobject]@{ProcessName='powershell'} } }
+    $recordedStackId = 62532; $processSnapshot = $snapshot; $stopError = $null
+    try { . ([scriptblock]::Create($activeStackGuard.Extent.Text)) } catch { $stopError = $_.Exception.Message }
+    if ($stopError -notmatch 'active recorded stack process PID=62532') {
+        throw 'A failed CIM snapshot must block restart while an old recorded stack can still launch a stream.'
     }
 }
 
@@ -317,8 +334,8 @@ $freshStreamQuery = $stopAst.EndBlock.Statements | Where-Object {
     function Write-StopPhase {param($Phase)}
     function Get-Process { [CmdletBinding()]param($Name) if ($script:hasStream) { [pscustomobject]@{Id=62532} } }
     function Get-CimInstance {
-        [CmdletBinding()]param($ClassName,$Filter,$OperationTimeoutSec)
-        if ($Filter -ne "Name='TURZX.SideScreen.Stream.exe'" -or $OperationTimeoutSec -ne 7) { throw 'Remaining-stream lookup must retain its exact image and timeout.' }
+        [CmdletBinding()]param($ClassName,$Filter,$Property,$OperationTimeoutSec)
+        if ($Filter -ne "Name LIKE 'TURZX.SideScreen.Stream%.exe'" -or $OperationTimeoutSec -ne 7) { throw 'Remaining-stream lookup must retain its stream image family and timeout.' }
         $script:cimCalls++; [pscustomobject]@{ProcessId=62532}
     }
     . ([scriptblock]::Create($freshStreamQuery.Extent.Text))
@@ -335,8 +352,7 @@ $matchingStopFunction = $stopAst.Find({param($node)
     $script:stopErrorLog = @()
     $processSnapshot = @([pscustomobject]@{ProcessId=62532;CommandLine='project metrics agent'})
     function Write-StopLog {param([string]$Message) $script:stopErrorLog += $Message}
-    function Stop-Process { [CmdletBinding()]param([int]$Id,[switch]$Force) throw 'simulated stop denied' }
-    function Get-Process { [CmdletBinding()]param([int]$Id) return [pscustomobject]@{Id=$Id} }
+    function Get-SnapshotProcess { param($Candidate) throw 'simulated stop denied' }
     . ([scriptblock]::Create($matchingStopFunction.Extent.Text))
     $attempted = @(Stop-MatchingProcess -Predicate {$true} -Reason 'metrics-agent')
     if ($attempted -notcontains 62532 -or ($script:stopErrorLog -join ' ') -notmatch 'failed to stop PID=62532') {
@@ -406,15 +422,23 @@ $stopSourceText = Get-Content -Raw -LiteralPath (Join-Path $side "StopSideScreen
 }
 
 & {
-    $KeepMetrics=$true; $script:metricsStopCalls=0; $script:metricsWaitCalls=0; $sidePattern='*turzx_side_screen*'
-    $processSnapshot=@([pscustomobject]@{ProcessId=62532;Name='python.exe';CommandLine='E:\turzx_side_screen\metrics_agent.py'})
+    $KeepMetrics=$true; $script:metricsStopCalls=0; $script:metricsWaitCalls=0
+    $processSnapshot=@([pscustomobject]@{ProcessId=62532;Name='python.exe';CommandLine="python.exe -u `"$side\metrics_agent.py`""})
+    $fakeCollector = [pscustomobject]@{}
+    $fakeCollector | Add-Member -MemberType ScriptMethod -Name Kill -Value { $script:metricsStopCalls++ }
+    $fakeCollector | Add-Member -MemberType ScriptMethod -Name Dispose -Value {}
     function Write-StopLog {param($Message)}
-    function Stop-Process { [CmdletBinding()]param($Id,[switch]$Force) $script:metricsStopCalls++ }
+    function Get-SnapshotProcess { param($Candidate) $fakeCollector }
     function Assert-ManagedMetricsAgentExitAndPortRelease {param($ProcessIds,$TimeoutSeconds) $script:metricsWaitCalls++}
     . ([scriptblock]::Create($matchingStopFunction.Extent.Text))
     $selection=$stopAst.EndBlock.Statements | Where-Object { $_ -is [Management.Automation.Language.AssignmentStatementAst] -and $_.Left.Extent.Text -eq '$stoppedMetricsProcessIds' }
     . ([scriptblock]::Create($selection.Extent.Text)); . ([scriptblock]::Create($metricsCleanup.Extent.Text))
     if ($script:metricsStopCalls -ne 0 -or $script:metricsWaitCalls -ne 0 -or $stoppedMetricsProcessIds.Count -ne 0) { throw 'Stream-only stop must preserve the collector and skip its exit proof.' }
+    $KeepMetrics = $false
+    $other = [pscustomobject]@{ProcessId=62533;Name='python.exe';CommandLine="python.exe -u `"$side-other\metrics_agent.py`""}
+    $processSnapshot += $other
+    . ([scriptblock]::Create($selection.Extent.Text))
+    if ($script:metricsStopCalls -ne 1 -or ($stoppedMetricsProcessIds -join ',') -ne '62532') { throw 'A same-name collector in another project must be preserved.' }
 }
 
 $watchdogStopFunction = $restartAst.Find(
@@ -427,67 +451,72 @@ $watchdogStopFunction = $restartAst.Find(
 if ($null -eq $watchdogStopFunction) {
     throw "Watchdog must define Stop-Stack."
 }
-foreach ($pattern in @(
-    '[int]$StopStackTimeoutSeconds',
-    'WaitForExit',
-    'Stop-Process',
-    '$script:turzxStackChild',
-    'StopSideScreenStack exceeded strict total timeout'
-)) {
-    if ($watchdogStart -notmatch [regex]::Escape($pattern)) {
-        throw "Watchdog Stop-Stack missing strict total timeout contract: $pattern"
-    }
-}
 & {
-    $script:stopWaitMilliseconds = $null
-    $script:forcedStopIds = @()
-    $fakeStopProcess = [pscustomobject]@{
-        Id = 7171
-        HasExited = $false
-        ExitCode = -1
-    }
+    $script:stopWaitMilliseconds = @()
+    $script:stopLaunches = 0
+    $script:stopKills = 0
+    $script:testPermit = $null
+    $script:streamRecovered = $false
+    $fakeStopProcess = [pscustomobject]@{ Id=7171; HasExited=$false; ExitCode=0; FinishMs=35000; KillEnds=$false }
     $fakeStopProcess | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value {
         param([int]$Milliseconds)
-        $script:stopWaitMilliseconds = $Milliseconds
-        return $false
+        $script:stopWaitMilliseconds += $Milliseconds
+        if ($Milliseconds -ge $this.FinishMs) { $this.HasExited = $true }
+        return $this.HasExited
     }
+    $fakeStopProcess | Add-Member -MemberType ScriptMethod -Name Kill -Value { $script:stopKills++; $this.HasExited = $this.KillEnds }
+    $fakeStopProcess | Add-Member -MemberType ScriptMethod -Name Dispose -Value {}
+    $trackedChild = [pscustomobject]@{ Id=4242; HasExited=$false }
+    $trackedChild | Add-Member -MemberType ScriptMethod -Name Kill -Value { $this.HasExited = $true }
+    $trackedChild | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($Milliseconds) $this.HasExited }
     function Write-WatchdogLog { param([string]$Message) }
+    function Stop-TurzxMetricsRecovery {}
+    function Test-TurzxStreamRecovered { $script:streamRecovered }
     function Start-HiddenProcess {
         [CmdletBinding()]
         param(
             [string]$FilePath,
             [object]$ArgumentList
         )
+        $gateIndex = [array]::IndexOf($ArgumentList, '-RecoveryGate')
+        if ($gateIndex -ge 0) {
+            $gate = $ArgumentList[$gateIndex + 1]
+            $ready = [Threading.EventWaitHandle]::OpenExisting("$gate.ready")
+            $script:testPermit = [Threading.EventWaitHandle]::OpenExisting("$gate.permit")
+            try { [void]$ready.Set() } finally { $ready.Dispose() }
+        }
+        elseif (-not $trackedChild.HasExited) { throw 'Explicit stop helper must wait for the old stack launcher to exit.' }
+        $script:stopLaunches++
         $script:lastStopArguments = $ArgumentList
         return $fakeStopProcess
     }
-    function Stop-Process {
-        [CmdletBinding()]
-        param([int]$Id, [switch]$Force)
-        $script:forcedStopIds += $Id
-    }
+    function Stop-Process { [CmdletBinding()]param([int]$Id,[switch]$Force) if ($Id -eq $trackedChild.Id) { $trackedChild.HasExited = $true } }
 
     $Root = 'C:\synthetic-turzx'
     $outDir = Join-Path $Root 'out'
     $stopScript = 'C:\synthetic-turzx\StopSideScreenStack.ps1'
     $StopProcessSnapshotTimeoutSeconds = 7
-    $StopStackTimeoutSeconds = 9
-    $script:turzxStackChild = [pscustomobject]@{ Id = 4242; HasExited = $false }
+    $StopStackTimeoutSeconds = ($restartAst.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'StopStackTimeoutSeconds' }).DefaultValue.SafeGetValue()
+    $script:turzxStackChild = $trackedChild
     . ([scriptblock]::Create($watchdogStopFunction.Extent.Text))
+    Stop-Stack -Reason 'synthetic-busy-stop'
+    if ($script:stopLaunches -ne 1 -or $script:stopKills -ne 0 -or $script:stopWaitMilliseconds.Count -ne 1) {
+        throw 'A busy stop taking 35 seconds must finish on its first attempt.'
+    }
+    $fakeStopProcess.HasExited = $false
+    $fakeStopProcess.FinishMs = [int]::MaxValue
     $timeoutError = $null
-    try {
-        Stop-Stack -Reason 'synthetic-timeout'
+    try { Stop-Stack -Reason 'synthetic-timeout' } catch { $timeoutError = $_.Exception.Message }
+    if ($StopStackTimeoutSeconds -ne 120 -or $script:stopWaitMilliseconds.Count -ne 3 -or $script:stopWaitMilliseconds[1] -gt 120000 -or
+        $script:stopWaitMilliseconds[2] -ne 5000 -or
+        $script:stopKills -ne 1 -or $timeoutError -notmatch 'did not exit') {
+        throw 'A hung stop helper must be terminated at the hard deadline and given one bounded exit check.'
     }
-    catch {
-        $timeoutError = $_.Exception.Message
+    try { Stop-Stack -Reason 'synthetic-overlap' } catch { $timeoutError = $_.Exception.Message }
+    if ($script:stopLaunches -ne 2 -or $timeoutError -notmatch 'Previous stop worker') {
+        throw 'A live timed-out stop helper must prevent a second destructive worker.'
     }
-    if ($script:stopWaitMilliseconds -ne 9000 -or
-        $script:forcedStopIds -notcontains 4242 -or
-        $script:forcedStopIds -notcontains 7171 -or
-        $timeoutError -notmatch 'strict total timeout') {
-        throw "Watchdog must stop the tracked child and force-stop a stalled StopSideScreenStack child at its strict total deadline."
-    }
-    $fakeStopProcess | Add-Member -Force -MemberType ScriptMethod -Name WaitForExit -Value { param($Milliseconds) $true }
+    $fakeStopProcess.HasExited = $true
     $fakeStopProcess.ExitCode = 1; $stopFailure = $null
     try { Stop-Stack -Reason 'synthetic-proof-failure' } catch { $stopFailure = $_.Exception.Message }
     if ($stopFailure -notmatch 'exitCode=1') { throw 'A failed stream-stop proof must block stack restart.' }
@@ -495,15 +524,29 @@ foreach ($pattern in @(
     Stop-Stack -Reason 'synthetic-stream-exited'
     Stop-Stack -Reason 'synthetic-stream-exited' -KeepMetrics
     if ($script:lastStopArguments -notcontains '-KeepMetrics') { throw 'Watchdog must forward collector preservation to the stop script.' }
+    foreach ($recovered in @($true, $false)) {
+        $script:streamRecovered = $recovered
+        $trackedChild.HasExited = $fakeStopProcess.HasExited = $false
+        $fakeStopProcess.FinishMs = 35000
+        $fakeStopProcess.KillEnds = $true
+        try {
+            $result = Stop-Stack -Reason 'synthetic-automatic-stop' -CheckFrameProgress
+            if (($result -eq 'Recovered') -ne $recovered -or $trackedChild.HasExited -eq $recovered -or
+                $script:testPermit.WaitOne(0) -eq $recovered -or -not $fakeStopProcess.HasExited) {
+                throw 'The ready helper must stop only an unhealthy stack and must exit on either decision.'
+            }
+        }
+        finally { if ($script:testPermit) { $script:testPermit.Dispose(); $script:testPermit = $null } }
+    }
 }
 
 & {
     $startStack=$restartAst.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst]},$true) | Where-Object Name -eq 'Start-Stack'
     $prepare=[scriptblock]::Create($startStack.Body.EndBlock.Statements[0].Extent.Text)
-    function Stop-Stack {param($Reason,[switch]$KeepMetrics) $script:keptMetrics=$KeepMetrics.IsPresent}
+    function Stop-Stack {param($Reason,[switch]$KeepMetrics,[switch]$CheckFrameProgress) $script:keptMetrics=$KeepMetrics.IsPresent}
     function Set-TurzxPanelBrightness {param($Brightness) $true}
-    $StreamOnly=$false; $ActiveBrightness=170
-    foreach ($Reason in @('heartbeat-unhealthy','failure-circuit/heartbeat-stalls','restart-request','snapshot-stale-after-metrics-restarts','failure-circuit/snapshot-stale-after-metrics-restarts')) {
+    $StreamOnly=$StopProven=$CheckFrameProgress=$false; $ActiveBrightness=170
+    foreach ($Reason in @('heartbeat-unhealthy','failure-circuit/heartbeat-stalls','restart-request')) {
         . $prepare
         $expected=$Reason -in @('heartbeat-unhealthy','failure-circuit/heartbeat-stalls')
         if ($script:keptMetrics -ne $expected) { throw "Incorrect collector stop mode for $Reason" }
@@ -537,16 +580,7 @@ $startupWindowFunction = $restartAst.Find(
         $node.Name -eq "Set-TurzxChildHeartbeatStartupWindow"
     },
     $true)
-$startupDeadlineFunction = $restartAst.Find(
-    {
-        param($node)
-        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
-        $node.Name -eq "Test-TurzxChildHeartbeatStartupDeadline"
-    },
-    $true)
-if ($null -eq $monotonicClockFunction -or
-    $null -eq $startupWindowFunction -or
-    $null -eq $startupDeadlineFunction) {
+if ($null -eq $monotonicClockFunction -or $null -eq $startupWindowFunction) {
     throw "Watchdog must define the monotonic startup-heartbeat deadline helpers."
 }
 & {
@@ -560,37 +594,6 @@ if ($null -eq $monotonicClockFunction -or
     if ($firstMonotonicMilliseconds -isnot [int64] -or
         $secondMonotonicMilliseconds -lt $firstMonotonicMilliseconds) {
         throw "Monotonic clock must execute and advance safely on the current PowerShell runtime."
-    }
-}
-& {
-    $script:syntheticMonotonicMilliseconds = 1000
-    function Get-TurzxMonotonicMilliseconds {
-        return $script:syntheticMonotonicMilliseconds
-    }
-
-    $HeartbeatStartupGraceSeconds = 60
-    . ([scriptblock]::Create($startupWindowFunction.Extent.Text))
-    . ([scriptblock]::Create($startupDeadlineFunction.Extent.Text))
-    Set-TurzxChildHeartbeatStartupWindow -Child ([pscustomobject]@{ Id = 4242 }) | Out-Null
-    if ($script:childHeartbeatStartupDeadlineMilliseconds -ne 61000) {
-        throw "Startup heartbeat deadline must be based on a monotonic clock."
-    }
-    $script:syntheticMonotonicMilliseconds = 60999
-    if (Test-TurzxChildHeartbeatStartupDeadline) {
-        throw "Startup heartbeat deadline fired before the monotonic grace window elapsed."
-    }
-    $script:syntheticMonotonicMilliseconds = 61000
-    if (-not (Test-TurzxChildHeartbeatStartupDeadline)) {
-        throw "Startup heartbeat deadline did not fire when the monotonic grace window elapsed."
-    }
-}
-foreach ($pattern in @(
-    'Test-TurzxChildHeartbeatStartupDeadline',
-    'heartbeat-missing-startup',
-    'Invoke-TurzxFailureCircuitBreaker'
-)) {
-    if ($watchdogStart -notmatch [regex]::Escape($pattern)) {
-        throw "Watchdog main loop missing startup heartbeat convergence contract: $pattern"
     }
 }
 
@@ -1007,38 +1010,54 @@ foreach ($pattern in @(
 & {
     $functions = $watchdogAst.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst]}, $true)
     . ([scriptblock]::Create(($functions | Where-Object Name -eq 'Invoke-TurzxMetricsRecovery').Extent.Text))
+    . ([scriptblock]::Create(($functions | Where-Object Name -eq 'Stop-TurzxMetricsRecovery').Extent.Text))
     . ([scriptblock]::Create($startupWindowFunction.Extent.Text))
     $healthBody = $watchdogAst.FindAll({param($n) $n -is [Management.Automation.Language.IfStatementAst]}, $true) |
-        Where-Object { $_.Clauses[0].Item1.Extent.Text -eq '$childExited' }
-    $healthBody = $healthBody.Clauses[1].Item2.Extent.Text
-    $healthStep = [scriptblock]::Create('$heartbeatHealth = Get-StreamHeartbeatHealth' + "`n" + $healthBody.Substring(1, $healthBody.Length - 2))
+        Where-Object { $_.Clauses[0].Item1.Extent.Text -eq '$script:childHeartbeatObserved -or (Test-TurzxChildHeartbeatStartupDeadline)' }
+    $healthStep = [scriptblock]::Create('$heartbeatHealth = Get-StreamHeartbeatHealth' + "`n" +
+        '$heartbeatPending = $heartbeatHealth.PSObject.Properties["Pending"] -and $heartbeatHealth.Pending' + "`n" + $healthBody.Extent.Text)
     function Get-TurzxMonotonicMilliseconds { 0 }
-    function Get-StreamHeartbeatHealth { [pscustomobject]@{Healthy=$true; SnapshotStatus=$snapshotStatus; Reason='ok'} }
-    function Invoke-TurzxMetricsAgentMaintenance {
-        param($SideRoot, [switch]$Restart)
-        $script:maintenanceCalls++; if ($nextStatus -eq 'throw') { throw 'collector failed' }
-        [pscustomobject]@{Status=$nextStatus}
+    function Get-StreamHeartbeatHealth { [pscustomobject]@{Healthy=$frameHealthy; SnapshotStatus=$snapshotStatus; Reason='synthetic-frame'} }
+    function Start-HiddenProcess {
+        param($FilePath, $ArgumentList, $RedirectStandardOutput)
+        if ($ArgumentList -notcontains '-RunTurzxMetricsRecoveryWorker') { throw 'Expected only the metrics worker.' }
+        $script:maintenanceCalls++
+        $worker = [pscustomobject]@{HasExited=$false; ExitCode=0}
+        $worker | Add-Member ScriptMethod Dispose {}
+        $worker | Add-Member ScriptMethod Kill { $this.HasExited = $true }
+        $worker | Add-Member ScriptMethod WaitForExit { param($Milliseconds) $Milliseconds -le 1000 -and $this.HasExited }
+        $worker
     }
-    function Invoke-TurzxStackRestartAttempt {param($Reason, $DelaySeconds) $script:stackRestarts++; $script:lastRecoveryReason=$Reason; [pscustomobject]@{Child=[pscustomobject]@{Id=42}} }
-    $scriptDir='unused'; $script:metricsRecoveryStarts=0; $script:maintenanceCalls=0; $script:stackRestarts=0; $nextStatus='started pid=123'
-    $script:metricsLastAttemptUtc=[DateTime]::UtcNow.AddSeconds(-31)
-    if ((Invoke-TurzxMetricsRecovery) -or $script:metricsRecoveryStarts -ne 1) { throw 'First collector restart must allow recovery time.' }
-    if ((Invoke-TurzxMetricsRecovery) -or $script:maintenanceCalls -ne 1) { throw 'Cooldown must not retry or escalate.' }
-    $nextStatus='blocked'
-    foreach ($retry in 1..3) { $script:metricsLastAttemptUtc=[DateTime]::UtcNow.AddSeconds(-31); if ((Invoke-TurzxMetricsRecovery) -or $script:metricsRecoveryStarts -ne 0) { throw 'Blocked maintenance must stay collector-only across repeated retries.' } }
-    $nextStatus='started pid=123'
-    foreach ($attempt in 1..2) { $script:metricsLastAttemptUtc=[DateTime]::UtcNow.AddSeconds(-31); if (Invoke-TurzxMetricsRecovery) { throw 'New collector needs cooldown.' } }
-    if ((Invoke-TurzxMetricsRecovery) -or $script:maintenanceCalls -ne 6) { throw 'Second successful restart also needs cooldown.' }
+    function Get-Content {param($LiteralPath, [switch]$Raw) $resultStatus}
+    function Invoke-TurzxStackRestartAttempt {param($Reason, $DelaySeconds,[switch]$CheckFrameProgress) $script:stackRestarts++; [pscustomobject]@{Child=[pscustomobject]@{Id=42}} }
+    $scriptDir='unused'; $metricsRecoveryLogPath='unused.log'; $script:metricsRecoveryProcess=$null
+    $script:maintenanceCalls=0; $script:stackRestarts=0; $script:childHeartbeatObserved=$true
     $HeartbeatStartupGraceSeconds=60; $MaxConsecutiveSnapshotStaleHeartbeats=5; $MaxConsecutiveHeartbeatFailures=3; $MaxConsecutiveFailures=3
-    $snapshotStaleHeartbeats=5; $heartbeatFailures=0; $consecutiveFailures=1; $snapshotStatus='stale:TimeoutException'; . $healthStep
-    if ($consecutiveFailures -ne 1) { throw 'Stale snapshots during collector cooldown must preserve previous stack failures for the circuit breaker.' }
-    $heartbeatFailures=2; $script:metricsLastAttemptUtc=[DateTime]::UtcNow.AddSeconds(-31); . $healthStep
-    if ($script:stackRestarts -ne 1 -or $script:metricsRecoveryStarts -ne 0 -or $consecutiveFailures -ne 2 -or $script:lastRecoveryReason -ne 'snapshot-stale-after-metrics-restarts') { throw 'Persistent stale snapshots must preserve the full-stack reason, failure count and collector reset.' }
-    $script:metricsRecoveryStarts=1; $snapshotStatus='fresh'; . $healthStep
-    if ($script:metricsRecoveryStarts -ne 0 -or $consecutiveFailures -ne 0 -or $script:stackRestarts -ne 1) { throw 'A fresh snapshot must clear collector and stack recovery history.' }
-    $nextStatus='throw'; $script:metricsRecoveryStarts=1; $script:metricsLastAttemptUtc=[DateTime]::UtcNow.AddSeconds(-31)
-    if ((Invoke-TurzxMetricsRecovery) -or $script:metricsRecoveryStarts -ne 0) { throw 'Failed maintenance must break successful restart sequence.' }
+    $snapshotStaleHeartbeats=4; $consecutiveFailures=1; $snapshotStatus='stale:HttpRequestException'; $frameHealthy=$true
+    foreach ($resultStatus in @('blocked remainingPids=123', 'started pid=456', 'started pid=789', 'started pid=987')) {
+        $script:metricsLastAttemptUtc=[DateTime]::UtcNow.AddSeconds(-31)
+        $heartbeatFailures=2
+        . $healthStep
+        $worker = $script:metricsRecoveryProcess
+        if ($null -eq $worker -or $worker.HasExited) { throw 'The supervisor must finish the pass while maintenance is pending.' }
+        $script:metricsLastAttemptUtc=[DateTime]::UtcNow.AddSeconds(-31)
+        . $healthStep
+        if ($script:metricsRecoveryProcess -ne $worker) { throw 'Pending collector maintenance must not overlap.' }
+        $worker.HasExited=$true
+        Invoke-TurzxMetricsRecovery
+        . $healthStep
+        if ($null -ne $script:metricsRecoveryProcess) { throw 'Cooldown must start when the worker finishes.' }
+    }
+    if ($script:maintenanceCalls -ne 4 -or $script:stackRestarts -ne 0 -or $heartbeatFailures -ne 0 -or $consecutiveFailures -ne 1) { throw 'Sustained HTTP 503 with verified frame progress must stay collector-only.' }
+    $snapshotStatus='fresh'; . $healthStep
+    if ($consecutiveFailures -ne 0 -or $snapshotStaleHeartbeats -ne 0) { throw 'A fresh snapshot must clear the stale sequence.' }
+    $script:metricsLastAttemptUtc=[DateTime]::UtcNow.AddSeconds(-31); Invoke-TurzxMetricsRecovery -TryRestart
+    $frameHealthy=$false; $heartbeatFailures=2; . $healthStep
+    if ($script:stackRestarts -ne 1 -or $null -eq $script:metricsRecoveryProcess) { throw 'Pending collector maintenance must not suppress genuine frame recovery.' }
+    Stop-TurzxMetricsRecovery
+    if ($null -ne $script:metricsRecoveryProcess) { throw 'An explicit stop must retire the exact metrics worker before clearing it.' }
     function Get-StreamHeartbeatHealth { [pscustomobject]@{Healthy=$false; Pending=$true; Reason='sharing-conflict'} }
+    $script:childHeartbeatObserved=$true
     $heartbeatFailures=2
     foreach($read in 1..3){ . $healthStep; throw 'A pending read must skip unhealthy counting for this pass.' }
     if($heartbeatFailures -ne 0 -or $script:stackRestarts -ne 1){throw 'Deferred reads must not accumulate a full-stack restart.'}
@@ -1061,10 +1080,18 @@ $HeartbeatMaxPeriodMs = 15000
 $DiffSendTimeoutMs = 900
 $FullResyncEveryFrames = 900
 $HybridRefresh = $false
+$Port = 'COM7'; $script:turzxStackStartedUtc = [DateTime]::MinValue
+function Set-HeartbeatFixture {
+    param($LiteralPath, $Value, $Encoding)
+    $record = $Value | ConvertFrom-Json
+    $record | Add-Member NoteProperty port $Port
+    $record | Add-Member NoteProperty utc ([DateTime]::UtcNow.ToString('o'))
+    $record | ConvertTo-Json -Compress | Set-Content -LiteralPath $LiteralPath -Encoding $Encoding
+}
 try {
-    Set-Content -LiteralPath $slotBHeartbeat -Value '{"frame":41,"status":"ok","error":null,"transport_mode":"verified_full_200","send_attempted":true,"send_ms":2300,"elapsed_ms":2400,"period_ms":3000}' -Encoding UTF8
+    Set-HeartbeatFixture -LiteralPath $slotBHeartbeat -Value '{"frame":41,"status":"ok","error":null,"transport_mode":"verified_full_200","send_attempted":true,"send_ms":2300,"elapsed_ms":2400,"period_ms":3000}' -Encoding UTF8
     (Get-Item -LiteralPath $slotBHeartbeat).LastWriteTimeUtc = [DateTime]::UtcNow.AddSeconds(-1)
-    Set-Content -LiteralPath $legacyHeartbeat -Value '{"frame":40,"status":"ok","error":null,"transport_mode":"verified_full_200"}' -Encoding UTF8
+    Set-HeartbeatFixture -LiteralPath $legacyHeartbeat -Value '{"frame":40,"status":"ok","error":null,"transport_mode":"verified_full_200"}' -Encoding UTF8
     (Get-Item -LiteralPath $legacyHeartbeat).LastWriteTimeUtc = [DateTime]::UtcNow
 
     $legacyLock = [IO.File]::Open(
@@ -1095,7 +1122,7 @@ try {
     if ($heartbeatFunction.Extent.Text -notmatch '\[IO\.FileShare\]::ReadWrite\s+-bor\s+\[IO\.FileShare\]::Delete') {
         throw "Heartbeat readers must permit atomic replacement while reading."
     }
-    Set-Content -LiteralPath $slotBHeartbeat -Value '{"frame":41,"status":"ok","snapshot_status":"stale:TimeoutException","error":null,"transport_mode":"verified_full_200","send_attempted":true,"send_ms":40,"elapsed_ms":80,"period_ms":3000}' -Encoding UTF8
+    Set-HeartbeatFixture -LiteralPath $slotBHeartbeat -Value '{"frame":41,"status":"ok","snapshot_status":"stale:TimeoutException","error":null,"transport_mode":"verified_full_200","send_attempted":true,"send_ms":40,"elapsed_ms":80,"period_ms":3000}' -Encoding UTF8
     (Get-Item -LiteralPath $slotBHeartbeat).LastWriteTimeUtc = [DateTime]::UtcNow
     $staleSnapshotHealth = Get-StreamHeartbeatHealth
     if (-not $staleSnapshotHealth.Healthy -or
@@ -1106,28 +1133,28 @@ try {
     # resolution makes two immediate writes compare equal.
     (Get-Item -LiteralPath $legacyHeartbeat).LastWriteTimeUtc = [DateTime]::UtcNow.AddSeconds(-5)
 
-    Set-Content -LiteralPath $slotBHeartbeat -Value '{"frame":42,"status":"ok","error":null,"transport_mode":"verified_full_200","send_attempted":false,"send_ms":0,"elapsed_ms":20,"period_ms":3000}' -Encoding UTF8
+    Set-HeartbeatFixture -LiteralPath $slotBHeartbeat -Value '{"frame":42,"status":"ok","error":null,"transport_mode":"verified_full_200","send_attempted":false,"send_ms":0,"elapsed_ms":20,"period_ms":3000}' -Encoding UTF8
     (Get-Item -LiteralPath $slotBHeartbeat).LastWriteTimeUtc = [DateTime]::UtcNow
     $noSendHealth = Get-StreamHeartbeatHealth
     if ($noSendHealth.Healthy -or $noSendHealth.Reason -notmatch "send-not-attempted") {
         throw "Watchdog must not accept a dry-run heartbeat that never wrote to COM7."
     }
 
-    Set-Content -LiteralPath $slotBHeartbeat -Value '{"frame":42,"status":"ok","error":null,"transport_mode":"verified_full_200","send_attempted":true,"send_ms":-1,"elapsed_ms":2400,"period_ms":3000}' -Encoding UTF8
+    Set-HeartbeatFixture -LiteralPath $slotBHeartbeat -Value '{"frame":42,"status":"ok","error":null,"transport_mode":"verified_full_200","send_attempted":true,"send_ms":-1,"elapsed_ms":2400,"period_ms":3000}' -Encoding UTF8
     (Get-Item -LiteralPath $slotBHeartbeat).LastWriteTimeUtc = [DateTime]::UtcNow
     $negativeTimingHealth = Get-StreamHeartbeatHealth
     if ($negativeTimingHealth.Healthy -or $negativeTimingHealth.Reason -notmatch "timing-invalid") {
         throw "Watchdog must reject negative timing values instead of bypassing upper bounds."
     }
 
-    Set-Content -LiteralPath $slotBHeartbeat -Value '{"frame":42,"status":"ok","error":null,"transport_mode":"experimental_diff_204"}' -Encoding UTF8
+    Set-HeartbeatFixture -LiteralPath $slotBHeartbeat -Value '{"frame":42,"status":"ok","error":null,"transport_mode":"experimental_diff_204"}' -Encoding UTF8
     (Get-Item -LiteralPath $slotBHeartbeat).LastWriteTimeUtc = [DateTime]::UtcNow
     $experimentalHealth = Get-StreamHeartbeatHealth
     if ($experimentalHealth.Healthy -or $experimentalHealth.Reason -notmatch "transport-unverified") {
         throw "Watchdog must reject an experimental differential transport heartbeat."
     }
 
-    Set-Content -LiteralPath $slotBHeartbeat -Value '{"frame":43,"status":"ok","error":null,"transport_mode":"hybrid_diff_204_full_200","frame_transport":"diff_204","last_full_frame":1,"full_resync_every_frames":900,"send_attempted":true,"send_ms":40,"elapsed_ms":80,"period_ms":1000}' -Encoding UTF8
+    Set-HeartbeatFixture -LiteralPath $slotBHeartbeat -Value '{"frame":43,"status":"ok","error":null,"transport_mode":"hybrid_diff_204_full_200","frame_transport":"diff_204","last_full_frame":1,"full_resync_every_frames":900,"send_attempted":true,"send_ms":40,"elapsed_ms":80,"period_ms":1000}' -Encoding UTF8
     (Get-Item -LiteralPath $slotBHeartbeat).LastWriteTimeUtc = [DateTime]::UtcNow
     $hybridDisabledHealth = Get-StreamHeartbeatHealth
     if ($hybridDisabledHealth.Healthy -or $hybridDisabledHealth.Reason -notmatch "transport-unverified") {
@@ -1140,28 +1167,28 @@ try {
         throw "Watchdog must accept a valid hybrid heartbeat when HybridRefresh is explicit: $($hybridEnabledHealth.Reason)"
     }
 
-    Set-Content -LiteralPath $slotBHeartbeat -Value '{"frame":44,"status":"ok","error":null,"transport_mode":"hybrid_diff_204_full_200","frame_transport":"diff_204","last_full_frame":1,"full_resync_every_frames":900,"send_attempted":true,"send_ms":901,"elapsed_ms":940,"period_ms":1000}' -Encoding UTF8
+    Set-HeartbeatFixture -LiteralPath $slotBHeartbeat -Value '{"frame":44,"status":"ok","error":null,"transport_mode":"hybrid_diff_204_full_200","frame_transport":"diff_204","last_full_frame":1,"full_resync_every_frames":900,"send_attempted":true,"send_ms":901,"elapsed_ms":940,"period_ms":1000}' -Encoding UTF8
     (Get-Item -LiteralPath $slotBHeartbeat).LastWriteTimeUtc = [DateTime]::UtcNow
     $hybridDiffOverrunHealth = Get-StreamHeartbeatHealth
     if (-not $hybridDiffOverrunHealth.Healthy -or -not ($script:heartbeatWarnings -match "send-overrun sendMs=901 limitMs=900")) {
         throw "The dedicated diff budget must warn while a completed advancing frame remains healthy."
     }
 
-    Set-Content -LiteralPath $slotBHeartbeat -Value '{"frame":45,"status":"ok","error":null,"transport_mode":"hybrid_diff_204_full_200","frame_transport":"full_200","last_full_frame":45,"full_resync_every_frames":900,"send_attempted":true,"send_ms":4600,"elapsed_ms":4800,"period_ms":5000}' -Encoding UTF8
+    Set-HeartbeatFixture -LiteralPath $slotBHeartbeat -Value '{"frame":45,"status":"ok","error":null,"transport_mode":"hybrid_diff_204_full_200","frame_transport":"full_200","last_full_frame":45,"full_resync_every_frames":900,"send_attempted":true,"send_ms":4600,"elapsed_ms":4800,"period_ms":5000}' -Encoding UTF8
     (Get-Item -LiteralPath $slotBHeartbeat).LastWriteTimeUtc = [DateTime]::UtcNow
     $hybridBaselineHealth = Get-StreamHeartbeatHealth
     if (-not $hybridBaselineHealth.Healthy) {
         throw "Watchdog must allow a bounded hybrid startup/recovery command-200 baseline: $($hybridBaselineHealth.Reason)"
     }
 
-    Set-Content -LiteralPath $slotBHeartbeat -Value '{"frame":1800,"status":"ok","error":null,"transport_mode":"hybrid_diff_204_full_200","frame_transport":"diff_204","last_full_frame":900,"full_resync_every_frames":900,"send_attempted":true,"send_ms":40,"elapsed_ms":80,"period_ms":1000}' -Encoding UTF8
+    Set-HeartbeatFixture -LiteralPath $slotBHeartbeat -Value '{"frame":1800,"status":"ok","error":null,"transport_mode":"hybrid_diff_204_full_200","frame_transport":"diff_204","last_full_frame":900,"full_resync_every_frames":900,"send_attempted":true,"send_ms":40,"elapsed_ms":80,"period_ms":1000}' -Encoding UTF8
     (Get-Item -LiteralPath $slotBHeartbeat).LastWriteTimeUtc = [DateTime]::UtcNow
     $hybridResyncOverdueHealth = Get-StreamHeartbeatHealth
     if ($hybridResyncOverdueHealth.Healthy -or $hybridResyncOverdueHealth.Reason -notmatch "full-resync-overdue") {
         throw "Watchdog must restart a hybrid stream that silently stopped producing full recovery frames."
     }
 
-    Set-Content -LiteralPath $slotBHeartbeat -Value '{"frame":46,"status":"ok","error":null,"transport_mode":"hybrid_diff_204_full_200","frame_transport":"diff_204","last_full_frame":45,"full_resync_every_frames":0,"send_attempted":true,"send_ms":40,"elapsed_ms":80,"period_ms":1000}' -Encoding UTF8
+    Set-HeartbeatFixture -LiteralPath $slotBHeartbeat -Value '{"frame":46,"status":"ok","error":null,"transport_mode":"hybrid_diff_204_full_200","frame_transport":"diff_204","last_full_frame":45,"full_resync_every_frames":0,"send_attempted":true,"send_ms":40,"elapsed_ms":80,"period_ms":1000}' -Encoding UTF8
     (Get-Item -LiteralPath $slotBHeartbeat).LastWriteTimeUtc = [DateTime]::UtcNow
     $hybridResyncDisabledHealth = Get-StreamHeartbeatHealth
     if ($hybridResyncDisabledHealth.Healthy -or $hybridResyncDisabledHealth.Reason -notmatch "full-resync-config-mismatch") {
@@ -1169,14 +1196,14 @@ try {
     }
     $HybridRefresh = $false
 
-    Set-Content -LiteralPath $slotBHeartbeat -Value '{"frame":43,"status":"ok","error":null,"transport_mode":"verified_full_200","send_attempted":true,"send_ms":10001,"elapsed_ms":10100,"period_ms":3000}' -Encoding UTF8
+    Set-HeartbeatFixture -LiteralPath $slotBHeartbeat -Value '{"frame":43,"status":"ok","error":null,"transport_mode":"verified_full_200","send_attempted":true,"send_ms":10001,"elapsed_ms":10100,"period_ms":3000}' -Encoding UTF8
     (Get-Item -LiteralPath $slotBHeartbeat).LastWriteTimeUtc = [DateTime]::UtcNow
     $slowSendHealth = Get-StreamHeartbeatHealth
     if (-not $slowSendHealth.Healthy) {
         throw "A completed successful send overrun must not restart a progressing stream."
     }
 
-    Set-Content -LiteralPath $slotBHeartbeat -Value '{"frame":44,"status":"ok","error":null,"transport_mode":"verified_full_200","send_attempted":true,"send_ms":2300,"elapsed_ms":12001,"period_ms":15001}' -Encoding UTF8
+    Set-HeartbeatFixture -LiteralPath $slotBHeartbeat -Value '{"frame":44,"status":"ok","error":null,"transport_mode":"verified_full_200","send_attempted":true,"send_ms":2300,"elapsed_ms":12001,"period_ms":15001}' -Encoding UTF8
     (Get-Item -LiteralPath $slotBHeartbeat).LastWriteTimeUtc = [DateTime]::UtcNow
     $slowFrameHealth = Get-StreamHeartbeatHealth
     if (-not $slowFrameHealth.Healthy) {
@@ -1201,7 +1228,7 @@ try {
         $expired=Get-StreamHeartbeatHealth
         if ($expired.Healthy -or $expired.PSObject.Properties['Pending']) { throw 'Read conflicts cannot renew the no-progress deadline.' }
     } finally {foreach($holder in $holders){$holder.Dispose()}}
-    $healthyFrame=@{frame=2699;status='ok';error=$null;transport_mode='verified_full_200';send_attempted=$true;send_ms=5;elapsed_ms=1743;period_ms=19363}
+    $healthyFrame=@{frame=2699;status='ok';error=$null;port=$Port;utc=[DateTime]::UtcNow.ToString('o');transport_mode='verified_full_200';send_attempted=$true;send_ms=5;elapsed_ms=1743;period_ms=19363}
     $healthyFrame|ConvertTo-Json|Set-Content $slotBHeartbeat -Encoding UTF8
     if (-not (Get-StreamHeartbeatHealth).Healthy) { throw 'Frame2699 proves progress after the stall.' }
     $script:streamHeartbeatProgressMs -= 6000
@@ -1265,25 +1292,29 @@ finally {
     Remove-Item -LiteralPath $rotationRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
 
-Write-Host "Runtime reliability checks completed."
-
-# Stale PID ancestry cannot expand this project's kill boundary.
-$parentDefinition = $stopAst.Find({param($node)
-    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Test-OwnedStreamParent'
-}, $true)
-if ($null -eq $parentDefinition) { throw 'Exact project-parent validation is missing.' }
+# Replay startup cleanup with a same-name foreign script taking our path as an argument.
+$identityAst = [scriptblock]::Create((Get-Content -Raw -LiteralPath (Join-Path $side 'MetricsEndpointPolicy.ps1'))).Ast
+$parentDefinition = $identityAst.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Test-OwnedStreamParent'}, $true)
+$duplicateCleanup = $restartAst.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Stop-OtherWatchdogs'}, $true)
 & {
-    param($definition,$side)
-    . ([scriptblock]::Create($definition.Extent.Text))
-    $owned = [pscustomobject]@{Name='powershell.exe';CommandLine=('powershell.exe -NoProfile -File "{0}\StartVideoStream.ps1"' -f $side)}
-    if (-not (Test-OwnedStreamParent $owned $side)) { throw 'The exact project launcher must be recognized.' }
-    foreach ($command in @('powershell.exe -File E:\Other\script.ps1',
-        ('powershell.exe -File E:\Other\script.ps1 -File "{0}\StartVideoStream.ps1"' -f $side),
-        'powershell.exe -EncodedCommand AAAA')) {
-        $owned.CommandLine=$command
-        if (Test-OwnedStreamParent $owned $side) { throw 'An unrelated first entrypoint must not be treated as a project parent.' }
+    $scriptDir = $side; $StopProcessSnapshotTimeoutSeconds = 7
+    . ([scriptblock]::Create($parentDefinition.Extent.Text))
+    . ([scriptblock]::Create($duplicateCleanup.Extent.Text))
+    $owned = [pscustomobject]@{ProcessId=62532;Name='powershell.exe';CommandLine=('powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{0}\StartSideScreenWatchdog.ps1"' -f $side)}
+    $foreign = [pscustomobject]@{ProcessId=62533;Name='powershell.exe';CommandLine=''}
+    function Get-CimInstance { [CmdletBinding()]param($ClassName,$Filter,$Property,$OperationTimeoutSec) $owned; $foreign }
+    function Get-SnapshotProcess { param($Candidate) $script:startupStopIds += $Candidate.ProcessId }
+    function Stop-Process { [CmdletBinding()]param($Id,[switch]$Force) $script:startupStopIds += $Id }
+    function Start-Sleep { param($Milliseconds) }
+    function Write-WatchdogLog { param($Message) }
+    foreach ($mode in @('-File', '-f', '-Command', '')) {
+        $foreign.CommandLine = 'powershell.exe {0} E:\Other\StartSideScreenWatchdog.ps1 -File "{1}\StartSideScreenWatchdog.ps1"' -f $mode,$side
+        $script:startupStopIds = @()
+        Stop-OtherWatchdogs -Reason 'synthetic-start'
+        if (($script:startupStopIds -join ',') -ne '62532') { throw 'Startup cleanup must target only the exact project entrypoint.' }
     }
-} $parentDefinition $side
+}
 if ($stopSourceText -match 'taskkill\.exe[^\r\n]*(?:/IM\b|/T\b)') {
     throw 'Machine-wide and descendant tree kills are forbidden for the panel stop path.'
 }
+Write-Host "Runtime reliability checks completed."

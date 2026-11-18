@@ -13,7 +13,8 @@
     [ValidateRange(1, 32)][int]$LogBackupCount = 3,
     [switch]$HybridRefresh,
     [switch]$StreamOnly,
-    [switch]$Worker
+    [switch]$Worker,
+    [switch]$WatchdogManaged
 )
 
 Set-StrictMode -Version Latest
@@ -128,18 +129,30 @@ if (-not $Worker) {
 
 . (Join-Path $PSScriptRoot 'MetricsEndpointPolicy.ps1')
 
-function Stop-ProcessByCommandLine {
-    param(
-        [string]$NamePattern,
-        [string]$CommandPattern
-    )
-
-    Get-CimInstance Win32_Process |
-        Where-Object { $_.Name -like $NamePattern -and $_.CommandLine -like $CommandPattern } |
+function Stop-StandaloneWorkerProcesses {
+    $topHelper, $weatherHelper = (Join-Path $scriptDir 'top_processes_helper.py'), (Join-Path $Root 'tools\turzx_weather_shim\turzx_weather_shim.py')
+    $streamPattern = '^{0}\\TURZX\.SideScreen\.Stream(?:\.\d+)?\.exe$' -f [regex]::Escape($outDir)
+    Get-CimInstance Win32_Process -Filter "Name LIKE 'python%' OR Name LIKE 'TURZX.SideScreen.Stream%'" -OperationTimeoutSec 8 |
+        Where-Object {
+            (Test-TurzxPythonScriptProcess -Process $_ -ScriptPath $topHelper) -or
+            (Test-TurzxPythonScriptProcess -Process $_ -ScriptPath $weatherHelper) -or
+            ($_.Name -like 'TURZX.SideScreen.Stream*' -and $_.ExecutablePath -match $streamPattern)
+        } |
         ForEach-Object {
-            Write-StackLog ("stopping PID={0} CMD={1}" -f $_.ProcessId, $_.CommandLine)
-            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+            $process = $null
+            try {
+                $process = Get-SnapshotProcess $_
+                if ($null -ne $process) { $process.Kill() }
+            }
+            catch { Write-StackLog ("standalone worker cleanup failed: {0}" -f $_.Exception.Message) }
+            finally { if ($null -ne $process) { $process.Dispose() } }
         }
+}
+
+function Write-StackStartupStage {
+    param([string]$Stage)
+    $line = 'stage={0} pid={1} utc={2:o}' -f $Stage, $PID, [DateTime]::UtcNow
+    Write-BoundedLogLine -Path $stdoutPath -Message $line -MaxBytes $MaxStreamLogBytes -BackupCount $LogBackupCount
 }
 
 Write-StackLog ("starting stack root={0} port={1} interval={2} hybrid={3} streamOnly={4}" -f `
@@ -151,11 +164,10 @@ if (-not $StreamOnly) {
     Get-Process "TURZX", "TURZX.weatherfix", "TURZX.weatherfix.metrics" -ErrorAction SilentlyContinue |
         Stop-Process -Force -ErrorAction SilentlyContinue
 
-    Stop-ProcessByCommandLine -NamePattern "python*" -CommandPattern "*turzx_side_screen\top_processes_helper.py*"
-    Stop-ProcessByCommandLine -NamePattern "python*" -CommandPattern "*turzx_weather_shim\turzx_weather_shim.py*"
-    Stop-ProcessByCommandLine -NamePattern "TURZX.SideScreen.Stream.exe" -CommandPattern "*turzx_side_screen*"
+    if (-not $WatchdogManaged) { Stop-StandaloneWorkerProcesses }
 
     $python = Find-Python
+    Write-StackStartupStage 'stack-python-done'
     Write-StackLog ("python selected path={0} timeauditModulesRequired={1}" -f $python, (
         -not [string]::IsNullOrWhiteSpace($env:TIMEAUDIT_DSN) -or
         (-not [string]::IsNullOrWhiteSpace($env:TIMEAUDIT_DB_PASSWORD) -and -not [string]::IsNullOrWhiteSpace($env:TIMEAUDIT_DB_USER))
@@ -184,6 +196,7 @@ if (-not $StreamOnly) {
         -ArgumentList @((Join-Path $scriptDir "top_processes_helper.py"), "--cache-path", (Join-Path $outDir "top-processes.json"), "--interval-seconds", "3", "--limit", "5") `
         -WorkingDirectory $scriptDir | Out-Null
     Write-StackLog "top processes helper launched"
+    Write-StackStartupStage 'stack-helpers-done'
 
     Start-Sleep -Milliseconds 900
 }

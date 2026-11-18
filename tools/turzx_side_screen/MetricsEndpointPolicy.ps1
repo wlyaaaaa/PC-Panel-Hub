@@ -1,4 +1,6 @@
 ﻿# Shared by metrics startup and shutdown; no service, no socket retained.
+param([switch]$RunTurzxMetricsRecoveryWorker, [int]$MetricsRecoveryParentId, [long]$MetricsRecoveryParentStartTicks)
+
 function Test-MetricsProcessActive {
  param([Parameter(Mandatory=$true)][int]$ProcessId)
  if($ProcessId-le0){throw [ArgumentOutOfRangeException]::new('ProcessId')}
@@ -9,6 +11,39 @@ function Test-MetricsProcessActive {
   return -not $process.HasExited
  } finally { if($null-ne$process){$process.Dispose()} }
 }
+
+function Get-SnapshotProcess {
+    param($Candidate)
+    $process = Get-Process -Id $Candidate.ProcessId -ErrorAction SilentlyContinue
+    if ($null -eq $process) { return }
+    $matchesSnapshot = $false
+    try {
+        $null = $process.Handle
+        if ($process.HasExited) { return }
+        # Win32_Process CreationDate truncates the 100 ns Windows timestamp to microseconds.
+        $delta = $process.StartTime.ToUniversalTime() - $Candidate.CreationDate.ToUniversalTime()
+        $matchesSnapshot = [Math]::Abs($delta.Ticks) -lt 10
+        if ($matchesSnapshot) { return $process }
+    }
+    catch { if (-not $process.HasExited) { throw } }
+    finally { if (-not $matchesSnapshot) { $process.Dispose() } }
+}
+
+# Match PowerShell's actual -File entrypoint before opening the process handle.
+function Test-OwnedStreamParent {
+    param($Candidate, [string]$SideRoot, [string[]]$EntryNames = @('StartVideoStream.ps1','StartSideScreenStack.ps1'))
+    if ($null -eq $Candidate -or [string]$Candidate.Name -notin @('powershell.exe','pwsh.exe')) { return $false }
+    $hostOptions = '(?:\s+-(?:NoLogo|NoProfile|NoExit|NonInteractive|Sta|Mta|ExecutionPolicy\s+\w+|WindowStyle\s+\w+))*'
+    $fileArgument = [regex]::Match([string]$Candidate.CommandLine,
+        '(?i)^(?:"[^"]+"|[^\s"]+)' + $hostOptions + '\s+-File\s+(?:"([^"]+)"|([^\s"]+))(?=\s|$)')
+    if (-not $fileArgument.Success) { return $false }
+    $path = if ($fileArgument.Groups[1].Success) { $fileArgument.Groups[1].Value } else { $fileArgument.Groups[2].Value }
+    foreach ($name in $EntryNames) {
+        if ([string]::Equals($path, (Join-Path $SideRoot $name), [StringComparison]::OrdinalIgnoreCase)) { return $true }
+    }
+    return $false
+}
+
 function Test-MetricsEndpointBind {
  param([ValidateRange(0,65535)][int]$Port=18765,[string]$HostName='127.0.0.1')
  $listener=$null
@@ -46,6 +81,16 @@ function Get-TurzxMetricsEndpoint {
  [pscustomobject]@{HostName=$hostName;Port=$port;Url=('http://{0}:{1}/snapshot'-f $hostName,$port)}
 }
 
+function Test-TurzxPythonScriptProcess {
+    param([object]$Process, [string]$ScriptPath)
+    if ($Process.Name -notlike 'python*') { return $false }
+    $fullPath = [IO.Path]::GetFullPath($ScriptPath)
+    $path = [regex]::Escape($fullPath)
+    $barePath = if ($fullPath -notmatch '\s') { '|' + $path } else { '' }
+    # The checkout's script must be Python's entry point, not an argument to another script.
+    [string]$Process.CommandLine -match ('^(?:"[^"]+"|\S+)\s+(?:-u\s+)?(?:"' + $path + '"' + $barePath + ')(?:\s|$)')
+}
+
 function Get-TurzxMetricsEndpointOwnership {
     param([string]$SideRoot = $PSScriptRoot, [object]$Endpoint)
 
@@ -62,12 +107,10 @@ function Get-TurzxMetricsEndpointOwnership {
         $ownerId = [int]$owners[0]
         $process = @(Get-CimInstance Win32_Process -Filter ('ProcessId={0}' -f $ownerId) `
             -OperationTimeoutSec 8 -ErrorAction Stop)
-        $agentArgument = '(?i)(?:^|[\s"])' + [regex]::Escape($expectedAgent) + '(?:[\s"]|$)'
         # A successful HTTP health response does not establish deployment identity.
         # In particular, an agent loaded from a deleted worktree can stay alive.
         $managed = $process.Count -eq 1 -and
-            [string]$process[0].Name -like 'python*' -and
-            [string]$process[0].CommandLine -match $agentArgument -and
+            (Test-TurzxPythonScriptProcess -Process $process[0] -ScriptPath $expectedAgent) -and
             (Test-Path -LiteralPath $expectedAgent -PathType Leaf) -and
             (Test-MetricsProcessActive -ProcessId $ownerId)
         return [pscustomobject]@{
@@ -94,22 +137,37 @@ function Wait-ManagedMetricsAgentExitAndPortRelease {
 function Invoke-TurzxMetricsAgentMaintenance {
     param([string]$SideRoot = $PSScriptRoot, [string]$PythonPath, [switch]$Restart)
 
+    $outDir = (New-Item -ItemType Directory -Force -Path (Join-Path $SideRoot 'out') -ErrorAction Stop).FullName
+    try {
+        $lease = [IO.File]::Open((Join-Path $outDir 'metrics-maintenance.lock'), 'OpenOrCreate', 'Write', 'None')
+    } catch [IO.IOException] {
+        if (($_.Exception.GetBaseException().HResult -band 0xffff) -notin @(32, 33)) { throw }
+        return [pscustomobject]@{ Process = $null; Status = 'blocked maintenance-in-progress' }
+    }
+    try { Invoke-TurzxMetricsAgentMaintenanceCore -SideRoot $SideRoot -OutDir $outDir -PythonPath $PythonPath -Restart:$Restart }
+    finally { $lease.Dispose() }
+}
+
+function Invoke-TurzxMetricsAgentMaintenanceCore {
+    param([string]$SideRoot, [string]$OutDir, [string]$PythonPath, [switch]$Restart)
+
     $endpoint = Get-TurzxMetricsEndpoint -ConfigPath (Join-Path $SideRoot 'config.json')
     $agent = Join-Path $SideRoot 'metrics_agent.py'
-    $managed = @(Get-CimInstance Win32_Process -OperationTimeoutSec 8 -ErrorAction Stop |
-        Where-Object { $_.Name -like 'python*' -and $_.CommandLine -like ('*' + $agent + '*') })
-    foreach ($candidate in $managed) {
-        if ($Restart) {
-            Stop-Process -Id $candidate.ProcessId -Force -ErrorAction SilentlyContinue
-        }
-    }
+    $managed = @(Get-CimInstance Win32_Process -Filter "Name LIKE 'python%'" -OperationTimeoutSec 8 -ErrorAction Stop |
+        Where-Object { Test-TurzxPythonScriptProcess -Process $_ -ScriptPath $agent })
     if ($Restart) {
+        foreach ($candidate in $managed) {
+            $process = Get-SnapshotProcess $candidate
+            if ($null -eq $process) { continue }
+            try { $process.Kill() }
+            catch { if (-not $process.HasExited) { throw } }
+            finally { $process.Dispose() }
+        }
         [void](Wait-ManagedMetricsAgentExitAndPortRelease -ProcessIds @($managed | ForEach-Object { [int]$_.ProcessId }) -Endpoint $endpoint)
     }
     $remaining = @($managed | Where-Object { Test-MetricsProcessActive -ProcessId ([int]$_.ProcessId) })
     if ($remaining.Count -gt 0 -or -not (Test-MetricsEndpointBind -Port $endpoint.Port -HostName $endpoint.HostName)) {
-        $owners = @(Get-NetTCPConnection -State Listen -ErrorAction Stop |
-            Where-Object { [int]$_.LocalPort -eq $endpoint.Port } |
+        $owners = @(Get-NetTCPConnection -State Listen -LocalPort $endpoint.Port -ErrorAction SilentlyContinue |
             Select-Object -ExpandProperty OwningProcess -Unique) -join ','
         return [pscustomobject]@{ Process = $null; Status = ('blocked remainingPids={0} metricsPort={1} metricsPortOwners={2}' -f
             (@($remaining | ForEach-Object { $_.ProcessId }) -join ','), $endpoint.Port, $owners) }
@@ -125,8 +183,6 @@ function Invoke-TurzxMetricsAgentMaintenance {
         throw "Selected Python interpreter is missing required runtime modules."
     }
 
-    $outDir = Join-Path $SideRoot 'out'
-    New-Item -ItemType Directory -Force -Path $outDir | Out-Null
     # Keep the newest 32 launches (stdout and stderr together). A restart storm
     # must not leave thousands of permanent diagnostic files behind.
     $oldMetricsLogs = @(Get-ChildItem -LiteralPath $outDir -File -Filter 'metrics-agent.*.log' -ErrorAction SilentlyContinue |
@@ -141,6 +197,7 @@ function Invoke-TurzxMetricsAgentMaintenance {
         }
     }
     $tag = '{0}-{1}' -f [DateTime]::UtcNow.ToString('yyyyMMdd-HHmmssfff'), $PID
+    if ('TURZX.SideScreen.WatchdogParentLiveness' -as [type]) { [TURZX.SideScreen.WatchdogParentLiveness]::EnsureParentAlive() }
     $process = Start-HiddenProcess -FilePath $PythonPath -WorkingDirectory $SideRoot `
         -ArgumentList @('-u', $agent, '--host', $endpoint.HostName, '--port', [string]$endpoint.Port) `
         -RedirectStandardOutput (Join-Path $outDir "metrics-agent.$tag.stdout.log") `
@@ -199,4 +256,14 @@ function Find-Python {
         throw "No Python interpreter with required modules psutil+asyncpg was found for TimeAudit FPS."
     }
     throw "python.exe not found"
+}
+
+if ($RunTurzxMetricsRecoveryWorker) {
+    $ErrorActionPreference = 'Stop'
+    try {
+        . (Join-Path $PSScriptRoot 'HiddenProcessLauncher.ps1')
+        [TURZX.SideScreen.WatchdogParentLiveness]::Start($MetricsRecoveryParentId, $MetricsRecoveryParentStartTicks)
+        (Invoke-TurzxMetricsAgentMaintenance -Restart).Status
+    }
+    catch { 'deferred: {0}' -f $_.Exception.Message }
 }

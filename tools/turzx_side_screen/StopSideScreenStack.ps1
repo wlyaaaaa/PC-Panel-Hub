@@ -4,7 +4,9 @@
     [switch]$SkipStackEntrypoint,
     [switch]$KeepMetrics,
     [switch]$Quiet,
-    [ValidateRange(1, 30)][int]$ProcessSnapshotTimeoutSeconds = 8
+    [ValidateRange(1, 30)][int]$ProcessSnapshotTimeoutSeconds = 8,
+    [string]$RecoveryGate,
+    [int]$RecoveryParentId
 )
 
 Set-StrictMode -Version Latest
@@ -15,6 +17,15 @@ $side = Join-Path $Root "tools\turzx_side_screen"
 $weather = Join-Path $Root "tools\turzx_weather_shim"
 $outDir = Join-Path $side "out"
 $logPath = Join-Path $outDir "side-screen-stop.log"
+$ownsStopMutex = $false
+$stopMutex = $null
+trap {
+    if ($ownsStopMutex) { $stopMutex.ReleaseMutex() }
+    if ($null -ne $stopMutex) { $stopMutex.Dispose() }
+    break
+}
+$stopMutex = [Threading.Mutex]::new($true, 'Global\TURZX.SideScreen.Stop', [ref]$ownsStopMutex)
+if (-not $ownsStopMutex) { throw 'Another TURZX stack stop is still active' }
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 
 function Write-StopLog {
@@ -34,10 +45,17 @@ function Write-StopPhase {
 Write-StopPhase 'entry'
 
 function Get-TurzxProcessSnapshot {
-    param([ValidateRange(1, 30)][int]$TimeoutSeconds)
+    param([ValidateRange(1, 30)][int]$TimeoutSeconds, [int[]]$RecordedIds = @())
 
+    $projectFilters = foreach ($path in @($side, $weather)) {
+        $escaped = $path.Replace('\', '\\').Replace("'", "\'").Replace('"', '\"').Replace('[', '[[]').Replace('%', '[%]').Replace('_', '[_]')
+        "CommandLine LIKE '%$escaped\\%'"
+    }
+    $filter = "Name LIKE 'TURZX.SideScreen.Stream%.exe' OR ((Name='powershell.exe' OR Name='pwsh.exe' OR Name LIKE 'python%.exe' OR Name='wscript.exe' OR Name='cscript.exe') AND ($($projectFilters -join ' OR ')))"
+    foreach ($recordedId in $RecordedIds) { if ($recordedId -gt 0) { $filter += " OR ProcessId=$recordedId" } }
     try {
-        return @(Get-CimInstance -ClassName Win32_Process -OperationTimeoutSec $TimeoutSeconds -ErrorAction Stop)
+        return @(Get-CimInstance -ClassName Win32_Process -Filter $filter -OperationTimeoutSec $TimeoutSeconds `
+                -Property Name,ProcessId,ParentProcessId,CommandLine,CreationDate,ExecutablePath -ErrorAction Stop)
     }
     catch {
         # A local CIM provider can stall while a device/driver is unhealthy.
@@ -45,6 +63,7 @@ function Get-TurzxProcessSnapshot {
         # skips command-line based helper cleanup instead of blocking forever.
         Write-StopLog ("process snapshot unavailable timeoutSeconds={0}: {1}" -f `
                 $TimeoutSeconds, $_.Exception.Message)
+        if ($IncludeWatchdog) { throw }
         return @()
     }
 }
@@ -52,7 +71,8 @@ function Get-TurzxProcessSnapshot {
 function Stop-MatchingProcess {
     param(
         [scriptblock]$Predicate,
-        [string]$Reason
+        [string]$Reason,
+        [switch]$RequireExit
     )
 
     $stoppedProcessIds = New-Object 'System.Collections.Generic.List[int]'
@@ -64,12 +84,20 @@ function Stop-MatchingProcess {
             $candidate = $_
             [void]$stoppedProcessIds.Add([int]$candidate.ProcessId)
             Write-StopLog ("stopping PID={0} reason={1} CMD={2}" -f $candidate.ProcessId, $Reason, $candidate.CommandLine)
+            $process = $null
             try {
-                Stop-Process -Id $candidate.ProcessId -Force -ErrorAction Stop
+                $process = Get-SnapshotProcess $candidate
+                if ($process) {
+                    try { $process.Kill() }
+                    catch { if (-not $process.HasExited) { throw } }
+                    if ($RequireExit -and -not $process.WaitForExit(5000)) { throw 'Process did not exit' }
+                }
             }
             catch {
                 Write-StopLog ("failed to stop PID={0} reason={1}: {2}" -f $candidate.ProcessId, $Reason, $_.Exception.Message)
+                if ($RequireExit) { throw }
             }
+            finally { if ($process) { $process.Dispose() } }
         }
     return $stoppedProcessIds.ToArray()
 }
@@ -130,7 +158,7 @@ function Wait-TurzxStreamProcessesExit {
 
 function Stop-TurzxWatchdogLaunchers {
     param(
-        [Parameter(Mandatory = $true)][object[]]$Snapshot,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Snapshot,
         [Parameter(Mandatory = $true)][string]$LauncherPath
     )
 
@@ -147,23 +175,16 @@ function Stop-TurzxWatchdogLaunchers {
 
 function Stop-RecordedWatchdogProcess {
     param(
-        [Parameter(Mandatory = $true)][string]$PidPath,
-        [Parameter(Mandatory = $true)][string]$StackChildPidPath,
-        [Parameter(Mandatory = $true)][object[]]$Snapshot
+        [int]$RecordedPid,
+        [int]$RecordedChildPid,
+        [object[]]$Snapshot
     )
 
-    if (-not (Test-Path -LiteralPath $PidPath)) {
-        return
-    }
-
-    $rawPid = (Get-Content -Raw -LiteralPath $PidPath -ErrorAction Stop).Trim()
-    $recordedPid = 0
-    if (-not [int]::TryParse($rawPid, [ref]$recordedPid) -or $recordedPid -le 0) {
-        throw "Invalid recorded watchdog PID: $rawPid"
-    }
+    if (-not $RecordedPid) { return }
 
     $candidate = @($Snapshot | Where-Object { [int]$_.ProcessId -eq $recordedPid })
     if ($candidate.Count -eq 0) {
+        if (Test-MetricsProcessActive -ProcessId $recordedPid) { throw "Recorded watchdog identity not verified: $recordedPid" }
         Write-StopLog ("recorded watchdog already exited PID={0}" -f $recordedPid)
         return
     }
@@ -172,27 +193,12 @@ function Stop-RecordedWatchdogProcess {
     }
 
     $processName = [string]$candidate[0].Name
-    $commandLine = [string]$candidate[0].CommandLine
-    $commandIdentityMatches =
-        ($processName -like "powershell*" -or $processName -like "pwsh*") -and
-        $commandLine -like "*StartSideScreenWatchdog.ps1*" -and
-        $commandLine -like $sidePattern
-
-    $treeIdentityMatches = $false
-    if (Test-Path -LiteralPath $StackChildPidPath) {
-        $rawChildPid = (Get-Content -Raw -LiteralPath $StackChildPidPath -ErrorAction SilentlyContinue).Trim()
-        $recordedChildPid = 0
-        if ([int]::TryParse($rawChildPid, [ref]$recordedChildPid) -and $recordedChildPid -gt 0) {
-            $recordedChild = @(
-                $Snapshot | Where-Object {
-                    [int]$_.ProcessId -eq $recordedChildPid -and
-                    [int]$_.ParentProcessId -eq $recordedPid -and
-                    ($_.Name -like "powershell*" -or $_.Name -like "pwsh*")
-                }
-            )
-            $treeIdentityMatches = $recordedChild.Count -eq 1
-        }
-    }
+    $commandIdentityMatches = Test-OwnedStreamParent $candidate[0] $side 'StartSideScreenWatchdog.ps1'
+    $treeIdentityMatches = $processName -in @('powershell.exe', 'pwsh.exe') -and
+        [string]::IsNullOrWhiteSpace([string]$candidate[0].CommandLine) -and @($Snapshot | Where-Object {
+            [int]$_.ProcessId -eq $recordedChildPid -and [int]$_.ParentProcessId -eq $recordedPid -and
+                (Test-OwnedStreamParent $_ $side 'StartSideScreenStack.ps1')
+        }).Count -eq 1
 
     if (-not ($commandIdentityMatches -or $treeIdentityMatches)) {
         Write-StopLog ("recorded watchdog identity not verified PID={0} name={1}; refusing to stop" -f $recordedPid, $processName)
@@ -202,46 +208,64 @@ function Stop-RecordedWatchdogProcess {
     Write-StopLog ("stopping recorded watchdog PID={0} identity={1}" -f `
             $recordedPid,
             $(if ($commandIdentityMatches) { "command-line" } else { "process-tree" }))
-    try {
-        Stop-Process -Id $recordedPid -Force -ErrorAction Stop
-    }
-    catch [Microsoft.PowerShell.Commands.ProcessCommandException] {
-        # schtasks /End can retire the watchdog between the snapshot and this call.
-        if ($null -ne (Get-Process -Id $recordedPid -ErrorAction SilentlyContinue)) { throw }
-        Write-StopLog ("recorded watchdog PID={0} already exited" -f $recordedPid)
-    }
-
-    $deadline = [DateTime]::UtcNow.AddSeconds(10)
-    do {
-        if ($null -eq (Get-Process -Id $recordedPid -ErrorAction SilentlyContinue)) {
-            return
-        }
-        Start-Sleep -Milliseconds 250
-    } while ([DateTime]::UtcNow -lt $deadline)
-
-    throw "Recorded watchdog did not exit before timeout: $recordedPid"
+    [void](Stop-MatchingProcess -Reason 'recorded-watchdog' -RequireExit -Predicate { param($p) $p.ProcessId -eq $recordedPid })
 }
 
-$sidePattern = "*" + $side + "*"
-$weatherPattern = "*" + $weather + "*"
+function Get-RecordedProcessId {
+    param([string]$Name, [switch]$RequireValid)
+    $path = Join-Path $outDir $Name
+    if (-not (Test-Path -LiteralPath $path)) { return 0 }
+    $raw = [string](Get-Content -Raw -LiteralPath $path -ErrorAction Stop)
+    $processId = 0
+    if ([int]::TryParse($raw.Trim(), [ref]$processId) -and $processId -gt 0) { return $processId }
+    if ($RequireValid) { throw "Invalid recorded watchdog PID: $raw" }
+    return 0
+}
+
+function Test-OwnedStreamImage {
+    param($Candidate)
+    $Candidate.Name -like 'TURZX.SideScreen.Stream*.exe' -and
+        ([string]$Candidate.ExecutablePath).StartsWith($side + '\', [StringComparison]::OrdinalIgnoreCase)
+}
+
+$recordedStackId = Get-RecordedProcessId 'side-screen-stack-child.pid'
+$recordedWatchdogId = if ($IncludeWatchdog) { Get-RecordedProcessId 'side-screen-watchdog.pid' -RequireValid } else { 0 }
 Write-StopPhase 'process-snapshot-start'
-$processSnapshot = @(Get-TurzxProcessSnapshot -TimeoutSeconds $ProcessSnapshotTimeoutSeconds)
+$processSnapshot = @(Get-TurzxProcessSnapshot -TimeoutSeconds $ProcessSnapshotTimeoutSeconds -RecordedIds @($recordedStackId, $recordedWatchdogId))
 Write-StopPhase 'process-snapshot-done'
+
+if ($RecoveryGate) {
+    $ready = [Threading.EventWaitHandle]::OpenExisting("$RecoveryGate.ready")
+    $permit = [Threading.EventWaitHandle]::OpenExisting("$RecoveryGate.permit")
+    $parent = Get-Process -Id $RecoveryParentId -ErrorAction Stop
+    try {
+        [void]$ready.Set()
+        while (-not $permit.WaitOne(200)) {
+            if ($parent.HasExited -or $script:stopPhaseWatch.Elapsed.TotalSeconds -ge 120) { throw 'Stop recovery permit expired' }
+        }
+        if ($parent.HasExited) { throw 'Stop recovery parent exited' }
+    }
+    finally { $ready.Dispose(); $permit.Dispose(); $parent.Dispose() }
+}
+
+if ($recordedStackId -gt 0) {
+    $recordedProcess = Get-Process -Id $recordedStackId -ErrorAction SilentlyContinue
+    if ($recordedProcess -and $recordedProcess.ProcessName -in @('powershell', 'pwsh') -and
+        -not @($processSnapshot | Where-Object { $_.ProcessId -eq $recordedStackId -and $_.CommandLine }).Count) {
+        throw "Cannot verify active recorded stack process PID=$recordedStackId; stop deferred"
+    }
+}
 
 if ($IncludeWatchdog) {
     Stop-RecordedWatchdogProcess `
-        -PidPath (Join-Path $outDir "side-screen-watchdog.pid") `
-        -StackChildPidPath (Join-Path $outDir "side-screen-stack-child.pid") `
+        -RecordedPid $recordedWatchdogId -RecordedChildPid $recordedStackId `
         -Snapshot $processSnapshot
 
     # Also catch an additional visible-command-line watchdog, but do it before
     # stopping the stack so no old owner can respawn a COM writer mid-stop.
-    [void](Stop-MatchingProcess -Reason "watchdog-script" -Predicate {
+    [void](Stop-MatchingProcess -Reason "watchdog-script" -RequireExit -Predicate {
         param($p)
-        ($p.Name -like "powershell*" -or $p.Name -like "pwsh*") -and
-            $p.CommandLine -like "*-File*StartSideScreenWatchdog.ps1*" -and
-            $p.CommandLine -like "*StartSideScreenWatchdog.ps1*" -and
-            $p.CommandLine -like $sidePattern
+        Test-OwnedStreamParent $p $side 'StartSideScreenWatchdog.ps1'
     })
 
     # An explicit stop also owns the same task's hidden launcher, including
@@ -250,95 +274,63 @@ if ($IncludeWatchdog) {
         -LauncherPath (Join-Path $side 'StartSideScreenWatchdog-Hidden.vbs')
 }
 
+$ownedStreams = @(if ($SkipStackEntrypoint) { $processSnapshot | Where-Object { Test-OwnedStreamImage $_ } })
+[void](Stop-MatchingProcess -Reason "stack-script" -RequireExit -Predicate {
+    param($p)
+    if (-not (Test-OwnedStreamParent $p $side)) { return $false }
+    if (-not $SkipStackEntrypoint) { return $true }
+    $stackWorker = $p.CommandLine -match '^(?:"[^"]*"|[^"])*?(?<!\S)-Worker(?=\s|$)'
+    if ($stackWorker -and $p.ProcessId -eq $recordedStackId) { return $true }
+    if (-not $stackWorker -and -not (Test-OwnedStreamParent $p $side 'StartVideoStream.ps1')) { return $false }
+    return @($ownedStreams | Where-Object {
+        $_.ParentProcessId -eq $p.ProcessId -and $_.CreationDate -and $p.CreationDate -and
+            $_.CreationDate -ge $p.CreationDate
+    }).Count -gt 0
+})
+
 $stoppedMetricsProcessIds = @(Stop-MatchingProcess -Reason "metrics-agent" -Predicate {
     param($p)
-    -not $KeepMetrics -and $p.Name -like "python*" -and $p.CommandLine -like "*turzx_side_screen\metrics_agent.py*" -and $p.CommandLine -like $sidePattern
+    -not $KeepMetrics -and (Test-TurzxPythonScriptProcess -Process $p -ScriptPath (Join-Path $side 'metrics_agent.py'))
 })
 
 [void](Stop-MatchingProcess -Reason "top-processes-helper" -Predicate {
     param($p)
-    $p.Name -like "python*" -and $p.CommandLine -like "*turzx_side_screen\top_processes_helper.py*" -and $p.CommandLine -like $sidePattern
+    Test-TurzxPythonScriptProcess -Process $p -ScriptPath (Join-Path $side 'top_processes_helper.py')
 })
 
 [void](Stop-MatchingProcess -Reason "weather-shim" -Predicate {
     param($p)
-    $p.Name -like "python*" -and $p.CommandLine -like "*turzx_weather_shim\turzx_weather_shim.py*" -and $p.CommandLine -like $weatherPattern
+    Test-TurzxPythonScriptProcess -Process $p -ScriptPath (Join-Path $weather 'turzx_weather_shim.py')
 })
 
 [void](Stop-MatchingProcess -Reason "stream-exe" -Predicate {
     param($p)
-    $p.Name -like "TURZX.SideScreen.Stream*" -and $p.CommandLine -like $sidePattern
+    Test-OwnedStreamImage $p
 })
-
-# A parent PID from an old CIM snapshot is not permission to kill a process
-# tree. Revalidate the exact project -File entrypoint and its creation time.
-function Test-OwnedStreamParent {
-    param($Candidate, [string]$SideRoot)
-    if ($null -eq $Candidate -or [string]$Candidate.Name -notin @('powershell.exe','pwsh.exe')) { return $false }
-    $fileArgument = [regex]::Match([string]$Candidate.CommandLine,
-        '(?i)(?:^|\s)-File\s+(?:"([^"]+)"|(\S+))')
-    if (-not $fileArgument.Success) { return $false }
-    $path = if ($fileArgument.Groups[1].Success) { $fileArgument.Groups[1].Value } else { $fileArgument.Groups[2].Value }
-    foreach ($name in @('StartVideoStream.ps1','StartSideScreenStack.ps1')) {
-        if ([string]::Equals($path, (Join-Path $SideRoot $name), [StringComparison]::OrdinalIgnoreCase)) { return $true }
-    }
-    return $false
-}
-$streamParents = @($processSnapshot |
-    Where-Object { $_.Name -like 'TURZX.SideScreen.Stream*' -and $_.CommandLine -like $sidePattern } |
-    Select-Object -ExpandProperty ParentProcessId -Unique |
-    Where-Object { $_ -and $_ -ne $PID })
-foreach ($parentPid in $streamParents) {
-    $prior = @($processSnapshot | Where-Object { [int]$_.ProcessId -eq [int]$parentPid })
-    if ($prior.Count -ne 1 -or -not (Test-OwnedStreamParent -Candidate $prior[0] -SideRoot $side)) {
-        Write-StopLog ("not stopping unverified stream parent PID={0}" -f $parentPid)
-        continue
-    }
-    if (-not (Test-MetricsProcessActive -ProcessId ([int]$parentPid))) { continue }
-    try {
-        Write-StopPhase 'parent-identity-cim-start'
-        $fresh = Get-CimInstance Win32_Process -Filter ("ProcessId={0}" -f [int]$parentPid) -OperationTimeoutSec $ProcessSnapshotTimeoutSeconds -ErrorAction Stop
-        Write-StopPhase 'parent-identity-cim-done'
-        if (-not (Test-OwnedStreamParent -Candidate $fresh -SideRoot $side) -or
-            $fresh.CreationDate -ne $prior[0].CreationDate -or
-            -not (Test-MetricsProcessActive -ProcessId ([int]$parentPid))) { continue }
-        Write-StopLog ("stopping verified project stream parent PID={0}" -f $parentPid)
-        Stop-Process -Id $parentPid -Force -ErrorAction Stop
-        # Never /T: unrelated descendants may have been reparented or reused.
-    }
-    catch { Write-StopLog ("verified parent stop failed PID={0}: {1}" -f $parentPid,$_.Exception.Message) }
-}
 
 # Hard fallback stays exact-PID and exact project image. A machine-wide /IM or
 # tree kill can affect another task; it is not a valid COM-ownership proof.
 $freshStreams = @()
 if (@(Get-Process 'TURZX.SideScreen.Stream*' -ErrorAction SilentlyContinue).Count -gt 0) {
     Write-StopPhase 'fresh-stream-cim-start'
-    $freshStreams = @(Get-CimInstance Win32_Process -Filter "Name='TURZX.SideScreen.Stream.exe'" -OperationTimeoutSec $ProcessSnapshotTimeoutSeconds -ErrorAction Stop)
+    $freshStreams = @(Get-CimInstance Win32_Process -Filter "Name LIKE 'TURZX.SideScreen.Stream%.exe'" `
+            -Property Name,ProcessId,ExecutablePath,CreationDate -OperationTimeoutSec $ProcessSnapshotTimeoutSeconds -ErrorAction Stop)
     Write-StopPhase 'fresh-stream-cim-done'
 }
 else { Write-StopPhase 'fresh-stream-cim-skipped-no-stream' }
 foreach ($stream in $freshStreams) {
-    if ([string]$stream.CommandLine -notlike $sidePattern -or
-        [string]$stream.ExecutablePath -notlike ($side + '\*')) { continue }
+    if (-not (Test-OwnedStreamImage $stream)) { continue }
+    $streamProcess = $null
     try {
-        if (-not (Test-MetricsProcessActive -ProcessId ([int]$stream.ProcessId))) { continue }
+        $streamProcess = Get-SnapshotProcess $stream
+        if (-not $streamProcess) { continue }
         Write-StopPhase 'taskkill-start'
         $fallbackOutput = & taskkill.exe /PID ([int]$stream.ProcessId) /F 2>&1
         Write-StopPhase 'taskkill-done'
         foreach ($line in $fallbackOutput) { Write-StopLog ("taskkill exact stream: {0}" -f $line) }
     }
     catch { Write-StopLog ("exact stream stop failed PID={0}: {1}" -f $stream.ProcessId,$_.Exception.Message) }
-}
-
-if (-not $SkipStackEntrypoint) {
-    [void](Stop-MatchingProcess -Reason "stack-script" -Predicate {
-        param($p)
-        ($p.Name -like "powershell*" -or $p.Name -like "pwsh*") -and
-            $p.CommandLine -like "*-File*StartSideScreenStack.ps1*" -and
-            $p.CommandLine -like "*StartSideScreenStack.ps1*" -and
-            $p.CommandLine -like $sidePattern
-    })
+    finally { if ($streamProcess) { $streamProcess.Dispose() } }
 }
 
 # A new COM writer must never start until the previous stream process has
@@ -368,3 +360,5 @@ foreach ($pidFile in @("video-stream.pid", "side-screen-stack-child.pid", "side-
 }
 
 Write-StopLog "stop complete"
+$stopMutex.ReleaseMutex()
+$stopMutex.Dispose()

@@ -11,7 +11,7 @@
     [int64]$MaxStreamLogBytes = 5242880,
     [int64]$MaxWatchdogLogBytes = 2097152,
     [ValidateRange(1, 32)][int]$LogBackupCount = 3,
-    [ValidateRange(5, 120)][int]$StopStackTimeoutSeconds = 30,
+    [ValidateRange(5, 120)][int]$StopStackTimeoutSeconds = 120,
     [ValidateRange(1, 30)][int]$StopProcessSnapshotTimeoutSeconds = 8,
     [int]$ResumeDelaySeconds = 8,
     [int]$QuickBlankTimeoutMs = 2500,
@@ -69,6 +69,7 @@ $heartbeatPaths = @(
     (Join-Path $outDir "stream\stream-heartbeat-a.json"),
     (Join-Path $outDir "stream\stream-heartbeat-b.json")
 )
+$stackStdoutPath = Join-Path $outDir "side-screen-stack.stdout.log"
 $restartFlag = Join-Path $outDir "restart-on-start.flag"
 $stackScript = Join-Path $scriptDir "StartSideScreenStack.ps1"
 $stopScript = Join-Path $scriptDir "StopSideScreenStack.ps1"
@@ -121,6 +122,7 @@ $script:wallpaperDisplayLastRebindUtc = [DateTime]::MinValue
 $script:wallpaperDisplayLastStatus = $null
 $script:turzxStackChild = $null
 $script:turzxStackStartedUtc = [DateTime]::MinValue
+$script:turzxForceRestart = $false
 $script:turzxBrightnessConsecutiveFailures = 0
 $script:turzxSerialRecoveryLastAttemptUtc = [DateTime]::MinValue
 $script:startupWindowGuardProcess = $null
@@ -134,7 +136,8 @@ New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 . $overlayWatchdogPolicy
 . (Join-Path $scriptDir 'MetricsEndpointPolicy.ps1')
 $script:metricsLastAttemptUtc = [DateTime]::MinValue
-$script:metricsRecoveryStarts = 0
+$script:metricsRecoveryProcess = $null
+$metricsRecoveryLogPath = Join-Path $outDir 'metrics-recovery.latest.log'
 
 function Write-BoundedLogLine {
     param(
@@ -424,22 +427,23 @@ function Invoke-WallpaperEngineDisplayRecovery {
 }
 
 function Stop-Stack {
-    param([string]$Reason, [switch]$KeepMetrics)
+    param([string]$Reason, [switch]$KeepMetrics, [switch]$CheckFrameProgress)
     Write-WatchdogLog ("stop stack reason={0}" -f $Reason)
-    $trackedChild = $script:turzxStackChild
-    if ($null -ne $trackedChild) {
-        try {
-            if (-not $trackedChild.HasExited) {
-                # This handle came from this watchdog's own hidden-process launch.
-                # Retire it before accepting the bounded CIM fallback, otherwise
-                # an old stack could wake up later and create another COM writer.
-                Write-WatchdogLog ("stopping tracked stack child pid={0} reason={1}" -f $trackedChild.Id, $Reason)
-                Stop-Process -Id $trackedChild.Id -Force -ErrorAction Stop
-            }
-        }
-        catch {
-            Write-WatchdogLog ("tracked stack child stop deferred reason={0} error={1}" -f `
-                    $Reason, $_.Exception.Message)
+    $previousStop = Get-Variable -Name turzxStopWorker -Scope Script -ValueOnly -ErrorAction SilentlyContinue
+    if ($null -ne $previousStop) {
+        if (-not $previousStop.HasExited) { throw "Previous stop worker PID=$($previousStop.Id) still active; restart deferred" }
+        $previousStop.Dispose()
+        $script:turzxStopWorker = $null
+    }
+    function Stop-TrackedStack {
+        if (-not $KeepMetrics) { Stop-TurzxMetricsRecovery }
+        $trackedChild = $script:turzxStackChild
+        if ($null -eq $trackedChild -or $trackedChild.HasExited) { return }
+        Write-WatchdogLog ("stopping tracked stack child pid={0} reason={1}" -f $trackedChild.Id, $Reason)
+        try { $trackedChild.Kill() }
+        catch { if (-not $trackedChild.HasExited) { throw } }
+        if (-not $trackedChild.WaitForExit(5000)) {
+            throw "Tracked stack child PID=$($trackedChild.Id) did not exit; restart deferred"
         }
     }
     $stopArguments = @(
@@ -451,27 +455,58 @@ function Stop-Stack {
         "-ProcessSnapshotTimeoutSeconds", [string]$StopProcessSnapshotTimeoutSeconds
     )
     if ($KeepMetrics) { $stopArguments += "-KeepMetrics" }
-    $stopProcess = Start-HiddenProcess -FilePath "powershell.exe" -ArgumentList $stopArguments
-    Write-WatchdogLog ("stop worker started pid={0}" -f $stopProcess.Id)
-    $completed = $false
+    $ready = $permit = $stopProcess = $null
+    $timeoutSeconds = if ($Reason -in @('suspend', 'shutdown')) { [Math]::Min(30, $StopStackTimeoutSeconds) } else { $StopStackTimeoutSeconds }
+    $limitMs = $timeoutSeconds * 1000
     try {
-        $completed = $stopProcess.WaitForExit($StopStackTimeoutSeconds * 1000)
-    }
-    catch {
-        throw "StopSideScreenStack wait failed: $($_.Exception.Message)"
-    }
-
-    if (-not $completed) {
-        try {
-            Stop-Process -Id $stopProcess.Id -Force -ErrorAction SilentlyContinue
+        if ($CheckFrameProgress) {
+            $gate = 'Local\TURZX.SideScreen.Stop.' + [Guid]::NewGuid().ToString('N')
+            $ready = [Threading.EventWaitHandle]::new($false, 'ManualReset', "$gate.ready")
+            $permit = [Threading.EventWaitHandle]::new($false, 'ManualReset', "$gate.permit")
+            $stopArguments += @('-RecoveryGate', $gate, '-RecoveryParentId', [string]$PID)
         }
-        catch { }
-        Write-WatchdogLog ("StopSideScreenStack strict total timeout reason={0} timeoutSeconds={1}; restart deferred" -f `
-                $Reason, $StopStackTimeoutSeconds)
-        throw "StopSideScreenStack exceeded strict total timeout: $StopStackTimeoutSeconds seconds"
+        else { Stop-TrackedStack }
+        $clock = [Diagnostics.Stopwatch]::StartNew()
+        $stopProcess = Start-HiddenProcess -FilePath "powershell.exe" -ArgumentList $stopArguments
+        $script:turzxStopWorker = $stopProcess
+        Write-WatchdogLog ("stop worker started pid={0}" -f $stopProcess.Id)
+        while ($CheckFrameProgress -and -not $stopProcess.HasExited -and $clock.ElapsedMilliseconds -lt $limitMs) {
+            $sliceMs = [int][Math]::Max(0, [Math]::Min(200, $limitMs - $clock.ElapsedMilliseconds))
+            if (-not $ready.WaitOne($sliceMs)) { continue }
+            # The child has its snapshot and cannot stop anything until we give permission.
+            if (Test-TurzxStreamRecovered) {
+                Write-WatchdogLog ("stop cancelled reason={0} phase=after-snapshot; stream recovery check passed" -f $Reason)
+                return 'Recovered'
+            }
+            if ($clock.ElapsedMilliseconds -ge $limitMs -or $stopProcess.HasExited) { break }
+            Stop-TrackedStack
+            if ($clock.ElapsedMilliseconds -lt $limitMs -and -not $stopProcess.HasExited) { [void]$permit.Set() }
+            break
+        }
+        $remainingMs = [int][Math]::Max(0, $limitMs - $clock.ElapsedMilliseconds)
+        if (-not $stopProcess.WaitForExit($remainingMs)) {
+            Write-WatchdogLog ("StopSideScreenStack strict total timeout reason={0} timeoutSeconds={1}; restart deferred" -f `
+                    $Reason, $timeoutSeconds)
+            throw "StopSideScreenStack exceeded strict total timeout: $timeoutSeconds seconds"
+        }
+        if ($stopProcess.ExitCode -ne 0) {
+            throw "Stack stop failed exitCode=$($stopProcess.ExitCode); see $outDir\side-screen-stop.log for process and port evidence"
+        }
     }
-    if ($stopProcess.ExitCode -ne 0) {
-        throw "Stack stop failed exitCode=$($stopProcess.ExitCode); see $outDir\side-screen-stop.log for process and port evidence"
+    finally {
+        if ($ready) { $ready.Dispose() }
+        if ($permit) { $permit.Dispose() }
+        if ($stopProcess) {
+            if (-not $stopProcess.HasExited) {
+                try { $stopProcess.Kill() }
+                catch { if (-not $stopProcess.HasExited) { Write-WatchdogLog $_.Exception.Message } }
+                if (-not $stopProcess.WaitForExit(5000)) {
+                    throw "Stop worker PID=$($stopProcess.Id) did not exit; restart deferred"
+                }
+            }
+            $stopProcess.Dispose()
+            $script:turzxStopWorker = $null
+        }
     }
 }
 
@@ -600,7 +635,7 @@ function Invoke-TurzxSerialFaultRecovery {
     if (-not [object]::ReferenceEquals($Child, $script:turzxStackChild)) { return }
     try {
         # Let the stack publish the failure evidence before retiring its exact process.
-        if (-not $Child.WaitForExit(8000)) {
+        if ($null -ne $Child -and -not $Child.WaitForExit(8000)) {
             try { $Child.Kill() }
             catch { if (-not $Child.HasExited) { throw } }
             if (-not $Child.WaitForExit(2000)) { throw 'tracked stack did not exit' }
@@ -625,17 +660,22 @@ function Invoke-TurzxSerialFaultRecovery {
 function Invoke-TurzxFailureCircuitBreaker {
     param([Parameter(Mandatory = $true)][string]$Reason)
 
+    if (Test-TurzxStreamRecovered) { return }
+    $stopProven = $false
     Set-Content -LiteralPath $pausedPath -Value (Get-Date -Format "o") -Encoding ASCII
     Write-WatchdogLog ("failure circuit open reason={0} cooldownSeconds={1}" -f $Reason, $FailureCircuitBreakerSeconds)
     try {
         try {
-            Stop-Stack -Reason ("failure-circuit/{0}" -f $Reason) -KeepMetrics:($Reason -ne 'snapshot-stale-after-metrics-restarts')
+            if ((Stop-Stack -Reason ("failure-circuit/{0}" -f $Reason) -KeepMetrics -CheckFrameProgress) -eq 'Recovered') { return }
+            $stopProven = $true
         }
         catch {
             Write-WatchdogLog ("failure circuit stop proof deferred reason={0} type={1} error={2}" -f `
                 $Reason, $_.Exception.GetType().FullName, $_.Exception.Message)
         }
-        $serialRecovery = Invoke-TurzxSerialEndpointRecovery
+        $serialRecovery = if ($stopProven) { Invoke-TurzxSerialEndpointRecovery } else {
+            [pscustomobject]@{ Action = 'Deferred'; Recovered = $false; Reason = 'stack stop unproved' }
+        }
         $cooldownSeconds = if ([bool]$serialRecovery.Recovered) {
             2
         }
@@ -654,7 +694,8 @@ function Invoke-TurzxFailureCircuitBreaker {
         Remove-Item -LiteralPath $pausedPath -Force -ErrorAction SilentlyContinue
     }
     Write-WatchdogLog ("failure circuit closed reason={0}; retrying stack" -f $Reason)
-    return Invoke-TurzxStackRestartAttempt -Reason ("failure-circuit/{0}" -f $Reason)
+    return Invoke-TurzxStackRestartAttempt -Reason ("failure-circuit/{0}" -f $Reason) `
+        -StopProven:$stopProven -CheckFrameProgress:(-not $stopProven)
 }
 
 function Set-TurzxPanelBrightness {
@@ -1518,44 +1559,12 @@ function Start-WatchdogParentLivenessGuard {
     $self = Get-CimInstance Win32_Process -Filter "ProcessId=$PID" -ErrorAction Stop
     $parentId = [int]$self.ParentProcessId
     if ($parentId -le 0) { throw "Unable to resolve TURZX watchdog parent process." }
-    $parent = Get-Process -Id $parentId -ErrorAction Stop
-    $parentStartTicks = [long]$parent.StartTime.ToUniversalTime().Ticks
-    if (-not ("TURZX.SideScreen.WatchdogParentLiveness" -as [type])) {
-        Add-Type -TypeDefinition @"
-using System;
-using System.Diagnostics;
-using System.Threading;
-namespace TURZX.SideScreen {
-    public static class WatchdogParentLiveness {
-        private static Timer timer;
-        public static void Start(int parentProcessId, long parentStartTimeUtcTicks) {
-            Stop();
-            timer = new Timer(_ => {
-                try {
-                    using (var parent = Process.GetProcessById(parentProcessId)) {
-                        if (parent.StartTime.ToUniversalTime().Ticks == parentStartTimeUtcTicks) return;
-                    }
-                }
-                catch { }
-                try { Process.GetCurrentProcess().Kill(); }
-                catch { Environment.FailFast("TURZX watchdog parent launcher exited."); }
-            }, null, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1));
-        }
-        public static void Stop() {
-            var current = Interlocked.Exchange(ref timer, null);
-            if (current != null) current.Dispose();
-        }
-    }
-}
-"@
-    }
+    $parentStartTicks = (Get-Process -Id $parentId -ErrorAction Stop).StartTime.ToUniversalTime().Ticks
     [TURZX.SideScreen.WatchdogParentLiveness]::Start($parentId, $parentStartTicks)
 }
 
 function Stop-WatchdogParentLivenessGuard {
-    if ("TURZX.SideScreen.WatchdogParentLiveness" -as [type]) {
-        [TURZX.SideScreen.WatchdogParentLiveness]::Stop()
-    }
+    [TURZX.SideScreen.WatchdogParentLiveness]::Stop()
 }
 
 function Test-DesktopContinuityWorker {
@@ -1705,13 +1714,13 @@ function Get-TurzxMonotonicMilliseconds {
 function Set-TurzxChildHeartbeatStartupWindow {
     param([AllowNull()][object]$Child)
 
-    $script:metricsRecoveryStarts = 0
     $script:turzxStackChild = $Child
     $script:turzxSerialFaultConsumed = $false
     $script:turzxSerialFaultRetryUtc = $null
     $script:childHeartbeatObserved = $false
     $script:streamHeartbeatFrame = 0
     $script:streamHeartbeatProgressMs = 0L
+    $script:streamHeartbeatPublishedUtc = [DateTime]::MinValue
     if ($null -eq $Child) {
         $script:childHeartbeatStartupDeadlineMilliseconds = $null
         return $null
@@ -1723,10 +1732,27 @@ function Set-TurzxChildHeartbeatStartupWindow {
 }
 
 function Test-TurzxChildHeartbeatStartupDeadline {
-    if ($null -eq $script:childHeartbeatStartupDeadlineMilliseconds) {
-        return $false
+    $deadline = $script:childHeartbeatStartupDeadlineMilliseconds
+    $nowMs = Get-TurzxMonotonicMilliseconds
+    if ($null -eq $deadline -or $nowMs -lt $deadline) { return $false }
+    $graceMs = [int64]$HeartbeatStartupGraceSeconds * 1000
+    if ($nowMs -ge $deadline + $graceMs) { return $true }
+
+    # StartVideoStream runs inside the stack worker. Only stages completed by
+    # this launch can extend the deadline, and only to twice the base window.
+    $workerId = $script:turzxStackChild.Id
+    $nowUtc = [DateTime]::UtcNow
+    foreach ($line in @(Get-Content -LiteralPath $stackStdoutPath -Tail 40 -ErrorAction SilentlyContinue)) {
+        if ($line -match "^stage=(?:[a-z-]+-done|stream-execute-start) pid=$workerId utc=(\S+)") {
+            $stageUtc = [DateTimeOffset]::MinValue
+            if ([DateTimeOffset]::TryParse($Matches[1], [ref]$stageUtc) -and
+                $stageUtc.UtcDateTime -ge $script:turzxStackStartedUtc -and $stageUtc.UtcDateTime -le $nowUtc) {
+                $stageMs = ($stageUtc.UtcDateTime - $script:turzxStackStartedUtc).TotalMilliseconds
+                if ($nowMs -lt $deadline + [Math]::Min($stageMs, $graceMs)) { return $false }
+            }
+        }
     }
-    return ((Get-TurzxMonotonicMilliseconds) -ge $script:childHeartbeatStartupDeadlineMilliseconds)
+    return $true
 }
 
 function Claim-TurzxRestartRequest {
@@ -1751,10 +1777,13 @@ function Claim-TurzxRestartRequest {
 }
 
 function Start-Stack {
-    param([string]$Reason, [switch]$StreamOnly)
+    param([string]$Reason, [switch]$StreamOnly, [switch]$StopProven, [switch]$CheckFrameProgress)
     if (-not $StreamOnly) {
-        $keepMetrics = $Reason -notmatch '(^|/)(restart-request|snapshot-stale-after-metrics-restarts)$'
-        Stop-Stack -Reason ("pre-start/{0}" -f $Reason) -KeepMetrics:$keepMetrics
+        if (-not $StopProven) {
+            $keepMetrics = $Reason -ne 'restart-request'
+            if ((Stop-Stack -Reason ("pre-start/{0}" -f $Reason) -KeepMetrics:$keepMetrics `
+                    -CheckFrameProgress:$CheckFrameProgress) -eq 'Recovered') { return }
+        }
         if (-not (Set-TurzxPanelBrightness -Brightness $ActiveBrightness)) {
             Write-WatchdogLog ("TURZX brightness restore failed reason={0}; starting stream for recovery" -f $Reason)
         }
@@ -1780,14 +1809,16 @@ function Start-Stack {
         "-MaxStackLogBytes", [string]$MaxStackLogBytes,
         "-MaxStreamLogBytes", [string]$MaxStreamLogBytes,
         "-LogBackupCount", [string]$LogBackupCount,
-        "-Worker"
+        "-Worker", "-WatchdogManaged"
     )
     if ($HybridRefresh) {
         $arguments += "-HybridRefresh"
     }
     if ($StreamOnly) { $arguments += "-StreamOnly" }
-    $script:turzxStackStartedUtc = [DateTime]::UtcNow
+    $stackStartedUtc = [DateTime]::UtcNow
     $process = Start-HiddenProcess -FilePath "powershell.exe" -ArgumentList $arguments
+    $script:turzxStackStartedUtc = $stackStartedUtc
+    $script:turzxForceRestart = $false
     try { Set-Content -LiteralPath $childPidPath -Value $process.Id -Encoding ASCII }
     catch { Write-WatchdogLog ("stack child PID file write failed: {0}" -f $_.Exception.Message) }
     Write-WatchdogLog ("stack child pid={0}" -f $process.Id)
@@ -1798,14 +1829,18 @@ function Invoke-TurzxStackRestartAttempt {
     param(
         [Parameter(Mandatory = $true)][string]$Reason,
         [ValidateRange(0, 300)][int]$DelaySeconds = 0,
-        [switch]$StreamOnly
+        [switch]$StreamOnly,
+        [switch]$StopProven,
+        [switch]$CheckFrameProgress
     )
 
     if ($DelaySeconds -gt 0) {
         Start-Sleep -Seconds $DelaySeconds
     }
     try {
-        $newChild = Start-Stack -Reason $Reason -StreamOnly:$StreamOnly
+        if ($CheckFrameProgress -and (Test-TurzxStreamRecovered)) { return }
+        $newChild = Start-Stack -Reason $Reason -StreamOnly:$StreamOnly -StopProven:$StopProven -CheckFrameProgress:$CheckFrameProgress
+        if ($null -eq $newChild) { return }
         return [pscustomobject]@{
             Succeeded = $true
             Child = $newChild
@@ -1827,31 +1862,54 @@ function Invoke-TurzxStackRestartAttempt {
     }
 }
 
-function Invoke-TurzxMetricsRecovery {
-    $now = [DateTime]::UtcNow
-    if (($now - $script:metricsLastAttemptUtc).TotalSeconds -lt 30) { return $false }
-    # Give each successful collector restart a full cooldown to refresh the
-    # snapshot before asking the existing heartbeat path to recycle the stack.
-    if ($script:metricsRecoveryStarts -ge 2) { return $true }
-    $script:metricsLastAttemptUtc = $now
-    try {
-        $result = Invoke-TurzxMetricsAgentMaintenance -SideRoot $scriptDir -Restart
-        if ($result.Status -match '^started(?:\s|$)') {
-            $script:metricsRecoveryStarts++
-            $script:metricsLastAttemptUtc = [DateTime]::UtcNow
-        }
-        else { $script:metricsRecoveryStarts = 0 }
-        Write-WatchdogLog ("metrics recovery {0}; stream remains running" -f $result.Status)
+function Stop-TurzxMetricsRecovery {
+    $worker = $script:metricsRecoveryProcess
+    if ($null -eq $worker) { return }
+    if (-not $worker.HasExited) {
+        try { $worker.Kill() }
+        catch { if (-not $worker.HasExited) { throw } }
+        if (-not $worker.WaitForExit(1000)) { throw 'Metrics recovery worker exit not proven' }
     }
-    catch {
-        $script:metricsRecoveryStarts = 0
-        Write-WatchdogLog ("metrics recovery deferred; stream remains running: {0}" -f $_.Exception.Message)
-    }
-    return $false
+    $worker.Dispose()
+    $script:metricsRecoveryProcess = $null
 }
 
-# Sustained snapshot failures try collector recovery first, then rejoin the
-# bounded stack recovery path if successful restarts leave snapshots stale.
+function Invoke-TurzxMetricsRecovery {
+    param([switch]$TryRestart)
+
+    $elapsed = ([DateTime]::UtcNow - $script:metricsLastAttemptUtc).TotalSeconds
+    $worker = $script:metricsRecoveryProcess
+    try {
+        if ($null -ne $worker) {
+            if ($worker.HasExited) {
+                $script:metricsLastAttemptUtc = [DateTime]::UtcNow
+                $exitCode = $worker.ExitCode
+                Stop-TurzxMetricsRecovery
+                $status = if ($exitCode -eq 0) { (Get-Content -LiteralPath $metricsRecoveryLogPath -Raw).Trim() } else { "worker exitCode=$exitCode" }
+                Write-WatchdogLog ("metrics recovery {0}; stream remains running" -f $status)
+            }
+            elseif ($elapsed -ge 120) {
+                $script:metricsLastAttemptUtc = [DateTime]::UtcNow
+                $worker.Kill()
+                Write-WatchdogLog 'metrics recovery worker timed out; termination requested'
+            }
+            return
+        }
+        if (-not $TryRestart -or $elapsed -lt 30) { return }
+        $script:metricsLastAttemptUtc = [DateTime]::UtcNow
+        $parentStartTicks = [Diagnostics.Process]::GetCurrentProcess().StartTime.ToUniversalTime().Ticks
+        $arguments = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File',
+            (Join-Path $scriptDir 'MetricsEndpointPolicy.ps1'), '-RunTurzxMetricsRecoveryWorker',
+            '-MetricsRecoveryParentId', [string]$PID, '-MetricsRecoveryParentStartTicks', [string]$parentStartTicks)
+        $script:metricsRecoveryProcess = Start-HiddenProcess -FilePath 'powershell.exe' `
+            -ArgumentList $arguments -RedirectStandardOutput $metricsRecoveryLogPath
+    }
+    catch {
+        Write-WatchdogLog ("metrics recovery deferred; stream remains running: {0}" -f $_.Exception.Message)
+    }
+}
+
+# Sustained snapshot failures can recycle the collector independently of frame health.
 function Get-TurzxSnapshotStaleDecision {
     param(
         [AllowEmptyString()][string]$SnapshotStatus,
@@ -1885,8 +1943,6 @@ function Get-TurzxSnapshotStaleDecision {
 }
 
 function Get-StreamHeartbeatHealth {
-    param([switch]$EndpointFaultOnly)
-
     $candidates = @(
         $heartbeatPaths |
             Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
@@ -1902,8 +1958,9 @@ function Get-StreamHeartbeatHealth {
     $readBusy = $false
     $readBusyOnly = $true
     $hasReadableHeartbeat = $false
+    $nowUtc = [DateTime]::UtcNow
     foreach ($item in $candidates) {
-        $ageSeconds = ([DateTime]::UtcNow - $item.LastWriteTimeUtc).TotalSeconds
+        $ageSeconds = ($nowUtc - $item.LastWriteTimeUtc).TotalSeconds
         $stale = $ageSeconds -gt $HeartbeatStaleSeconds
         if ($stale) {
             $invalidReasons += ("stale {0} ageSeconds={1:N1}" -f $item.Name, $ageSeconds)
@@ -1930,26 +1987,34 @@ function Get-StreamHeartbeatHealth {
                 continue
             }
             $frameStatus = [string]$heartbeat.status
+            $frameUtc = ([DateTimeOffset]$heartbeat.utc).UtcDateTime
+            $readUtc = [DateTime]::UtcNow
+            if ($heartbeat.port -ine $Port -or $frameUtc -lt $script:turzxStackStartedUtc -or $frameUtc -gt $readUtc) {
+                $readBusyOnly = $false
+                $invalidReasons += "unowned-heartbeat $($item.Name)"
+                continue
+            }
             # A terminal serial fault remains actionable for this child even after frame progress ages out.
             if (-not $hasReadableHeartbeat -and $HybridRefresh -and
                 $heartbeat.PSObject.Properties['serial_fault'] -and
                 $heartbeat.serial_fault -ceq 'endpoint-unresponsive' -and
-                $frameStatus -ceq 'fatal' -and $heartbeat.port -ieq $Port -and
+                $frameStatus -ceq 'fatal' -and
                 $heartbeat.transport_mode -ceq 'hybrid_diff_204_full_200' -and
-                $heartbeat.send_attempted -is [bool] -and $heartbeat.send_attempted) {
-                $faultUtc = ([DateTimeOffset]$heartbeat.utc).UtcDateTime
-                $nowUtc = [DateTime]::UtcNow
-                if ($faultUtc -ge $script:turzxStackStartedUtc -and $faultUtc -le $nowUtc) {
-                    return [pscustomobject]@{
-                        Healthy = $false
-                        Reason = 'serial-endpoint-unresponsive'
-                        SerialEndpointFault = $true
-                    }
+                $heartbeat.send_attempted -is [bool] -and $heartbeat.send_attempted -and
+                ($null -ne $script:turzxStackChild -or ($script:childHeartbeatObserved -and
+                    [int64]$heartbeat.frame -gt $script:streamHeartbeatFrame -and $frameUtc -gt $script:streamHeartbeatPublishedUtc))) {
+                return [pscustomobject]@{
+                    Healthy = $false
+                    Reason = 'serial-endpoint-unresponsive'
+                    SerialEndpointFault = $true
                 }
             }
             $hasReadableHeartbeat = $true
-            if ($EndpointFaultOnly) { break }
-            if ($stale) { continue }
+            $frameAgeMs = ($readUtc - $frameUtc).TotalMilliseconds
+            if ($stale -or $frameAgeMs -ge ($HeartbeatStaleSeconds * 1000L)) {
+                $invalidReasons += "stale-frame $($item.Name)"
+                continue
+            }
             $snapshotStatusProperty = $heartbeat.PSObject.Properties["snapshot_status"]
             $snapshotStatus = if ($null -eq $snapshotStatusProperty) {
                 $null
@@ -1980,7 +2045,7 @@ function Get-StreamHeartbeatHealth {
                     Reason = "timing-missing"
                 }
             }
-            $sendAttempted = [bool]$heartbeat.send_attempted
+            $sendAttempted = $heartbeat.send_attempted -is [bool] -and $heartbeat.send_attempted
             $sendMs = [int64]$heartbeat.send_ms
             $elapsedMs = [int64]$heartbeat.elapsed_ms
             $periodMs = [int64]$heartbeat.period_ms
@@ -2042,7 +2107,8 @@ function Get-StreamHeartbeatHealth {
             $advanced = [int64]$heartbeat.frame -gt $script:streamHeartbeatFrame
             if ($advanced) {
                 $script:streamHeartbeatFrame = [int64]$heartbeat.frame
-                $script:streamHeartbeatProgressMs = $nowMs
+                $script:streamHeartbeatProgressMs = $nowMs - [int64]$frameAgeMs
+                $script:streamHeartbeatPublishedUtc = $frameUtc
             }
             $idleMs = $nowMs - $script:streamHeartbeatProgressMs
             if ($idleMs -ge ($HeartbeatStaleSeconds * 1000L)) {
@@ -2061,6 +2127,7 @@ function Get-StreamHeartbeatHealth {
             }
             return [pscustomobject]@{
                 Healthy = $true
+                Advanced = $advanced
                 Reason = ("frame={0} source={1}" -f [int64]$heartbeat.frame, $item.Name)
                 SnapshotStatus = $snapshotStatus
             }
@@ -2087,6 +2154,28 @@ function Get-StreamHeartbeatHealth {
     }
 }
 
+function Get-TurzxWatchdogHeartbeat {
+    $previousFrame = $script:streamHeartbeatFrame
+    $health = Get-StreamHeartbeatHealth
+    if ($health.Healthy) {
+        if ($null -eq $script:turzxStackChild -and -not $script:childHeartbeatObserved -and
+            ($previousFrame -eq 0 -or -not $health.Advanced)) {
+            return [pscustomobject]@{ Healthy = $false; Pending = $true; Reason = 'orphan-frame-awaiting-progress' }
+        }
+        $script:childHeartbeatObserved = $true
+    }
+    return $health
+}
+
+function Test-TurzxStreamRecovered {
+    if ($script:turzxForceRestart) { return $false }
+    $health = Get-TurzxWatchdogHeartbeat
+    return ($health.Healthy -or $health.PSObject.Properties['Pending'] -or
+        (-not $script:turzxSerialFaultConsumed -and $health.PSObject.Properties['SerialEndpointFault']) -or
+        ($null -ne $script:turzxStackChild -and -not $script:turzxStackChild.HasExited -and
+            -not $script:childHeartbeatObserved -and -not (Test-TurzxChildHeartbeatStartupDeadline)))
+}
+
 function Send-Blank {
     param(
         [string]$Reason,
@@ -2104,24 +2193,21 @@ function Send-Blank {
 function Stop-OtherWatchdogs {
     param([string]$Reason)
 
-    $rootPattern = "*" + $Root + "*"
-    $stopped = 0
-    Get-CimInstance Win32_Process |
-        Where-Object {
-            $_.ProcessId -ne $PID -and
-            ($_.Name -like "powershell*" -or $_.Name -like "pwsh*") -and
-            $_.CommandLine -like "*-File*StartSideScreenWatchdog.ps1*" -and
-            $_.CommandLine -like "*StartSideScreenWatchdog.ps1*" -and
-            $_.CommandLine -like $rootPattern
-        } |
-        ForEach-Object {
-            $stopped++
-            Write-WatchdogLog ("stopping old watchdog PID={0} reason={1}" -f $_.ProcessId, $Reason)
-            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+    $filter = "(Name='powershell.exe' OR Name='pwsh.exe') AND CommandLine LIKE '%StartSideScreenWatchdog.ps1%'"
+    $candidates = @(Get-CimInstance Win32_Process -Filter $filter -Property Name,ProcessId,CommandLine,CreationDate `
+        -OperationTimeoutSec $StopProcessSnapshotTimeoutSeconds -ErrorAction Stop)
+    foreach ($candidate in $candidates) {
+        if ($candidate.ProcessId -eq $PID -or -not (Test-OwnedStreamParent $candidate $scriptDir 'StartSideScreenWatchdog.ps1')) { continue }
+        $process = $null
+        try {
+            $process = Get-SnapshotProcess $candidate
+            if ($null -eq $process) { continue }
+            Write-WatchdogLog ("stopping old watchdog PID={0} reason={1}" -f $candidate.ProcessId, $Reason)
+            $process.Kill()
+            if (-not $process.WaitForExit(1500)) { Write-WatchdogLog "old watchdog PID=$($candidate.ProcessId) has not exited" }
         }
-
-    if ($stopped -gt 0) {
-        Start-Sleep -Milliseconds 1500
+        catch { Write-WatchdogLog "old watchdog PID=$($candidate.ProcessId) stop failed: $($_.Exception.Message)" }
+        finally { if ($process) { $process.Dispose() } }
     }
 }
 
@@ -2168,7 +2254,7 @@ foreach ($eventSourceId in @($powerSourceId, $shutdownSourceId)) {
 Stop-OtherWatchdogs -Reason "watchdog-start"
 Remove-Item -LiteralPath $pausedPath -Force -ErrorAction SilentlyContinue
 Write-WatchdogLog "cleared paused flag at watchdog start"
-Write-WatchdogLog ("TURZX heartbeat policy=frame-progress staleSeconds={0} overruns=diagnostic read-busy=deferred" -f $HeartbeatStaleSeconds)
+Write-WatchdogLog "TURZX heartbeat policy=frame-progress staleSeconds=$HeartbeatStaleSeconds overruns=diagnostic read-busy=deferred stopRecheck=after-snapshot stopTimeoutSeconds=$StopStackTimeoutSeconds powerStopTimeoutSeconds=$([Math]::Min(30, $StopStackTimeoutSeconds))"
 Write-WatchdogLog "TURZX serial fault recovery policy=serial-fault-heartbeat-v1 restart=stream-only"
 
 $powerSubscription = $null
@@ -2204,6 +2290,7 @@ $child = Set-TurzxChildHeartbeatStartupWindow -Child $null
 $consecutiveFailures = 0
 $heartbeatFailures = 0
 $snapshotStaleHeartbeats = 0
+$turzxSuspended = $false
 try {
     Write-WatchdogLog "HS2 ordinary-window protection starts before controller and overlay verification"
     Start-HS2StartupWindowGuard
@@ -2214,11 +2301,16 @@ try {
     Invoke-HS2ExclusiveWindowProtection
     Invoke-VddWindowReturnProtection
     Invoke-WallpaperEngineDisplayRecovery
-    $initialAttempt = Invoke-TurzxStackRestartAttempt -Reason "watchdog-start"
-    $child = Set-TurzxChildHeartbeatStartupWindow -Child $initialAttempt.Child
-    if (-not $initialAttempt.Succeeded) { $consecutiveFailures = 1 }
+    if (-not (Test-Path -LiteralPath $restartFlag -PathType Leaf)) {
+        $initialAttempt = Invoke-TurzxStackRestartAttempt -Reason "watchdog-start" -CheckFrameProgress
+        if ($null -ne $initialAttempt) {
+            $child = Set-TurzxChildHeartbeatStartupWindow -Child $initialAttempt.Child
+            if (-not $initialAttempt.Succeeded) { $consecutiveFailures = 1 }
+        }
+    }
     while ($true) {
         Start-HS2StartupWindowGuard
+        Invoke-TurzxMetricsRecovery
         $event = $null
         if (-not $NoPowerEvents) {
             $event = Wait-Event -Timeout $PollSeconds
@@ -2238,6 +2330,7 @@ try {
                         # next real resume as though it were the duplicate
                         # 7/18 notification from the earlier epoch.
                         $script:hs2LastResumeHandledUtc = [DateTime]::MinValue
+                        $turzxSuspended = $true
                         Enter-SleepDisplayState
                         $child = Set-TurzxChildHeartbeatStartupWindow -Child $null
                         $heartbeatFailures = 0
@@ -2258,6 +2351,8 @@ try {
                         }
                         else {
                             $script:hs2LastResumeHandledUtc = $resumeNowUtc
+                            $turzxSuspended = $false
+                            $script:turzxForceRestart = $true
                             $consecutiveFailures = 0
                             Remove-Item -LiteralPath $pausedPath -Force -ErrorAction SilentlyContinue
                             try {
@@ -2271,7 +2366,7 @@ try {
                             }
                             Start-Sleep -Seconds $ResumeDelaySeconds
                             Set-ActiveDisplayState -Reason ("resume-event-{0}" -f $eventType)
-                            $resumeAttempt = Invoke-TurzxStackRestartAttempt -Reason ("resume-event-{0}" -f $eventType)
+                            $resumeAttempt = Invoke-TurzxStackRestartAttempt -Reason ("resume-event-{0}" -f $eventType) -StopProven
                             $child = Set-TurzxChildHeartbeatStartupWindow -Child $resumeAttempt.Child
                             if (-not $resumeAttempt.Succeeded) { $consecutiveFailures++ }
                             $heartbeatFailures = 0
@@ -2311,6 +2406,7 @@ try {
         if ($null -ne $claimedRestartRequest) {
             Write-WatchdogLog "restart request detected; recycling stack through active watchdog"
             try {
+                $script:turzxForceRestart = $true
                 $consecutiveFailures = 0
                 $heartbeatFailures = 0
                 $restartAttempt = Invoke-TurzxStackRestartAttempt -Reason "restart-request"
@@ -2336,11 +2432,10 @@ try {
         Invoke-VddWindowReturnProtection
         Invoke-WallpaperEngineDisplayRecovery
 
-        $childExited = $null -ne $child -and $child.HasExited
-        $checkHeartbeat = $null -ne $child -and -not $childExited -and (Test-TurzxChildHeartbeatStartupDeadline)
-        if ($null -ne $child -and ($HybridRefresh -or $checkHeartbeat)) {
-            if ($script:turzxSerialFaultRetryUtc -gt [DateTime]::UtcNow) { continue }
-            $heartbeatHealth = Get-StreamHeartbeatHealth -EndpointFaultOnly:(-not $checkHeartbeat)
+        if ($turzxSuspended) { continue }
+        if ($script:turzxSerialFaultRetryUtc -gt [DateTime]::UtcNow) { continue }
+        $heartbeatHealth = Get-TurzxWatchdogHeartbeat
+        if ($null -ne $child -or $script:childHeartbeatObserved) {
             if ($null -ne $script:turzxSerialFaultRetryUtc -or
                 (-not $script:turzxSerialFaultConsumed -and $heartbeatHealth.PSObject.Properties['SerialEndpointFault'])) {
                 $script:turzxSerialFaultConsumed = $true
@@ -2354,43 +2449,32 @@ try {
                     continue
                 }
                 if ($null -ne $script:turzxSerialFaultRetryUtc) { continue }
-                $childExited = $child.HasExited
             }
         }
 
-        if ($null -eq $child) {
+        $childExited = $null -ne $child -and $child.HasExited
+        $heartbeatPending = $heartbeatHealth.PSObject.Properties['Pending']
+        if (($null -eq $child -or $childExited) -and
+            ($script:turzxForceRestart -or (-not $heartbeatHealth.Healthy -and -not $heartbeatPending))) {
             $consecutiveFailures++
-            Write-WatchdogLog ("stack child unavailable; consecutiveFailures={0}; retry remains inside watchdog" -f $consecutiveFailures)
+            $reason = if ($childExited) { 'child-exit' } else { 'child-unavailable' }
+            Write-WatchdogLog ("stack {0}; consecutiveFailures={1}" -f $reason, $consecutiveFailures)
             if ($consecutiveFailures -ge $MaxConsecutiveFailures) {
-                $missingChildAttempt = Invoke-TurzxFailureCircuitBreaker -Reason "child-unavailable"
+                $childAttempt = Invoke-TurzxFailureCircuitBreaker -Reason $reason
                 $consecutiveFailures = 0
             }
             else {
-                $missingChildAttempt = Invoke-TurzxStackRestartAttempt -Reason "child-unavailable" -DelaySeconds 3
+                $childAttempt = Invoke-TurzxStackRestartAttempt -Reason $reason -DelaySeconds 3 -CheckFrameProgress
             }
-            $child = Set-TurzxChildHeartbeatStartupWindow -Child $missingChildAttempt.Child
-            $heartbeatFailures = 0
-            $snapshotStaleHeartbeats = 0
-            continue
-        }
-        if ($childExited) {
-            $consecutiveFailures++
-            Write-WatchdogLog ("stack child exited code={0}; consecutiveFailures={1}" -f $child.ExitCode, $consecutiveFailures)
-            if ($consecutiveFailures -ge $MaxConsecutiveFailures) {
-                $childExitAttempt = Invoke-TurzxFailureCircuitBreaker -Reason "child-exit"
-                $child = Set-TurzxChildHeartbeatStartupWindow -Child $childExitAttempt.Child
-                $consecutiveFailures = 0
+            if ($null -ne $childAttempt) {
+                $child = Set-TurzxChildHeartbeatStartupWindow -Child $childAttempt.Child
                 $heartbeatFailures = 0
                 $snapshotStaleHeartbeats = 0
-                continue
             }
-            $childExitAttempt = Invoke-TurzxStackRestartAttempt -Reason "child-exit" -DelaySeconds 3
-            $child = Set-TurzxChildHeartbeatStartupWindow -Child $childExitAttempt.Child
-            $heartbeatFailures = 0
-            $snapshotStaleHeartbeats = 0
+            continue
         }
-        elseif ($checkHeartbeat) {
-            if ($heartbeatHealth.PSObject.Properties['Pending'] -and $heartbeatHealth.Pending) {
+        if ($script:childHeartbeatObserved -or (Test-TurzxChildHeartbeatStartupDeadline)) {
+            if ($heartbeatPending) {
                 Write-WatchdogLog ("heartbeat read deferred; awaiting frame progress: {0}" -f $heartbeatHealth.Reason)
                 $heartbeatFailures = 0
                 continue
@@ -2402,7 +2486,6 @@ try {
                     -ConsecutiveFailures $snapshotStaleHeartbeats `
                     -Threshold $MaxConsecutiveSnapshotStaleHeartbeats
                 $snapshotStaleHeartbeats = $snapshotDecision.ConsecutiveFailures
-                if (-not $snapshotDecision.IsStale) { $script:metricsRecoveryStarts = 0 }
                 if ($snapshotDecision.IsStale -and
                     $snapshotDecision.ConsecutiveFailures -eq 1) {
                     Write-WatchdogLog (
@@ -2413,21 +2496,15 @@ try {
                     Write-WatchdogLog (
                         "snapshot stale threshold reached reason={0}" -f $snapshotDecision.Reason)
                 }
-                if ($snapshotDecision.FailureThresholdReached -and (Invoke-TurzxMetricsRecovery)) {
-                    $heartbeatHealth.Healthy = $false
-                    $heartbeatHealth.Reason = "snapshot-stale-after-metrics-restarts"
-                }
-                $script:childHeartbeatObserved = $true
-                if ($heartbeatHealth.Healthy -and $heartbeatFailures -gt 0) {
+                if ($snapshotDecision.FailureThresholdReached) { Invoke-TurzxMetricsRecovery -TryRestart }
+                if ($heartbeatFailures -gt 0) {
                     Write-WatchdogLog ("heartbeat recovered {0}" -f $heartbeatHealth.Reason)
                 }
                 elseif (-not $snapshotDecision.IsStale -and $previousSnapshotStaleHeartbeats -gt 0) {
                     Write-WatchdogLog ("snapshot recovered after consecutive={0}" -f $previousSnapshotStaleHeartbeats)
                 }
-                if ($heartbeatHealth.Healthy) {
-                    $heartbeatFailures = 0
-                    if (-not $snapshotDecision.IsStale) { $consecutiveFailures = 0 }
-                }
+                $heartbeatFailures = 0
+                if (-not $snapshotDecision.IsStale) { $consecutiveFailures = 0 }
             }
             if (-not $heartbeatHealth.Healthy) {
                 if (-not $script:childHeartbeatObserved -and $heartbeatHealth.Reason -eq "missing") {
@@ -2435,6 +2512,7 @@ try {
                     Write-WatchdogLog (
                         "startup heartbeat deadline reached reason=missing; converging through failure circuit before another stack start")
                     $heartbeatAttempt = Invoke-TurzxFailureCircuitBreaker -Reason "heartbeat-missing-startup"
+                    if ($null -eq $heartbeatAttempt) { continue }
                     $child = Set-TurzxChildHeartbeatStartupWindow -Child $heartbeatAttempt.Child
                     $consecutiveFailures = 0
                     $heartbeatFailures = 0
@@ -2446,16 +2524,16 @@ try {
                 if ($heartbeatFailures -ge $MaxConsecutiveHeartbeatFailures) {
                     $consecutiveFailures++
                     if ($consecutiveFailures -ge $MaxConsecutiveFailures) {
-                        $recoveryReason = if ($heartbeatHealth.Reason -eq 'snapshot-stale-after-metrics-restarts') { $heartbeatHealth.Reason } else { 'heartbeat-stalls' }
-                        $heartbeatAttempt = Invoke-TurzxFailureCircuitBreaker -Reason $recoveryReason
+                        $heartbeatAttempt = Invoke-TurzxFailureCircuitBreaker -Reason 'heartbeat-stalls'
+                        if ($null -eq $heartbeatAttempt) { continue }
                         $child = Set-TurzxChildHeartbeatStartupWindow -Child $heartbeatAttempt.Child
                         $consecutiveFailures = 0
                         $heartbeatFailures = 0
                         $snapshotStaleHeartbeats = 0
                         continue
                     }
-                    $recoveryReason = if ($heartbeatHealth.Reason -eq 'snapshot-stale-after-metrics-restarts') { $heartbeatHealth.Reason } else { 'heartbeat-unhealthy' }
-                    $heartbeatAttempt = Invoke-TurzxStackRestartAttempt -Reason $recoveryReason -DelaySeconds 3
+                    $heartbeatAttempt = Invoke-TurzxStackRestartAttempt -Reason 'heartbeat-unhealthy' -DelaySeconds 3 -CheckFrameProgress
+                    if ($null -eq $heartbeatAttempt) { continue }
                     $child = Set-TurzxChildHeartbeatStartupWindow -Child $heartbeatAttempt.Child
                     $heartbeatFailures = 0
                     $snapshotStaleHeartbeats = 0

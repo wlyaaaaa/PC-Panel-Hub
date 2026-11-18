@@ -196,3 +196,46 @@ public static class TurzxHiddenProcessLauncher
         return copy;
     }
 }
+
+namespace TURZX.SideScreen
+{
+    public static class WatchdogParentLiveness
+    {
+        private static volatile Process parent;
+
+        public static void Start(int parentProcessId, long parentStartTimeUtcTicks)
+        {
+            Stop();
+            parent = Process.GetProcessById(parentProcessId);
+            try
+            {
+                if (parent.Handle == IntPtr.Zero || parent.HasExited || parent.StartTime.ToUniversalTime().Ticks != parentStartTimeUtcTicks)
+                    throw new InvalidOperationException("TURZX supervising process is no longer active.");
+                parent.Exited += ExitWithParent;
+                parent.EnableRaisingEvents = true;
+            }
+            catch { Stop(); throw; }
+        }
+
+        public static void EnsureParentAlive()
+        {
+            var current = parent;
+            if (current != null && current.HasExited)
+                throw new InvalidOperationException("TURZX supervising process exited.");
+        }
+
+        private static void ExitWithParent(object sender, EventArgs args)
+        {
+            if (!ReferenceEquals(parent, sender)) return;
+            try { Process.GetCurrentProcess().Kill(); }
+            catch { Environment.FailFast("TURZX supervising process exited."); }
+        }
+
+        public static void Stop()
+        {
+            var current = parent;
+            parent = null;
+            if (current != null) current.Dispose();
+        }
+    }
+}

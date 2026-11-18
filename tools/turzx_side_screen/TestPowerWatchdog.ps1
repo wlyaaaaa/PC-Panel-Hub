@@ -2786,12 +2786,14 @@ if ($earlyWindowGuard -lt 0 -or $activeDisplayStartup -le $earlyWindowGuard) {
 foreach ($pattern in @(
         "Start-WatchdogParentLivenessGuard",
         "WatchdogParentLiveness",
-        "TimeSpan.FromSeconds(1)",
-        "Process.GetCurrentProcess().Kill()",
         "Stop-WatchdogParentLivenessGuard")) {
     if ($watchdogText -notmatch [regex]::Escape($pattern)) {
         throw "TURZX watchdog parent-liveness hardening missing: $pattern"
     }
+}
+$launcherSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'HiddenProcessLauncher.cs') -Raw
+foreach ($pattern in @('EnableRaisingEvents = true', 'Process.GetCurrentProcess().Kill()')) {
+    if ($launcherSource -notmatch [regex]::Escape($pattern)) { throw "TURZX parent-liveness hardening missing: $pattern" }
 }
 $startupWindowGuardText = Get-Content -LiteralPath $startupWindowGuard -Raw
 & {
@@ -3236,8 +3238,8 @@ if ($stopText -notmatch [regex]::Escape("ParentProcessId")) {
 }
 
 foreach ($pattern in @(
-    '*-File*StartSideScreenStack.ps1*',
-    '*-File*StartSideScreenWatchdog.ps1*'
+    '(Test-OwnedStreamParent $p $side)',
+    'Test-OwnedStreamParent $p $side ''StartSideScreenWatchdog.ps1'''
 )) {
     if ($stopText -notmatch [regex]::Escape($pattern)) {
         throw "Stop script must only match real script entrypoints, not diagnostic commands containing the script name; missing: $pattern"

@@ -50,26 +50,46 @@ try {
 & {
  $recoveryRoot=Join-Path ([IO.Path]::GetTempPath()) ('turzx-metrics-'+[guid]::NewGuid().ToString('N'))
  $script:agentActive=$true; $script:portAvailable=$false; $script:launches=0; $script:stops=@()
+ $created=[DateTime]::UtcNow; $script:metricsStarted=$created
  function Get-TurzxMetricsEndpoint {param($ConfigPath) if($ConfigPath-ne(Join-Path $recoveryRoot 'config.json')){throw 'Maintenance must use its SideRoot endpoint'}; [pscustomobject]@{HostName='127.0.0.1';Port=18766} }
- function Get-CimInstance { [CmdletBinding()]param($ClassName,$OperationTimeoutSec) @(
-  [pscustomobject]@{Name='python.exe';ProcessId=123;CommandLine=(Join-Path $recoveryRoot 'metrics_agent.py')},
-  [pscustomobject]@{Name='python.exe';ProcessId=456;CommandLine='E:\other\metrics_agent.py'}) }
- function Stop-Process { [CmdletBinding()]param($Id,[switch]$Force) $script:stops+= $Id }
+ function Get-CimInstance {
+  [CmdletBinding()]param($ClassName,$Filter,$OperationTimeoutSec)
+  $agent=Join-Path $recoveryRoot 'metrics_agent.py'
+  if($script:agentActive){[pscustomobject]@{Name='python.exe';ProcessId=123;CreationDate=$created;CommandLine="python.exe -u `"$agent`""}}
+  [pscustomobject]@{Name='python.exe';ProcessId=456;CommandLine='python.exe -u E:\other\metrics_agent.py'}
+  [pscustomobject]@{Name='python.exe';ProcessId=457;CommandLine="python.exe -u `"$agent.old`""}
+  [pscustomobject]@{Name='python.exe';ProcessId=458;CommandLine="python.exe -u E:\other\helper.py `"$agent`""}
+ }
+ function Get-Process {
+  [CmdletBinding()]param($Id)
+  $p=[pscustomobject]@{Id=$Id;Handle=1;HasExited=-not $script:agentActive;StartTime=$script:metricsStarted}
+  $p | Add-Member ScriptMethod Kill { $script:stops += $this.Id }
+  $p | Add-Member ScriptMethod Dispose {}
+  $p
+ }
  function Test-MetricsProcessActive {param($ProcessId) $script:agentActive }
  function Test-MetricsEndpointBind {param($Port,$HostName) $script:portAvailable }
  function Test-PythonModules {param($Path,$Modules) $true }
- function Get-NetTCPConnection { [CmdletBinding()]param($State) [pscustomobject]@{LocalPort=18766;OwningProcess=123} }
+ function Get-NetTCPConnection { [CmdletBinding()]param($State,$LocalPort) [pscustomobject]@{LocalPort=18766;OwningProcess=123} }
  function Start-HiddenProcess {param($FilePath,$WorkingDirectory,$ArgumentList,$RedirectStandardOutput,$RedirectStandardError) $script:launches++; [pscustomobject]@{Id=789} }
  try {
+  $script:metricsStarted=$created.AddSeconds(1)
+  if(Get-SnapshotProcess ([pscustomobject]@{ProcessId=123;CreationDate=$created})){throw 'A reused PID must not be a stop target'}
+  $script:metricsStarted=$created
   $blocked=Invoke-TurzxMetricsAgentMaintenance -SideRoot $recoveryRoot -PythonPath 'fake-python' -Restart
   if($blocked.Status-notmatch 'remainingPids=123 metricsPort=18766 metricsPortOwners=123' -or $script:launches-ne0 -or ($script:stops -join ',')-ne'123'){throw 'Only the project collector may be retried; a live owner blocks replacement'}
   $script:agentActive=$false
   $blocked=Invoke-TurzxMetricsAgentMaintenance -SideRoot $recoveryRoot -PythonPath 'fake-python' -Restart
   if($script:launches-ne0){throw 'An unreleased port must block replacement even after process exit'}
+  $script:portAvailable=$true
+  $started=Invoke-TurzxMetricsAgentMaintenance -SideRoot $recoveryRoot -PythonPath 'fake-python' -Restart
+  if($script:launches-ne1 -or $started.Process.Id-ne789 -or ($script:stops -join ',')-ne'123'){throw 'A later retry may start once after the old PID and port have cleared'}
+  $script:launches=0
   $script:agentActive=$true; $script:portAvailable=$false; $script:polls=0
   function Start-Sleep {param($Milliseconds) $script:polls++; $script:agentActive=$script:polls-lt2; $script:portAvailable=$script:polls-ge3 }
   $started=Invoke-TurzxMetricsAgentMaintenance -SideRoot $recoveryRoot -PythonPath 'fake-python' -Restart
   if($script:launches-ne1 -or $started.Process.Id-ne789 -or $script:polls-ne3){throw 'Delayed PID exit and port release must allow replacement in the same maintenance attempt'}
+  if(($script:stops -join ',')-ne'123,123'){throw 'A retry must stop only the exact collector entry point and ignore its completed PID.'}
  } finally { if(Test-Path -LiteralPath $recoveryRoot){Remove-Item -LiteralPath $recoveryRoot -Recurse -Force} }
 }
 'Endpoint regression passed: kernel completion, exclusive bind and independent collector recovery.'
