@@ -58,7 +58,10 @@ NETWORK_INTERFACE_FAILURE_TTL_SECONDS = 30.0
 # the same database snapshot for a second extra tick.
 TIMEAUDIT_CACHE_TTL_SECONDS = 0.75
 TIMEAUDIT_CONNECT_TIMEOUT_SECONDS = 1.0
-TIMEAUDIT_QUERY_TIMEOUT_SECONDS = 1.0
+# The read runs off the render path. Allow short database stalls without making
+# an expired sample usable again or extending the connection and close budgets.
+TIMEAUDIT_QUERY_TIMEOUT_SECONDS = 3.0
+TIMEAUDIT_CLOSE_TIMEOUT_SECONDS = 1.0
 FPS_SAMPLE_FRESH_SECONDS = 10.0
 TOP_PROCESSES_CACHE_TTL_SECONDS = 5.0
 TOP_PROCESSES_HELPER_MAX_AGE_SECONDS = 10.0
@@ -2307,7 +2310,7 @@ async def _read_timeaudit_latest_snapshot_async() -> dict[str, Any]:
         try:
             await asyncio.wait_for(
                 conn.close(),
-                timeout=TIMEAUDIT_QUERY_TIMEOUT_SECONDS,
+                timeout=TIMEAUDIT_CLOSE_TIMEOUT_SECONDS,
             )
         except Exception:
             pass
@@ -2369,6 +2372,9 @@ def read_fps_snapshot() -> dict[str, Any]:
     if sample_age > FPS_SAMPLE_FRESH_SECONDS:
         base["status"] = "stale"
         base["detail"] = f"最近帧样本已过期（{sample_age:.1f}s）"
+        if refresh_error := timeaudit.get("_refresh_error"):
+            explanation = "读取超时" if refresh_error == "TimeoutError" else "读取失败"
+            base["detail"] = f"TimeAudit {explanation}，样本已过期（{sample_age:.1f}s）"
     elif current is not None:
         base["status"] = "active"
         base["detail"] = "TimeAudit 帧采集正常"

@@ -1973,6 +1973,17 @@ class MetricsAgentTests(unittest.TestCase):
         self.assertEqual("error", fps["status"])
         self.assertEqual("TimeoutError", fps["detail"])
 
+    def test_fps_expired_cache_preserves_read_failure_reason(self):
+        timestamp = metrics_agent.dt.datetime.now(metrics_agent.dt.timezone.utc) - metrics_agent.dt.timedelta(seconds=11)
+        with patch.object(
+            metrics_agent, "read_timeaudit_latest_snapshot",
+            return_value={"_status": "ok", "timestamp": timestamp, "current_fps": 144, "_refresh_error": "TimeoutError"},
+        ):
+            fps = metrics_agent.read_fps_snapshot()
+
+        self.assertEqual("stale", fps["status"])
+        self.assertIn("TimeAudit 读取超时", fps["detail"])
+
     def test_fps_idle_does_not_lower_trust(self):
         item = metrics_agent._trust_fps(
             {
@@ -2088,6 +2099,26 @@ class MetricsAgentTests(unittest.TestCase):
             calls["kwargs"]["command_timeout"],
         )
         self.assertTrue(calls["closed"])
+
+    def test_timeaudit_query_allows_a_brief_database_stall(self):
+        class SlowConnection:
+            async def fetchrow(self, query):
+                await metrics_agent.asyncio.sleep(1.25)
+                return {"timestamp": metrics_agent.dt.datetime.now(metrics_agent.dt.timezone.utc), "current_fps": 80}
+
+            async def close(self):
+                pass
+
+        async def connect(*args, **kwargs):
+            return SlowConnection()
+
+        with (
+            patch.object(metrics_agent, "TIMEAUDIT_DSN", "postgresql://local/test"),
+            patch.object(metrics_agent, "_optional_import", return_value=SimpleNamespace(connect=connect)),
+        ):
+            result = metrics_agent.asyncio.run(metrics_agent._read_timeaudit_latest_snapshot_async())
+
+        self.assertEqual(("ok", 80), (result["_status"], result["current_fps"]))
 
     def test_gpu_snapshot_falls_back_with_stable_schema_when_sources_fail(self):
         with (
