@@ -170,7 +170,8 @@ brightness command fails; it is not the normal sleep/shutdown path.
 Metrics startup is health-based rather than process-name-based. If an old Python
 process is still visible while its HTTP endpoint is already dead, the launcher
 waits for port `18765` to release and starts a replacement. The watchdog allows
-60 seconds for this startup recovery before evaluating stream heartbeats.
+150 seconds by default for the first stream heartbeat. Recent startup progress
+can extend that wait up to 300 seconds.
 
 Repeated child exits or heartbeat stalls now open a bounded 30-second circuit:
 the watchdog proves that the previous `TURZX.SideScreen.Stream` process released
