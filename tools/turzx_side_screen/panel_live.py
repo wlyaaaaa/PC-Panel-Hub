@@ -80,13 +80,15 @@ def publish_static(root):
         group.append(text)
     path = root / "docs/live.snapshot.json"
     previous = read_json(path)
-    if previous.get("fingerprint") == digest.hexdigest(): return
+    docs_chars = sum(len("".join(t.split())) for t in docs)
+    if previous.get("fingerprint") == digest.hexdigest() and previous.get("size", {}).get("docs_chars") == docs_chars:
+        return
     at = datetime.now(timezone.utc).isoformat()
-    size = {"at": at, "docs_chars": sum(map(words, docs)), "code_lines": sum(len(t.splitlines()) for t in code),
+    size = {"at": at, "docs_chars": docs_chars, "code_lines": sum(len(t.splitlines()) for t in code),
             "code_chars": sum(len(re.sub(r"\s", "", t)) for t in code)}
-    metrics = {"docs_files": len(docs), "code_files": len(code), "docs_chars_raw": sum(len(re.sub(r"\s", "", t)) for t in docs),
+    metrics = {"docs_files": len(docs), "code_files": len(code), "docs_chars_raw": docs_chars,
                "code_words": sum(map(words, code)), "hs2_note": "曲面屏卡片与刷新时刻由浮层快照提供；未安装新浮层时留空，不以进程状态推测。"}
-    write_json(path, {"v": 1, "at": at, "scope": "按需重算 Git 跟踪的自有文档与源码，含测试；排除配置、依赖、生成物和厂商文件。字数按汉字与连续英文数字下划线串计。",
+    write_json(path, {"v": 1, "at": at, "scope": "按需重算 Git 跟踪的自有文档与源码，含测试；排除配置、依赖、生成物和厂商文件。字数不计空白，代码词数按汉字与连续英文数字下划线串计。",
                       "fingerprint": digest.hexdigest(), "metrics": metrics, "size": size})
 
 

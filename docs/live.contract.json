@@ -30,7 +30,7 @@
     {"id":"recent_moves","label":"最近保留下来的曲面屏挪窗记录","source":"panel.live","pointer":"/metrics/recent_moves","time":"/guard_at","mode":"live","shape":"list","unit":"条","public":"same","stale_after":30,"note":"好奇：最多保留最近 20 个保护动作中的 HS2 挪窗；只有时刻与动作，不含应用名。"},
     {"id":"docs_files","label":"文档文件","source":"panel.static","pointer":"/metrics/docs_files","mode":"static","unit":"个","public":"same","note":"好奇；"},
     {"id":"code_files","label":"自有代码文件（含测试）","source":"panel.static","pointer":"/metrics/code_files","mode":"static","unit":"个","public":"same","note":"好奇；"},
-    {"id":"docs_chars_raw","label":"文档非空白字符","source":"panel.static","pointer":"/metrics/docs_chars_raw","mode":"static","unit":"字","public":"same","note":"好奇：非空白 Unicode 字符；页顶文档字数按汉字和连续英文数字串（含下划线）计。"},
+    {"id":"docs_chars_raw","label":"文档非空白字符","source":"panel.static","pointer":"/metrics/docs_chars_raw","mode":"static","unit":"字","public":"same"},
     {"id":"code_chars","label":"代码非空白字符","source":"panel.static","pointer":"/size/code_chars","mode":"static","unit":"字","public":"same","note":"好奇；"},
     {"id":"code_words","label":"代码中的汉字和连续英文数字串（含下划线）","source":"panel.static","pointer":"/metrics/code_words","mode":"static","unit":"字","public":"same","note":"好奇；"}
   ],
